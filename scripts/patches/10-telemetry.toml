@@ -1,0 +1,258 @@
+# Everything the viewer reports or fetches on its own that is not the grid.
+#
+# Release check, update download and update policy, login news, crash reports,
+# GIF service counters and Linden Lab's viewer statistics are cut at the
+# function that performs the request. Parsing and the loopback paths used by
+# upstream's unit tests stay as they are.
+#
+# Deliberately NOT patched: the media-plugin pack download (hash-pinned, the
+# browser needs it) and every identifier sent at login (`mac`, `id0`).
+#
+# Each area has its own id, so one can be skipped alone:
+#   apply_patches.py --root <tree> --skip telemetry-viewerstats
+
+# ------------------------------------------------------------------- updates
+
+[[patch]]
+id = "telemetry-update-feed"
+why = "No release list and no aurora-update-policy.json from GitHub; a loopback test feed still works"
+paths = ["crates/aurora-updater/src/**/*.rs"]
+op = "insert_fn_start"
+fn = "check"
+impl = "Source"
+expect_sig = 'Result<Option<Release>>'
+body = '''
+if !self.loopback {
+    return Ok(None);
+}
+'''
+
+[[patch]]
+id = "telemetry-update-checks"
+why = "The update controller never starts a check, whatever the build profile or version (the periodic check of upstream #2719 included: it reads the same enabled flag); hides Check for updates"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "insert_fn_start"
+fn = "checks_enabled"
+expect_sig = '-> bool'
+body = '''
+if !cfg!(test) {
+    return false;
+}
+'''
+
+[[patch]]
+id = "telemetry-update-download"
+why = "No update archive is ever fetched, so an upstream binary cannot replace this patched build"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "insert_fn_start"
+fn = "download"
+impl = "Updater"
+expect_sig = 'fn download\(&mut self,'
+body = '''
+if !cfg!(test) {
+    return;
+}
+'''
+
+# ---------------------------------------------------------------- login news
+
+[[patch]]
+id = "telemetry-news"
+why = "No login news from GitHub; the login screen keeps the news compiled in (or the last ones kept in the cache)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "insert_fn_start"
+fn = "fetch"
+impl = "Source"
+expect_sig = 'async fn fetch\(&self, language: &str\)'
+body = '''
+if !self.loopback {
+    anyhow::bail!("download disabled in this build");
+}
+'''
+
+# ------------------------------------------------------------- crash reports
+
+[[patch]]
+id = "telemetry-crash-ui"
+why = "The crash window behaves as with the existing Never choice: no Send button, no preview, no browser link; local capture and logs stay"
+paths = ["crates/aurora-viewer/src/**/crash/**/*.rs"]
+op = "literal"
+find = 'let mut mode = record.crash_reports;'
+replace = 'let mut mode = if cfg!(test) { record.crash_reports } else { CrashReports::Never }; // aurora-local-patch: telemetry-crash-ui'
+
+[[patch]]
+id = "telemetry-crash-network"
+why = "The only HTTP client of the crash reports (device flow, token refresh, issue creation) never exists"
+paths = ["crates/aurora-viewer/src/**/crash/**/*.rs"]
+op = "replace_fn_body"
+fn = "client"
+expect_sig = 'Result<reqwest::Client, Failure>'
+body = '''
+Err(Failure::Network)
+'''
+
+[[patch]]
+id = "telemetry-bug-report-network"
+why = "The bug report form is commented out upstream today (mod bug_report); if it comes back its GitHub client stays dead"
+paths = ["crates/aurora-viewer/src/**/bug_report/**/*.rs"]
+op = "replace_fn_body"
+fn = "client"
+expect_sig = 'Result<reqwest::Client, Failure>'
+required = false
+body = '''
+Err(Failure::Network)
+'''
+
+# ---------------------------------------------------------- GIF service counters
+
+[[patch]]
+id = "telemetry-gif-ping"
+why = "GIPHY's analytics links (shown, clicked, sent) are not called; GIF search itself is untouched"
+paths = ["crates/aurora-viewer/src/**/gif_search*.rs", "crates/aurora-viewer/src/**/gif_search/**/*.rs"]
+op = "replace_fn_body"
+fn = "ping"
+expect_sig = 'async fn ping\(client: &reqwest::Client, url: String\)'
+body = '''
+let _ = (client, url);
+'''
+
+[[patch]]
+id = "telemetry-gif-share"
+why = "KLIPY's sent-GIF counter is not called; GIF search itself is untouched"
+paths = ["crates/aurora-viewer/src/**/gif_search*.rs", "crates/aurora-viewer/src/**/gif_search/**/*.rs"]
+op = "replace_fn_body"
+fn = "share"
+expect_sig = 'async fn share\(client: &reqwest::Client, url: String, body: String\)'
+body = '''
+let _ = (client, url, body);
+'''
+
+# ------------------------------------------------------------ viewer statistics
+#
+# Disabled on purpose. The Second Life Third Party Viewer Policy, section 2.h, says
+# users and developers must not omit this packet or circumvent the collection, and
+# section 8 allows suspending accounts. Section 2.c.i also forbids masking the MAC
+# address, so stripping that field is no alternative. Enabling this risks the
+# account; it is the owner's decision alone.
+
+[[patch]]
+id = "telemetry-viewerstats"
+why = "Linden Lab's ViewerStats report (MAC address, hashed serial, hardware, usage) is not posted; login fields are untouched"
+enabled = false
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "literal"
+fn = "send_viewer_stats"
+find = 'crate::viewer_stats::post(&http, &url, &body).await;'
+replace = 'let _ = (&http, &url, &body); // aurora-local-patch: telemetry-viewerstats'
+
+# -------------------------------------------------------------------- guards
+
+[[guard]]
+id = "new-github-report-api"
+why = "A file other than the two known report modules talks to GitHub's issues API or device flow: new reporting code, read it and patch it (reported as file:1)"
+paths = ["crates/**/*.rs"]
+level = "fail"
+# Whole-file match: the lookahead skips the two modules already covered above,
+# recognised by the first line of their documentation.
+pattern = '''\A(?![\s\S]*?^//! (?:Crash reports sent as GitHub issues|Browser links and optional GitHub App device))[\s\S]*?(?:github\.com/login/device|github\.com/login/oauth|grant-type:device_code|api\.github\.com/repos/[^"\s]*/issues)'''
+
+[[guard]]
+id = "new-telemetry-sdk"
+why = "A crash or analytics SDK became a dependency"
+paths = ["Cargo.toml", "crates/*/Cargo.toml"]
+level = "fail"
+pattern = '^\s*(?:sentry|opentelemetry|bugsnag|bugsplat|posthog|mixpanel|rollbar|datadog|crashpad|breakpad|minidump-writer|crash-handler)[\w-]*\s*[=.]'
+
+[[guard]]
+id = "new-github-endpoints"
+why = "A new address on GitHub's API or raw files: it may be another check or feed"
+paths = ["crates/**/*.rs"]
+level = "warn"
+pattern = 'https?://(?:api\.github\.com|uploads\.github\.com|raw\.githubusercontent\.com|gist\.githubusercontent\.com)[^"\s]*'
+allow = [
+    'https://api\.github\.com/repos/Aurora-Viewer/Aurora-Viewer/(?:releases\?per_page=100|issues)',
+    'https://raw\.githubusercontent\.com/Aurora-Viewer/Aurora-Viewer/(?:main/news/|feat/actualites-md/news/?|\.\./\.\./Somebody/Else/main/)?',
+    'https?://raw\.githubusercontent\.com/Aurora-Viewer/Aurora-Viewer/main/news/',
+    'https://raw\.githubusercontent\.com/(?:x|Somebody/Aurora-Viewer/main/news/)',
+    'https://raw\.githubusercontent\.com\.example\.org/Aurora-Viewer/Aurora-Viewer/main/news/',
+]
+
+[[guard]]
+id = "viewer-stats-new-caller"
+why = "Something posts the viewer statistics outside send_viewer_stats (also shown when telemetry-viewerstats is skipped)"
+paths = ["crates/**/*.rs"]
+level = "warn"
+pattern = 'viewer_stats::post\s*\('
+
+[[guard]]
+id = "bug-report-reenabled"
+why = "The bug report form came back: check that telemetry-bug-report-network applied and that its menu entry does not dead-end"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+level = "warn"
+pattern = '^[ \t]*(?:pub(?:\([a-z]+\))?[ \t]+)?mod[ \t]+bug_report[ \t]*;'
+
+[[guard]]
+id = "new-telemetry-words"
+why = "New code talks about telemetry or analytics"
+paths = ["crates/**/*.rs"]
+level = "warn"
+pattern = '^(?!.*aurora-local-patch).*(?i:telemetry|analytics|pingback|bugsnag|bugsplat|crashpad|breakpad|posthog|mixpanel).*$'
+allow = [
+    '\s*(?:icon: )?"device-desktop-analytics",',
+    '/// sent \(its "analytics" object\)\.',
+    '\s*g\["analytics"\]\[name\]\["url"\]',
+    '/// A GIPHY analytics link, with the time and the id it asks for\.',
+    '/// Call a GIPHY analytics link \(its answer is not used\)\.',
+    '\s*log::debug!\("GIF search: analytics: \{e\}"\);',
+    'fn analytics_and_share_requests\(\) \{',
+    '\s*"https://giphy-analytics\.giphy\.com/v2/pingback_simple\?analytics_response_payload=AAAA&action_type=SENT",',
+    '\s*assert_eq!\(get\(&q, "analytics_response_payload"\)\.as_deref\(\), Some\("AAAA"\), "kept as given"\);',
+]
+
+[[guard]]
+id = "new-spawned-processes"
+why = "The viewer starts a new kind of process: is it a reporter or a downloader?"
+paths = ["crates/**/*.rs"]
+level = "warn"
+pattern = 'Command::new\((?:[^()\n]|\([^()\n]*\))*\)'
+allow = [
+    'Command::new\("(?:explorer|open|xdg-open|cmd|git|sleep)"\)',
+    'Command::new\((?:program|executable|launcher)\)',
+    'Command::new\(std::env::current_exe\(\)\?\)',
+    'Command::new\(exe\)', # restart_with_vr: the viewer restarting itself
+    'Command::new\(self\.root\.join\("helper\.exe"\)\)',
+    'Command::new\(plan\.install\.join\(EXE\)\)',
+    'Command::new\(&?tool\)', # credentials-sealed: the host's sealed-cred, from $HOME, no network
+]
+
+[[guard]]
+id = "new-egress-hosts"
+why = "A URL host not seen before in the sources: a new endpoint needs a human look"
+paths = ["crates/**/*.rs"]
+level = "warn"
+pattern = 'https?://[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?'
+allow = [
+    # Loopback, private and documentation addresses.
+    'https?://(?:127\.0\.0\.1|localhost|192\.168\.\d+\.\d+|192\.0\.2\.\d+)',
+    # Reserved names of the tests, look-alikes of real hosts included.
+    '(?i)https?://(?:[a-z0-9\-]+\.)*(?:example|exemple|test|invalid)(?:\.(?:com|org|net))?',
+    # Single-label placeholders of the tests.
+    'https?://(?:a|anything|bake|cap|h|host|m|me|name|s|search|sim|someone|user|x)',
+    # Other look-alikes and refused hosts of the tests.
+    'https?://(?:a\.foo\.org|abc\.ngrok-free\.app|badexample\.com|bit\.ly|e\.net|evili\.gyazo\.com|evilsecondlife\.com|linktr\.ee|notgithub\.com|notimgur\.com|notreddit\.com|nottenor\.com|sl-login-demo\.herokuapp\.com|x\.fr|x\.org|xn--secndlife-x9a\.com|xsearch\.secondlife\.com)',
+    # The grid: logins, capabilities, map, web profiles, help, status.
+    '(?i)https?://(?:[a-z0-9\-]+\.)*(?:secondlife\.com|secondlife\.io|secondlife-beta\.com|lindenlab\.com|secondlifegrid\.net|slurl\.com)',
+    'https://agni-secondlife\.io',
+    # GitHub (patched above: releases, news, reports; kept: media pack, links in the browser).
+    'https?://(?:github\.com|api\.github\.com|gist\.github\.com|github\.io|raw\.githubusercontent\.com)',
+    # The project's site, opened in the browser.
+    'https://(?:www\.)?aurora-viewer\.org',
+    'https://auroraviewer\.com',
+    # GIF search with the user's key.
+    'https://(?:api\.giphy\.com|developers\.giphy\.com|giphy-analytics\.giphy\.com|media\.giphy\.com|media1\.giphy\.com|media\.tenor\.com|tenor\.com|api\.klipy\.com|partner\.klipy\.com|static\.klipy\.com)',
+    # Link previews and their trusted hosts.
+    'https?://(?:www\.|m\.|old\.|new\.|np\.|mobile\.|music\.)?(?:reddit\.com|redd\.it|youtube\.com|youtube-nocookie\.com|youtu\.be|twitter\.com|x\.com|flickr\.com|imgur\.com|gyazo\.com|bsky\.app|fxtwitter\.com|prnt\.sc|prntscr\.com)',
+    'https?://(?:api\.gyazo\.com|i\.gyazo\.com|thumb\.gyazo\.com|i\.imgur\.com|s\.imgur\.com|i\.redd\.it|preview\.redd\.it|b\.thumbs\.redditmedia\.com|i\.ytimg\.com|pbs\.twimg\.com|cdn\.syndication\.twimg\.com|cdn\.bsky\.app|video\.bsky\.app|public\.api\.bsky\.app|flic\.kr|farm4\.staticflickr\.com|live\.staticflickr\.com|image\.prntscr\.com|discord\.gg|upload\.wikimedia\.org|fr\.wikipedia\.org|docs\.google\.com|www\.dropbox\.com)',
+    # Written in comments and tests only, or opened in the browser.
+    'https?://(?:www\.w3\.org|www\.gnu\.org|www\.boost\.org|www\.theorangeduck\.com|learn\.microsoft\.com|guillaumeblanc\.github\.io|www\.nvidia\.com|www\.amd\.com|www\.intel\.com|www\.firestormviewer\.org|firestorm-viewer\.download|casperlet\.com|www\.casperdns\.com|www\.casperpanel\.com)',
+]

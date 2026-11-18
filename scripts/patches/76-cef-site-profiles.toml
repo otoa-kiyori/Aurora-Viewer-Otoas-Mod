@@ -1,0 +1,326 @@
+# Per-site cookie keeping for the embedded browser (CEF), configurable in
+# Preferences › Network and cache › Web browser › "Keep cookies for these
+# sites".
+#
+# Upstream gives every CEF plugin process (in-world face, HUD, web window)
+# its own Chromium profile, `<cache>/cef/cef_cache/<plugin pid>`, left on
+# disk until the next start deletes it (cef_cache.rs). Here
+# (files/cef-site-profiles/site_profiles.rs):
+#
+# - Kept tier: a browser whose first address is on a listed site (a domain,
+#   with or without its subdomains) gets that site's own profile,
+#   `<cache>/cef/cef-sites/<domain>/`, kept across restarts and isolated
+#   from every other site. Nothing is pruned inside it (YouTube signs in
+#   through google.com). A second browser of the same site while the first
+#   runs gets the normal tier (Chromium cannot share a profile); the log
+#   says so.
+# - Normal tier, every other site: a private profile (upstream's
+#   private_profile.rs, under `<cache>/web-private/`), deleted once its
+#   plugin process has exited, and at the next start for what an exit or a
+#   crash left. Not a memory-only profile: MediaPluginCEF always builds a
+#   non-empty root_cache_path itself (`<cache_path>cef_cache/<pid>`, see the
+#   module's documentation).
+#
+# Default list: empty, so every site is in the normal tier. The settings
+# field (`keep_cookies_sites`) has a serde default: older settings files
+# load; backups carry it like any other preference. The OpenID cookie of
+# the web profiles and the Marketplace is still given at each launch
+# (web_view.rs), in both tiers. Upstream's start clean-up reads only
+# `cef/cef_cache/` and `web-private/`, never `cef/cef-sites/` (a unit test
+# runs it over a kept profile). The search window's private browser is left
+# as upstream wrote it.
+#
+# The guard below fails the build when a new CEF launch appears outside
+# the two hooked sites (it would bypass the tiers). Apply or skip the whole
+# file, not one patch of it.
+
+# --- the profile choice, in aurora-viewer's media module
+
+[[patch]]
+id = "cef-site-profiles-module"
+why = "the tiers, the list's rules and the kept profiles' folders, with their tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/media/site_profiles.rs"]
+source = "files/cef-site-profiles/site_profiles.rs"
+
+[[patch]]
+id = "cef-site-profiles-mod"
+why = "declare the module beside private_profile, whose profiles the normal tier uses"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "pub mod private_profile;"
+replace = """pub mod private_profile;
+pub mod site_profiles; // aurora-local-patch: cef-site-profiles-mod"""
+
+# --- aurora-media: the plugin keeps the viewer's hold on its profile
+
+[[patch]]
+id = "cef-site-profiles-plugin-field"
+why = "a value dropped with the plugin, after its process was told to stop: the hold on the profile it was given"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+find = """    pub loaded_duration: f64,
+}"""
+replace = """pub loaded_duration: f64,
+    // aurora-local-patch: cef-site-profiles-plugin-field
+    /// Dropped last, after `process` (whose drop lets the plugin exit):
+    /// what the viewer keeps for this plugin, such as its browser profile.
+    profile_hold: Option<Box<dyn std::any::Any + Send + Sync>>,
+}"""
+
+[[patch]]
+id = "cef-site-profiles-plugin-init"
+why = "goes with cef-site-profiles-plugin-field"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+fn = "launch_with"
+find = """            loaded_duration: 0.0,
+        };"""
+replace = """loaded_duration: 0.0,
+            profile_hold: None, // aurora-local-patch: cef-site-profiles-plugin-init
+        };"""
+
+[[patch]]
+id = "cef-site-profiles-plugin-hold"
+why = "the setter of cef-site-profiles-plugin-field"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+find = """    /// The system id of the plugin process (SLPlugin) while it runs.
+    pub fn pid(&self) -> Option<u32> {"""
+replace = """// aurora-local-patch: cef-site-profiles-plugin-hold
+    /// Keep `hold` until this plugin is dropped (after its process).
+    pub fn keep_until_dropped(&mut self, hold: Box<dyn std::any::Any + Send + Sync>) {
+        self.profile_hold = Some(hold);
+    }
+
+    /// The system id of the plugin process (SLPlugin) while it runs.
+    pub fn pid(&self) -> Option<u32> {"""
+
+# --- the two CEF launch sites
+
+[[patch]]
+id = "cef-site-profiles-in-world"
+why = "in-world faces, HUDs and parcel media: the profile of the face's address at this launch"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''match MediaPlugin::launch_in_world(paths, plugin_name, m.width, m.height, &browser, "") {'''
+replace = '''match crate::media::site_profiles::launch(plugin_name, &m.url, &browser, |browser| {
+                    MediaPlugin::launch_in_world(paths, plugin_name, m.width, m.height, browser, "") // aurora-local-patch: cef-site-profiles-in-world
+                }) {'''
+
+[[patch]]
+id = "cef-site-profiles-web-view"
+why = "web windows (profiles' Feed, Marketplace, web browser, link previews): the profile of the page's first address; the search tab's private browser stays as it is"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''                (Ok(settings), Some(paths)) => Some(MediaPlugin::launch(
+                    paths,
+                    "media_plugin_cef",
+                    px.0,
+                    px.1,
+                    settings.as_ref().unwrap_or(browser),
+                    "",
+                )),'''
+replace = '''// aurora-local-patch: cef-site-profiles-web-view
+                (Ok(Some(settings)), Some(paths)) => Some(MediaPlugin::launch(paths, "media_plugin_cef", px.0, px.1, settings, "")), // aurora-local-patch: cef-site-profiles-web-view (private)
+                (Ok(None), Some(paths)) => Some(crate::media::site_profiles::launch(
+                    "media_plugin_cef",
+                    &self.url,
+                    browser,
+                    |browser| MediaPlugin::launch(paths, "media_plugin_cef", px.0, px.1, browser, ""), // aurora-local-patch: cef-site-profiles-web-view
+                )),'''
+
+# --- the setting, its publication, the start and the exit
+
+[[patch]]
+id = "cef-site-profiles-setting"
+why = "the list, in settings.json (absent from older files: empty)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub browser_home_page: String,"
+replace = """pub browser_home_page: String,
+    // aurora-local-patch: cef-site-profiles-setting
+    /// The sites whose browsers keep their cookies across restarts, each in
+    /// a profile of its own (Preferences › Network and cache; local patch
+    /// set, media/site_profiles.rs). Empty: no browser keeps anything.
+    pub keep_cookies_sites: Vec<crate::media::site_profiles::KeptSite>,"""
+
+[[patch]]
+id = "cef-site-profiles-setting-default"
+why = "goes with cef-site-profiles-setting"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "browser_home_page: crate::ui::web_browser::DEFAULT_HOME.into(),"
+replace = """browser_home_page: crate::ui::web_browser::DEFAULT_HOME.into(),
+            keep_cookies_sites: Vec::new(), // aurora-local-patch: cef-site-profiles-setting-default"""
+
+[[patch]]
+id = "cef-site-profiles-configure-start"
+why = "the launches read the list from the start"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "crate::link_trust::configure(&settings.trusted_sites);"
+replace = """crate::link_trust::configure(&settings.trusted_sites);
+        crate::media::site_profiles::configure(&settings.keep_cookies_sites); // aurora-local-patch: cef-site-profiles-configure-start"""
+
+[[patch]]
+id = "cef-site-profiles-configure-change"
+why = "and after each change of the preferences (a restore included)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "crate::link_trust::configure(&self.settings.trusted_sites);"
+replace = """crate::link_trust::configure(&self.settings.trusted_sites);
+            crate::media::site_profiles::configure(&self.settings.keep_cookies_sites); // aurora-local-patch: cef-site-profiles-configure-change"""
+
+[[patch]]
+id = "cef-site-profiles-sweep"
+why = "at start, finish the deletions of cleared sites an exit cut short (only those, never a kept profile)"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = ".spawn(move || media::private_profile::sweep(&private_profiles));"
+replace = """.spawn(move || media::private_profile::sweep(&private_profiles));
+    // aurora-local-patch: cef-site-profiles-sweep
+    let site_profiles = media::site_profiles::sites_root();
+    let _ = std::thread::Builder::new()
+        .name("aurora-site-profiles".into())
+        .spawn(move || media::site_profiles::sweep(&site_profiles));"""
+
+[[patch]]
+id = "cef-site-profiles-finish"
+why = "at exit, wait a little for the plugins to exit: the normal tier's profiles are then deleted now, not at the next start"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = """    drop(app);
+    media::private_profile::finish("""
+replace = """drop(app);
+    media::site_profiles::finish(std::time::Duration::from_secs(5)); // aurora-local-patch: cef-site-profiles-finish
+    media::private_profile::finish("""
+
+# --- Preferences
+
+[[patch]]
+id = "cef-site-profiles-prefs-module"
+why = "the row: the list, add, remove, subdomains, Clear cookies"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/ui/options/site_cookies.rs"]
+source = "files/cef-site-profiles/site_cookies.rs"
+
+[[patch]]
+id = "cef-site-profiles-prefs-mod"
+why = "declare it beside the pages (it uses Cx)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = "mod scale;"
+replace = """mod scale;
+mod site_cookies; // aurora-local-patch: cef-site-profiles-prefs-mod"""
+
+[[patch]]
+id = "cef-site-profiles-prefs-row"
+why = "in Network and cache › Web browser, at the end of the group, after the home page and the JavaScript switch (where the browser's settings live)"
+paths = ["crates/aurora-viewer/src/ui/options/pages/network.rs"]
+op = "literal"
+find = """            &field!(media.javascript),
+        );
+    });"""
+replace = """&field!(media.javascript),
+        );
+        super::super::site_cookies::rows(cx); // aurora-local-patch: cef-site-profiles-prefs-row
+    });"""
+
+[[patch]]
+id = "cef-site-profiles-icon-file"
+why = "the crate embeds a subset of Tabler: add filled cookie from assets/tabler-icons (Clear cookies)"
+op = "add_file"
+paths = ["crates/aurora-viewer/assets/icons/tabler/filled/cookie.svg"]
+source = "files/cef-site-profiles/cookie.svg"
+
+[[patch]]
+id = "cef-site-profiles-icon"
+why = "embed Tabler's filled cookie (not used for another function)"
+paths = ["crates/aurora-viewer/src/ui/icons.rs"]
+op = "regex"
+pattern = '^([ \t]*)"copy",\r?$'
+replace = '''\1"cookie", // aurora-local-patch: cef-site-profiles-icon
+\1"copy",'''
+
+[[patch]]
+id = "cef-site-profiles-text-en"
+why = "the row's texts (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-browser-home-page-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: cef-site-profiles-text-en
+ui-options-keep-cookies = Keep cookies for these sites
+ui-options-keep-cookies-hint = Web pages of these sites (on a face, a HUD or in a window) keep their cookies and sign-ins after a restart, each site in a browser profile of its own. A page belongs to the site of the first address it opens. Every other page forgets everything once it closes.
+ui-options-keep-cookies-none = No site: no page keeps its cookies.
+ui-options-keep-cookies-add = Add
+ui-options-keep-cookies-add-hint = example.com
+ui-options-keep-cookies-invalid = Type a site name such as example.com (not an IP address).
+ui-options-keep-cookies-duplicate = { $domain } is already in the list.
+ui-options-keep-cookies-subdomains = Subdomains
+ui-options-keep-cookies-subdomains-hint = On: { $domain } and all its subdomains. Off: { $domain } and www.{ $domain } only.
+ui-options-keep-cookies-remove = Remove this site and delete its cookies
+ui-options-keep-cookies-clear = Clear cookies
+ui-options-keep-cookies-clear-hint = Delete everything this site's pages kept: cookies, sign-ins, history and cache.
+ui-options-keep-cookies-cleared = The cookies of { $domain } were deleted.
+ui-options-keep-cookies-in-use = A page of { $domain } is open: close it or stop its media, then try again.
+ui-options-keep-cookies-failed = The cookies of { $domain } could not be deleted: { $error }'''
+
+[[patch]]
+id = "cef-site-profiles-text-fr"
+why = "goes with cef-site-profiles-text-en (French); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-browser-home-page-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: cef-site-profiles-text-fr
+ui-options-keep-cookies = Garder les cookies de ces sites
+ui-options-keep-cookies-hint = Les pages web de ces sites (sur une face, un HUD ou dans une fenêtre) gardent leurs cookies et leurs connexions après un redémarrage, chaque site dans un profil de navigateur à lui. Une page appartient au site de la première adresse qu'elle ouvre. Toutes les autres pages oublient tout dès qu'elles se ferment.
+ui-options-keep-cookies-none = Aucun site : aucune page ne garde ses cookies.
+ui-options-keep-cookies-add = Ajouter
+ui-options-keep-cookies-add-hint = exemple.com
+ui-options-keep-cookies-invalid = Saisissez un nom de site, par exemple exemple.com (pas une adresse IP).
+ui-options-keep-cookies-duplicate = { $domain } est déjà dans la liste.
+ui-options-keep-cookies-subdomains = Sous-domaines
+ui-options-keep-cookies-subdomains-hint = Activé : { $domain } et tous ses sous-domaines. Désactivé : { $domain } et www.{ $domain } seulement.
+ui-options-keep-cookies-remove = Retirer ce site et supprimer ses cookies
+ui-options-keep-cookies-clear = Effacer les cookies
+ui-options-keep-cookies-clear-hint = Supprime tout ce que les pages de ce site ont gardé : cookies, connexions, historique et cache.
+ui-options-keep-cookies-cleared = Les cookies de { $domain } ont été supprimés.
+ui-options-keep-cookies-in-use = Une page de { $domain } est ouverte : fermez-la ou arrêtez son média, puis réessayez.
+ui-options-keep-cookies-failed = Les cookies de { $domain } n'ont pas pu être supprimés : { $error }'''
+
+[[patch]]
+id = "cef-site-profiles-text-ja"
+why = "goes with cef-site-profiles-text-en (Japanese); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-browser-home-page-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: cef-site-profiles-text-ja
+ui-options-keep-cookies = Cookieを保持するサイト
+ui-options-keep-cookies-hint = これらのサイトのWebページ（面、ＨＵＤ、ウィンドウ）は、再起動後もCookieとログイン状態を保持します。サイトごとに専用のブラウザプロファイルを使います。ページは最初に開いたアドレスのサイトに属します。その他のページは、閉じるとすべてを消去します。
+ui-options-keep-cookies-none = サイトはありません。Cookieを保持するページはありません。
+ui-options-keep-cookies-add = 追加
+ui-options-keep-cookies-add-hint = example.com
+ui-options-keep-cookies-invalid = example.comのようなサイト名を入力してください（ＩＰアドレスは使えません）。
+ui-options-keep-cookies-duplicate = { $domain }はすでにリストにあります。
+ui-options-keep-cookies-subdomains = サブドメイン
+ui-options-keep-cookies-subdomains-hint = オン：{ $domain }とそのすべてのサブドメイン。オフ：{ $domain }とwww.{ $domain }のみ。
+ui-options-keep-cookies-remove = このサイトを削除し、Cookieも消去
+ui-options-keep-cookies-clear = Cookieを消去
+ui-options-keep-cookies-clear-hint = このサイトのページが保持したCookie、ログイン状態、履歴、キャッシュをすべて削除します。
+ui-options-keep-cookies-cleared = { $domain }のCookieを削除しました。
+ui-options-keep-cookies-in-use = { $domain }のページが開いています。閉じるかメディアを停止してから、もう一度お試しください。
+ui-options-keep-cookies-failed = { $domain }のCookieを削除できませんでした：{ $error }'''
+
+# --- a CEF launch that would bypass the tiers
+
+[[guard]]
+id = "cef-site-profiles-new-launch"
+why = "A browser plugin is launched outside the two places that choose its profile (update.rs, web_view.rs): it would bypass the kept and normal tiers; route it through media::site_profiles::launch"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+level = "fail"
+pattern = '^(?!.*aurora-local-patch).*MediaPlugin::launch(?:_in_world)?\s*\(.*$'

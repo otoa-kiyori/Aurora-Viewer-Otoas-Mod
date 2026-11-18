@@ -1,0 +1,1373 @@
+# Open-sea swell: Preferences › Graphics › Aurora water, "Ocean swell" (0 to
+# 5 m, default 0) and "Objects ride the swell" (off by default), with
+# enhanced water and its geometric waves on.
+#
+# Long rolling swells on open water: four Gerstner waves of 54 to 131 m
+# travelling the way the environment's big water wave (EEP wave1) scrolls,
+# within about 25 degrees of it, slowly grouped into sets. Their crests stay
+# at the water's own level, where today's waves reach; the extra height is
+# all below it: the surface drops by depth / 2 * openness * (s - 1), s in
+# [-1, 1], so the troughs reach the slider's depth. Today's swell, wakes and
+# micro waves ride on top unchanged.
+#
+# Openness: nothing within 100 m of land, full from 180 m, and no trough
+# within 1 m of the bed. Land is terrain at or above the water (prims and
+# meshes do not count), a missing terrain patch is land, water with no
+# region is open sea. The viewer samples a 128 x 128 field of 16 m cells
+# around the camera (2 km across, moved by 256 m steps, sampled again every
+# 2 s), the distance transform runs on the thread pool
+# (files/ocean-swell/ocean_field.rs), and the field reaches the GPU in the
+# bathymetry texture's rows under its own 64 (now 128 x 192) and two vec4
+# after the shared water uniform's caustics extension (patch 91's 80 bytes
+# stay where they are): no new binding. The CPU model
+# (files/ocean-swell/ocean_swell.rs) mirrors the WGSL; its tests keep the
+# constants and the results equal.
+#
+# The far sea: with the swell on, the water's 64 m patches are drawn out to
+# 1100 m, on an 8 x 8 grid beyond the dense 160 m; the displacement fades to
+# the swell's mean level from 600 to 1000 m (the whole tiles beyond take that
+# mean), the normals keep the swell out to 4 km. Patch edges follow the 8 m
+# chord beyond 150 m and the patch's corners beyond 760 m, so a coarser
+# neighbour meets them: no cracks.
+#
+# What used the flat water and now follows the swell: the camera's
+# waterline (camera_level), the body contacts, our own heave (its limits
+# grow with the depth), the objects' contacts, the particles' kill height
+# and crowns, the underwater light and fog on what lies under the swell,
+# rain and snow at the surface, the refracted water's fog, the underwater
+# sound. The planar reflection and the underwater window's capture take
+# the swell's mean level at the camera. Not followed: the blended faces'
+# water-side split (the lists stay split at the flat height, as the Legacy
+# Viewer splits them), the underside view's own level.
+#
+# "Objects ride the swell": physical linksets floating at the surface and
+# avatars swimming there are drawn higher or lower with it, eased in and
+# out; what sits on or is linked to them follows. Drawing only: the
+# simulator's positions, the physics and the network are untouched.
+#
+# Depth 0 (the default): every path is upstream's; the uniform's new tail
+# stays zero, the shaders take their original lines behind a test of it,
+# the water draws the same records with the same meshes.
+#
+# Demo: AURORA_DEMO=1 AURORA_DEMO_WATER=medium:ocean AURORA_DEMO_OCEAN=5,ride
+# (docs/TESTING.md).
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------ render crate
+
+[[patch]]
+id = "ocean-swell-module"
+why = "the swell's CPU model, the land-distance field, the uniform's tail, tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/ocean_swell.rs"]
+source = "files/ocean-swell/ocean_swell.rs"
+
+[[patch]]
+id = "ocean-swell-mod"
+why = "a public child module of water_effects: it extends WaterGround and WaterGpu"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "pub const MAX_WATER_EVENTS: usize = 256;"
+replace = """// aurora-local-patch: ocean-swell-mod
+#[path = "ocean_swell.rs"]
+pub mod ocean;
+
+pub const MAX_WATER_EVENTS: usize = 256;"""
+
+[[patch]]
+id = "ocean-swell-effects-field"
+why = "the swell's depth travels with the other water choices"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """    pub splashes: bool,
+    pub bubbles: bool,
+}
+
+impl Default for WaterEffects {"""
+replace = """pub splashes: bool,
+    pub bubbles: bool,
+    // aurora-local-patch: ocean-swell-effects-field
+    /// Open-sea swell: how far its troughs go below the water (m, 0: off;
+    /// ocean_swell.rs).
+    pub ocean_depth: f32,
+}
+
+impl Default for WaterEffects {"""
+
+[[patch]]
+id = "ocean-swell-effects-default"
+why = "off: what upstream draws"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """            splashes: true,
+            bubbles: true,
+        }
+    }
+}
+
+impl WaterEffects {"""
+replace = """splashes: true,
+            bubbles: true,
+            ocean_depth: 0.0, // aurora-local-patch: ocean-swell-effects-default
+        }
+    }
+}
+
+impl WaterEffects {"""
+
+[[patch]]
+id = "ocean-swell-ground-field"
+why = "the field and the swell's direction travel with the bathymetry, to the renderer and to the CPU surface"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """    /// ground height, water height; unknown cells are deep void water.
+    pub heights: std::sync::Arc<[[f32; 2]]>,
+}"""
+replace = """/// ground height, water height; unknown cells are deep void water.
+    pub heights: std::sync::Arc<[[f32; 2]]>,
+    // aurora-local-patch: ocean-swell-ground-field
+    /// Open-sea swell: its field, direction and values at the camera
+    /// (ocean_swell.rs); empty while it is off.
+    pub ocean: ocean::Ocean,
+}"""
+
+[[patch]]
+id = "ocean-swell-camera-level"
+why = "the camera's waterline meets the swell (upstream's surface_level while it is off)"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "camera_level"
+find = "surface_level(xy, time, settings, level, ground)"
+replace = "self.surface(xy, time, settings, level, ground) // aurora-local-patch: ocean-swell-camera-level"
+
+[[patch]]
+id = "ocean-swell-ground-texture"
+why = "the field's rows under the bathymetry's 64; the bathymetry keeps its texels and lookups"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """            label: Some("water bathymetry"),
+            size: wgpu::Extent3d {
+                width: WATER_GROUND_SIZE,
+                height: WATER_GROUND_SIZE,"""
+replace = """label: Some("water bathymetry"),
+            // aurora-local-patch: ocean-swell-ground-texture
+            // (and the open-sea swell's field in the rows under its 64)
+            size: wgpu::Extent3d {
+                width: ocean::GROUND_WIDTH,
+                height: ocean::GROUND_HEIGHT,"""
+
+[[patch]]
+id = "ocean-swell-uniform"
+why = "the shared water uniform gets the swell's two vec4 after its contents (patch 91 makes them the caustics' extension), zero (off) at creation"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = "let uniform = crate::gpu_alloc::buffer_init("
+replace = """// aurora-local-patch: ocean-swell-uniform
+        let uniform = ocean::uniform_buffer("""
+
+[[patch]]
+id = "ocean-swell-gpu-field"
+why = "WaterGpu remembers the uploaded field and the uniform's tail"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "ground_snapshot: Option<std::sync::Arc<[[f32; 2]]>>,"
+replace = """ground_snapshot: Option<std::sync::Arc<[[f32; 2]]>>,
+    ocean: ocean::Gpu, // aurora-local-patch: ocean-swell-gpu-field"""
+
+[[patch]]
+id = "ocean-swell-gpu-init"
+why = "goes with ocean-swell-gpu-field"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = """            ground_snapshot: None,
+            group,"""
+replace = """ground_snapshot: None,
+            ocean: Default::default(), // aurora-local-patch: ocean-swell-gpu-init
+            group,"""
+
+[[patch]]
+id = "ocean-swell-prepare"
+why = "each frame, after the shared uniform: the field and the tail, written only when they change"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "prepare"
+find = "queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));"
+replace = """queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
+        self.prepare_ocean(queue, settings, ground, valid_ground); // aurora-local-patch: ocean-swell-prepare"""
+
+[[patch]]
+id = "ocean-swell-furrow-test"
+why = "the furrow test's bathymetry names every field"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """        let ground = WaterGround {
+            region: 1,
+            origin: [-80.0; 2],
+            extent: 160.0,
+            heights: vec![[0.0, 20.0]; 4096].into(),
+        };"""
+replace = """let ground = WaterGround {
+            region: 1,
+            origin: [-80.0; 2],
+            extent: 160.0,
+            heights: vec![[0.0, 20.0]; 4096].into(),
+            ocean: Default::default(), // aurora-local-patch: ocean-swell-furrow-test
+        };"""
+
+[[patch]]
+id = "ocean-swell-reflection-level"
+why = "the planar reflection and the underwater window's capture take the swell's mean level at the camera"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = ".camera_level(f.camera_pos.truncate(), f.time, self.settings.water_effects, f.water_height);"
+replace = """.camera_level(f.camera_pos.truncate(), f.time, self.settings.water_effects, f.water_height);
+        // aurora-local-patch: ocean-swell-reflection-level
+        // the plane the reflection and the window's capture are cut at: the
+        // open-sea swell's mean level here, the flat water without it
+        let reflection_level = lists.water_ground.ocean.reflection_level(f.water_height);"""
+
+[[patch]]
+id = "ocean-swell-air-clip"
+why = "goes with ocean-swell-reflection-level: the window's capture"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "air.clip_plane = [0.0, 0.0, 1.0, -f.water_height];"
+replace = "air.clip_plane = [0.0, 0.0, 1.0, -reflection_level]; // aurora-local-patch: ocean-swell-air-clip"
+
+[[patch]]
+id = "ocean-swell-refl-plane"
+why = "goes with ocean-swell-reflection-level: the planar reflection"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "let mut u = refl_frame(self, Vec3::Z, -f.water_height, 0.05, false);"
+replace = "let mut u = refl_frame(self, Vec3::Z, -reflection_level, 0.05, false); // aurora-local-patch: ocean-swell-refl-plane"
+
+# ------------------------------------------------------------ shaders
+
+[[patch]]
+id = "ocean-swell-spectrum"
+why = "the long swell and the openness, pure functions shared by every water shader and the tests"
+paths = ["crates/aurora-render/src/shaders/water_spectrum.wgsl"]
+op = "literal"
+find = """        curvature-=vec3<f32>(k.x*k.x,k.x*k.y,k.y*k.y)*sin(phase)*WATER_MICRO_AMPLITUDES[i];
+    }
+    return curvature;
+}"""
+replace = """curvature-=vec3<f32>(k.x*k.x,k.x*k.y,k.y*k.y)*sin(phase)*WATER_MICRO_AMPLITUDES[i];
+    }
+    return curvature;
+}
+
+// Open-sea swell (local patch set; ocean_swell.rs mirrors these and its
+// tests keep the constants equal): four long Gerstner waves of 54 to 131 m
+// within about 25 degrees of `wind` (unit, the way they travel), slowly
+// grouped into sets. s in [-1, 1] and its gradient ds; shift the horizontal
+// motion and fold the decrease of the horizontal Jacobian (xx, xy, yy), both
+// per metre of amplitude.
+// aurora-local-patch: ocean-swell-spectrum
+const OCEAN_WAVES=array<vec4<f32>,4>(vec4<f32>(131.0,0.0,0.34,0.0),vec4<f32>(117.0,0.21,0.26,2.1),vec4<f32>(71.3,-0.31,0.22,4.4),vec4<f32>(53.9,0.42,0.18,1.3));
+const OCEAN_STEEPNESS:f32=0.6;
+const OCEAN_SET_LENGTH:f32=860.0;
+const OCEAN_SET_SPEED:f32=7.15;
+const OCEAN_SET_DEPTH:f32=0.25;
+const OCEAN_OPEN_FROM:f32=100.0;
+const OCEAN_OPEN_FULL:f32=180.0;
+const OCEAN_KEEL:f32=1.0;
+struct OceanLong { s: f32, ds: vec2<f32>, shift: vec2<f32>, fold: vec3<f32> };
+fn ocean_long(p:vec2<f32>,time:f32,wind:vec2<f32>)->OceanLong {
+    let ke=6.2831853/OCEAN_SET_LENGTH;
+    let psi=ke*(dot(p,wind)-OCEAN_SET_SPEED*time);
+    let env=1.0-OCEAN_SET_DEPTH*(0.5+0.5*sin(psi));
+    let denv=wind*(-OCEAN_SET_DEPTH*0.5*cos(psi)*ke);
+    var sum=0.0;var dsum=vec2<f32>(0.0);var shift=vec2<f32>(0.0);var fold=vec3<f32>(0.0);
+    for(var i=0u;i<4u;i++) {
+        let w=OCEAN_WAVES[i];
+        let sa=sin(w.y);let ca=cos(w.y);
+        let d=vec2<f32>(wind.x*ca-wind.y*sa,wind.x*sa+wind.y*ca);
+        let k=6.2831853/w.x;
+        let phase=k*dot(p,d)-sqrt(9.81*k)*time+w.w;
+        let s=sin(phase);let c=cos(phase);
+        sum+=w.z*s;
+        dsum+=d*(w.z*k*c);
+        shift+=d*(w.z*OCEAN_STEEPNESS*c);
+        fold+=vec3<f32>(d.x*d.x,d.x*d.y,d.y*d.y)*(w.z*OCEAN_STEEPNESS*k*s);
+    }
+    return OceanLong(env*sum,dsum*env+denv*sum,shift*env,fold*env);
+}
+// The openness (x) and its gradient (yz) from the four texels around a
+// point (distance to land m, water depth m), f its bilinear weights, cell
+// the texel size (m), depth the slider (m): 0 within OCEAN_OPEN_FROM of
+// land, 1 from OCEAN_OPEN_FULL, and never so much that a trough comes
+// within OCEAN_KEEL of the bed.
+fn ocean_openness(a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,d:vec2<f32>,f:vec2<f32>,cell:f32,depth:f32)->vec3<f32> {
+    let v=mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+    let gx=mix(b-a,d-c,f.y)/cell;
+    let gy=(mix(c,d,f.x)-mix(a,b,f.x))/cell;
+    let x=clamp((v.x-OCEAN_OPEN_FROM)/(OCEAN_OPEN_FULL-OCEAN_OPEN_FROM),0.0,1.0);
+    let far=x*x*(3.0-2.0*x);
+    let dfar=6.0*x*(1.0-x)/(OCEAN_OPEN_FULL-OCEAN_OPEN_FROM);
+    let raw=(v.y-OCEAN_KEEL)/max(depth,0.001);
+    let guard=clamp(raw,0.0,1.0);
+    let dguard=select(0.0,1.0/max(depth,0.001),raw>0.0 && raw<1.0);
+    return vec3<f32>(far*guard,vec2<f32>(gx.x,gy.x)*(dfar*guard)+vec2<f32>(gx.y,gy.y)*(dguard*far));
+}"""
+
+[[patch]]
+id = "ocean-swell-controls"
+why = "the shared water uniform as the buffer now holds it, in a struct of its own (WaterFxControls stays as patch 91 extends it, unused): the caustics' whole extension, then the swell's two vec4"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "@group(0) @binding(17) var<uniform> water_fx: WaterFxControls;"
+replace = """// The shared water uniform: WaterFxControls (with the caustics' first vec4,
+// patch 91), caustic_rest the rest of the caustics' extension; ocean: depth
+// (m, 0 off), the swell's direction xy, the far water's openness;
+// ocean_area: the field's origin xy, its cell (m), 1 once loaded
+// (ocean_swell.rs).
+// aurora-local-patch: ocean-swell-controls
+struct WaterFxOcean { area: vec4<f32>, previous: vec4<f32>, clock: vec4<f32>, counts: vec4<u32>, caustic: vec4<f32>, caustic_rest: array<vec4<f32>,4>, ocean: vec4<f32>, ocean_area: vec4<f32> };
+@group(0) @binding(17) var<uniform> water_fx: WaterFxOcean;"""
+
+[[patch]]
+id = "ocean-swell-common"
+why = "the swell's lookups for the surface and its receivers: field, faded displacement, crack-free patch edges, level, shading"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = """    return vec3<f32>(-gradient-wake,0.0);
+}"""
+replace = """return vec3<f32>(-gradient-wake,0.0);
+}
+
+// ---- open-sea swell (local patch set, ocean_swell.rs; off while
+// water_fx.ocean is zero, every caller then takes its original path)
+// aurora-local-patch: ocean-swell-common
+const OCEAN_FIELD_SIZE:i32=128;
+const OCEAN_FIELD_ROW:i32=64;
+const OCEAN_FAR_FROM:f32=600.0;
+const OCEAN_FAR_TO:f32=1000.0;
+const OCEAN_NORMAL_TO:f32=4000.0;
+const OCEAN_DEPTH_MAX:f32=5.0;
+// Patch edges (scene/water.rs draws: the dense grids within 160 m, 8 x 8
+// within 768 m, a quad beyond) follow the 8 m chord from 96 to 150 m and
+// the patch's corners from 700 to 760 m: a coarser neighbour meets them.
+const OCEAN_CHORD:f32=8.0;
+const OCEAN_CHORD_FROM:f32=96.0;
+const OCEAN_CHORD_TO:f32=150.0;
+const OCEAN_CORNER_FROM:f32=700.0;
+const OCEAN_CORNER_TO:f32=760.0;
+const OCEAN_FOAM_FROM:f32=0.04;
+const OCEAN_FOAM_FULL:f32=0.12;
+fn ocean_on()->bool { return water_fx.ocean_area.w>0.5 && water_fx.ocean.x>0.0 && water_fx_on(1u); }
+// The openness (x) and its gradient (yz) at p, from the field in the
+// bathymetry texture's lower rows; outside it the edge holds.
+fn ocean_open(p:vec2<f32>)->vec3<f32> {
+    let n=f32(OCEAN_FIELD_SIZE);
+    let cell=(p-water_fx.ocean_area.xy)/water_fx.ocean_area.z-vec2<f32>(0.5);
+    let pos=clamp(cell,vec2<f32>(0.0),vec2<f32>(n-1.0));
+    let i=vec2<i32>(floor(pos));
+    let j=min(i+vec2<i32>(1),vec2<i32>(OCEAN_FIELD_SIZE-1));
+    let row=vec2<i32>(0,OCEAN_FIELD_ROW);
+    let o=ocean_openness(textureLoad(water_ground,i+row,0).xy,textureLoad(water_ground,vec2<i32>(j.x,i.y)+row,0).xy,
+        textureLoad(water_ground,vec2<i32>(i.x,j.y)+row,0).xy,textureLoad(water_ground,j+row,0).xy,
+        pos-floor(pos),water_fx.ocean_area.z,water_fx.ocean.x);
+    let inside=select(vec2<f32>(0.0),vec2<f32>(1.0),(cell>=vec2<f32>(0.0)) & (cell<=vec2<f32>(n-1.0)));
+    return vec3<f32>(o.x,o.yz*inside);
+}
+// The swell's displacement at material position p: its horizontal motion
+// and its drop (crests 0, troughs to -depth), faded far from `eye` to its
+// mean level, which settles at the far water's openness.
+fn ocean_faded(p:vec2<f32>,eye:vec2<f32>,time:f32)->vec3<f32> {
+    let depth=water_fx.ocean.x;
+    let fade=smoothstep(OCEAN_FAR_FROM,OCEAN_FAR_TO,distance(p,eye));
+    let o=ocean_open(p).x;
+    let a=0.5*depth*o;
+    let l=ocean_long(p,time,water_fx.ocean.yz);
+    let mean=-0.5*depth*mix(o,water_fx.ocean.w,fade);
+    return vec3<f32>(l.shift*(a*(1.0-fade)),mean+(1.0-fade)*a*l.s);
+}
+// The swell's drop at p for what is drawn against the surface (its own
+// horizontal motion, at most 1.5 m, is not inverted).
+fn ocean_height(p:vec2<f32>)->f32 { return ocean_faded(p,frame.camera_pos.xy,frame.camera_pos.w).z; }
+// The water's level at p: the region's flat height, with the swell's drop
+// while it is on.
+fn water_level_at(p:vec2<f32>)->f32 {
+    if(!ocean_on()){return frame.params.y;}
+    return frame.params.y+ocean_height(p);
+}
+// A particle's base level `level` at p, lowered with the swell.
+fn ocean_particle_base(level:f32,p:vec2<f32>)->f32 {
+    if(!ocean_on()){return level;}
+    return level+ocean_height(p);
+}
+// A water vertex: p its material position, local its place in its
+// record's quad, origin and size the record's. A whole tile (larger than a
+// 64 m patch, beyond OCEAN_FAR_TO) takes the far mean level; a patch's edge
+// vertex follows the chords above, so both sides of an edge agree.
+fn ocean_vertex(p:vec2<f32>,local:vec2<f32>,origin:vec2<f32>,size:vec2<f32>)->vec3<f32> {
+    let eye=frame.camera_pos.xy;
+    let time=frame.camera_pos.w;
+    if(max(size.x,size.y)>64.1){return vec3<f32>(0.0,0.0,-0.5*water_fx.ocean.x*water_fx.ocean.w);}
+    let exact=ocean_faded(p,eye,time);
+    let across_x=local.x<=0.0 || local.x>=1.0;
+    let across_y=local.y<=0.0 || local.y>=1.0;
+    // inside the patch, or one of its corners (on every lattice)
+    if(across_x==across_y){return exact;}
+    let d=distance(p,eye);
+    let chord=smoothstep(OCEAN_CHORD_FROM,OCEAN_CHORD_TO,d);
+    if(chord<=0.0){return exact;}
+    // along a vertical edge (x at 0 or 1) the edge runs in y
+    var axis=vec2<f32>(1.0,0.0);var span=size.x;
+    if(across_x){axis=vec2<f32>(0.0,1.0);span=size.y;}
+    let t=dot(p-origin,axis);
+    let start=p-axis*t;
+    let a8=floor(t/OCEAN_CHORD)*OCEAN_CHORD;
+    let c8=mix(ocean_faded(start+axis*a8,eye,time),ocean_faded(start+axis*(a8+OCEAN_CHORD),eye,time),(t-a8)/OCEAN_CHORD);
+    let corners=mix(ocean_faded(start,eye,time),ocean_faded(start+axis*span,eye,time),t/span);
+    return mix(exact,mix(c8,corners,smoothstep(OCEAN_CORNER_FROM,OCEAN_CORNER_TO,d)),chord);
+}
+// water_fx_wave with the wake read where the swell moved the vertex to.
+fn water_fx_wave_shifted(p:vec2<f32>,level:f32,shift:vec2<f32>)->vec3<f32> {
+    var offset=vec3<f32>(0.0);
+    if(water_fx_on(1u)) {
+        offset+=water_swell(p,frame.camera_pos.w,water_fx.counts.w).offset*smoothstep(0.08,2.4,level-water_fx_bed(p).x);
+    }
+    offset.z+=clamp(water_wake_sample(p+offset.xy+shift,level).z,-0.16,0.16);
+    return offset;
+}
+// What the surface's pixel needs of the swell: its normal's tilt, its
+// compression (foam), how deep in a trough and how high on a crest it is,
+// its openness and its drop.
+struct OceanPixel { on: f32, normal: vec3<f32>, compression: f32, trough: f32, crest: f32, open: f32, dz: f32 };
+fn ocean_pixel(p:vec2<f32>)->OceanPixel {
+    var o:OceanPixel;
+    let depth=water_fx.ocean.x;
+    let d=distance(p,frame.camera_pos.xy);
+    let open=ocean_open(p);
+    let a=0.5*depth*open.x;
+    let l=ocean_long(p,frame.camera_pos.w,water_fx.ocean.yz);
+    // the geometry flattens beyond OCEAN_FAR_TO, the shading keeps the swell
+    let keep=1.0-smoothstep(OCEAN_FAR_TO,OCEAN_NORMAL_TO,d);
+    let jac=vec3<f32>(1.0,0.0,1.0)-l.fold*a;
+    let det=max(jac.x*jac.z-jac.y*jac.y,0.25);
+    let g=(l.ds*a+(l.s-1.0)*0.5*depth*open.yz)*keep;
+    let fade=smoothstep(OCEAN_FAR_FROM,OCEAN_FAR_TO,d);
+    o.on=1.0;
+    o.normal=vec3<f32>(-vec2<f32>(jac.z*g.x-jac.y*g.y,jac.x*g.y-jac.y*g.x)/det,0.0);
+    o.compression=(1.0-det)*keep;
+    o.trough=clamp(a*(1.0-l.s)/OCEAN_DEPTH_MAX,0.0,1.0)*keep;
+    o.crest=smoothstep(0.35,0.95,l.s)*(2.0*a/OCEAN_DEPTH_MAX)*keep;
+    o.open=open.x;
+    o.dz=-0.5*depth*mix(open.x,water_fx.ocean.w,fade)+(1.0-fade)*a*l.s;
+    return o;
+}
+fn water_ocean_normal(base:vec3<f32>,o:OceanPixel)->vec3<f32> {
+    if(o.on>0.5){return base+o.normal;}
+    return base;
+}
+// Foam where the long swell compresses, torn into streaks along its way.
+fn ocean_streaks(p:vec2<f32>,o:OceanPixel)->f32 {
+    let w=water_fx.ocean.yz;
+    let q=vec2<f32>(dot(p,w)*0.04,dot(p,vec2<f32>(-w.y,w.x))*0.5);
+    let streak=water_fx_noise(q+vec2<f32>(frame.camera_pos.w*0.02,0.0));
+    return smoothstep(OCEAN_FOAM_FROM,OCEAN_FOAM_FULL,o.compression)*smoothstep(0.5,0.85,streak)*0.4*o.open;
+}
+// Troughs a little darker, crests lit through from behind toward the sun.
+fn ocean_shade(color:vec3<f32>,o:OceanPixel,view:vec3<f32>,sun:vec3<f32>)->vec3<f32> {
+    var c=color*(1.0-0.12*o.trough);
+    let vh=view.xy/max(length(view.xy),0.0001);
+    let sh=sun.xy/max(length(sun.xy),0.0001);
+    let toward=pow(max(dot(vh,sh),0.0),3.0)*smoothstep(-0.05,0.2,sun.z)*(1.0-smoothstep(0.35,0.9,sun.z));
+    let tint=frame.water_fog.rgb/max(max(frame.water_fog.r,frame.water_fog.g),max(frame.water_fog.b,0.001));
+    c+=tint*frame.sun_color.rgb*(toward*o.crest*0.12);
+    return c;
+}"""
+
+[[patch]]
+id = "ocean-swell-scene-light"
+why = "what lies under the swell's surface takes the water's light, not only what lies under the flat water"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "let depth = max(frame.params.y-world_pos.z,0.0);"
+replace = "let depth = max(water_level_at(world_pos.xy)-world_pos.z,0.0); // aurora-local-patch: ocean-swell-scene-light"
+
+[[patch]]
+id = "ocean-swell-fog-source"
+why = "from above, what lies under the swell's surface where it is takes the water's fog"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "water_fogs_source"
+find = "return camera_underwater() || world_pos.z < camera_water_level();"
+replace = """// aurora-local-patch: ocean-swell-fog-source
+    if(ocean_on() && !camera_underwater()){return world_pos.z < water_level_at(world_pos.xy);}
+    return camera_underwater() || world_pos.z < camera_water_level();"""
+
+[[patch]]
+id = "ocean-swell-vertex-wave"
+why = "the water's vertices: the swell's displacement, and the wake read where it moved them"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = "if(water_fx_on(1u) || water_fx_on(16u)){wave=water_fx_wave(wp.xy,wp.z);}"
+replace = """// aurora-local-patch: ocean-swell-vertex-wave
+    var ocean=vec3<f32>(0.0);
+    let ocean_swell=ocean_on();
+    if(ocean_swell){ocean=ocean_vertex(wp.xy,in.pos.xy,rec.model[3].xy,vec2<f32>(length(rec.model[0].xyz),length(rec.model[1].xyz)));}
+    if(water_fx_on(1u) || water_fx_on(16u)){
+        if(ocean_swell){wave=water_fx_wave_shifted(wp.xy,wp.z,ocean.xy);} else {wave=water_fx_wave(wp.xy,wp.z);}
+    }"""
+
+[[patch]]
+id = "ocean-swell-vertex-apply"
+why = "goes with ocean-swell-vertex-wave; off, the original line"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = "wp = vec4<f32>(wp.xyz+wave*geometry*near,1.0);"
+replace = """// aurora-local-patch: ocean-swell-vertex-apply
+    if(ocean_swell){wp=vec4<f32>(wp.xyz+wave*geometry*near+ocean,1.0);} else {
+    wp = vec4<f32>(wp.xyz+wave*geometry*near,1.0);
+    }"""
+
+[[patch]]
+id = "ocean-swell-pixel"
+why = "the surface's pixel reads the swell once, for its normal, its foam, its shade and its volume"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "if((water_fx.counts.z&9u)!=0u){swell=water_swell(in.world_pos.xy,frame.camera_pos.w,water_fx.counts.w);}"
+replace = """if((water_fx.counts.z&9u)!=0u){swell=water_swell(in.world_pos.xy,frame.camera_pos.w,water_fx.counts.w);}
+    // aurora-local-patch: ocean-swell-pixel
+    var ocean_px:OceanPixel;
+    if(ocean_on()){ocean_px=ocean_pixel(in.world_pos.xy);}"""
+
+[[patch]]
+id = "ocean-swell-normal"
+why = "the swell's slope, its openness's included, in both normal paths; off, the same values"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = """        n=normalize(vec3<f32>((n.xy*0.18-micro.xy*detail)*furrow,1.0)+water_fx_normal(in.world_pos.xy,in.level,wake.xy,swell.gradient,bed.x));
+    } else { n=water_unit(n+water_fx_normal(in.world_pos.xy,in.level,wake.xy,swell.gradient,bed.x)); }"""
+replace = """// aurora-local-patch: ocean-swell-normal
+        n=normalize(vec3<f32>((n.xy*0.18-micro.xy*detail)*furrow,1.0)+water_ocean_normal(water_fx_normal(in.world_pos.xy,in.level,wake.xy,swell.gradient,bed.x),ocean_px));
+    } else { n=water_unit(n+water_ocean_normal(water_fx_normal(in.world_pos.xy,in.level,wake.xy,swell.gradient,bed.x),ocean_px)); }"""
+
+[[patch]]
+id = "ocean-swell-foam"
+why = "streaks of foam where the long swell compresses, with the crests' switch"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = """            foam+=smoothstep(0.08,0.2,swell.compression)*smoothstep(0.45,0.8,windpatch)*0.6;
+        }"""
+replace = """foam+=smoothstep(0.08,0.2,swell.compression)*smoothstep(0.45,0.8,windpatch)*0.6;
+        }
+        // aurora-local-patch: ocean-swell-foam
+        if(water_fx_on(8u) && ocean_px.compression>OCEAN_FOAM_FROM) {
+            foam+=ocean_streaks(p,ocean_px);
+        }"""
+
+[[patch]]
+id = "ocean-swell-shade"
+why = "darker troughs, crests lit through"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "var color = mix(fb, radiance, reflectance) + glint;"
+replace = """var color = mix(fb, radiance, reflectance) + glint;
+    if (ocean_px.on > 0.5) { color = ocean_shade(color, ocean_px, view_vec, l); } // aurora-local-patch: ocean-swell-shade"""
+
+[[patch]]
+id = "ocean-swell-volume"
+why = "the refracted water's fog is as deep as the swell's surface above the point"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "let volume=water_fog_segment(ref_pos-in.world_pos,frame.water_normal.w,0.0,max(in.level-ref_pos.z,0.0));"
+replace = "let volume=water_fog_segment(ref_pos-in.world_pos,frame.water_normal.w,0.0,max(select(in.level,in.level+ocean_px.dz,ocean_px.on>0.5)-ref_pos.z,0.0)); // aurora-local-patch: ocean-swell-volume"
+
+[[patch]]
+id = "ocean-swell-particle-level"
+why = "droplets and bubbles end at the swell's surface"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "particle_water_level"
+find = "return level+water_swell(p,water_fx.clock.x,water_fx.counts.w).offset.z*smoothstep(0.08,2.4,level-water_fx_bed(p).x);"
+replace = """// aurora-local-patch: ocean-swell-particle-level
+    let swell_level=level+water_swell(p,water_fx.clock.x,water_fx.counts.w).offset.z*smoothstep(0.08,2.4,level-water_fx_bed(p).x);
+    if(ocean_on()){return swell_level+ocean_height(p);}
+    return swell_level;"""
+
+[[patch]]
+id = "ocean-swell-crown"
+why = "a splash's crown rises from the swell's surface (its event carries the flat water)"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = "pos=vec3<f32>(event.position.xy+direction*radius,event.params.z+0.012+top*height);"
+replace = """// aurora-local-patch: ocean-swell-crown
+        let crown_base=ocean_particle_base(event.params.z,event.position.xy);
+        pos=vec3<f32>(event.position.xy+direction*radius,crown_base+0.012+top*height);"""
+
+[[patch]]
+id = "ocean-swell-rain"
+why = "rain and snow stop at the swell's surface"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+expect = 2
+find = "if (in.world.z < frame.params.y || camera_underwater()) { discard; }"
+replace = "if (in.world.z < water_level_at(in.world.xy) || camera_underwater()) { discard; } // aurora-local-patch: ocean-swell-rain"
+
+[[patch]]
+id = "ocean-swell-object-light"
+why = "objects under the swell's surface take the water's light"
+paths = ["crates/aurora-render/src/shaders/object.wgsl"]
+op = "literal"
+find = "if(water_fx_on(256u) && in.world_pos.z<frame.params.y && (rec.flags.x & FLAG_FULLBRIGHT) == 0u) {"
+replace = """// aurora-local-patch: ocean-swell-object-light
+    if(water_fx_on(256u) && in.world_pos.z<water_level_at(in.world_pos.xy) && (rec.flags.x & FLAG_FULLBRIGHT) == 0u) {"""
+
+# ------------------------------------------------------------ settings
+
+[[patch]]
+id = "ocean-swell-settings-fields"
+why = "the two saved choices (missing in older files: their defaults)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "pub struct WaterEffectsSettings {"
+replace = """pub struct WaterEffectsSettings {
+    // aurora-local-patch: ocean-swell-settings-fields
+    /// Open-sea swell: how far its troughs go below the water (m, 0 to 5,
+    /// 0: off).
+    pub ocean_depth: f32,
+    /// Physical objects at the surface and swimming avatars ride it, drawn
+    /// on this screen only.
+    pub ocean_ride: bool,"""
+
+[[patch]]
+id = "ocean-swell-settings-defaults"
+why = "off: what upstream draws"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = """impl Default for WaterEffectsSettings {
+    fn default() -> Self {
+        Self {"""
+replace = """impl Default for WaterEffectsSettings {
+    fn default() -> Self {
+        Self {
+            ocean_depth: 0.0, // aurora-local-patch: ocean-swell-settings-defaults
+            ocean_ride: false,"""
+
+[[patch]]
+id = "ocean-swell-settings-render"
+why = "to the renderer, the depth within its range"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = """            splashes: self.splashes,
+            bubbles: self.bubbles,"""
+replace = """splashes: self.splashes,
+            bubbles: self.bubbles,
+            ocean_depth: aurora_render::water_effects::ocean::depth(self.ocean_depth), // aurora-local-patch: ocean-swell-settings-render"""
+
+[[patch]]
+id = "ocean-swell-settings-sanitize"
+why = "a hand-edited depth is brought back within the slider's range (not a number: 0)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "insert_fn_start"
+fn = "sanitized"
+expect_sig = 'pub\(crate\) fn sanitized\(mut self\) -> Settings'
+body = '''
+self.water_effects.ocean_depth = aurora_render::water_effects::ocean::depth(self.water_effects.ocean_depth);
+'''
+
+[[patch]]
+id = "ocean-swell-settings-test"
+why = "older files load the defaults, the choices round-trip, the depth is bounded"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "fn water_choices_round_trip_and_quality_does_not_reset_effects() {"
+replace = '''fn ocean_swell_choices_load_round_trip_and_stay_in_range() {
+        // aurora-local-patch: ocean-swell-settings-test
+        let old: super::WaterEffectsSettings = serde_json::from_str(r#"{"caustics":true}"#).unwrap();
+        assert_eq!(old.ocean_depth, 0.0);
+        assert!(!old.ocean_ride);
+        let chosen = super::WaterEffectsSettings {
+            ocean_depth: 3.5,
+            ocean_ride: true,
+            ..Default::default()
+        };
+        let loaded: super::WaterEffectsSettings = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(loaded, chosen);
+        assert_eq!(loaded.render().ocean_depth, 3.5);
+        for (saved, kept) in [(-1.0, 0.0), (9.0, 5.0), (f32::NAN, 0.0), (2.0, 2.0)] {
+            let mut s = super::Settings::default();
+            s.water_effects.ocean_depth = saved;
+            assert_eq!(s.water_effects.render().ocean_depth, kept);
+            assert_eq!(s.sanitized().water_effects.ocean_depth, kept);
+        }
+        // off by default: upstream's water
+        let d = super::WaterEffectsSettings::default();
+        assert_eq!(d.render().ocean_depth, 0.0);
+        assert!(!d.ocean_ride);
+    }
+    #[test]
+    fn water_choices_round_trip_and_quality_does_not_reset_effects() {'''
+
+# ------------------------------------------------------------ preferences
+
+[[patch]]
+id = "ocean-swell-rows"
+why = "the depth slider and the riding switch, behind the geometric waves' cog"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = '''cx.toggle(tr!("water-effects-waves"), "", &field!(water_effects.waves));'''
+replace = '''cx.toggle(tr!("water-effects-waves"), "", &field!(water_effects.waves));
+            // aurora-local-patch: ocean-swell-rows
+            // the open-sea swell, made of geometric waves: behind their cog
+            let ocean_off = off || !cx.s.water_effects.waves;
+            cx.subs(ocean_off, |cx| {
+                cx.row(
+                    tr!("water-effects-ocean-depth"),
+                    tr!("water-effects-ocean-depth-help"),
+                    &field!(water_effects.ocean_depth),
+                    |ui, s| {
+                        ui.add(
+                            egui::Slider::new(&mut s.water_effects.ocean_depth, aurora_render::water_effects::ocean::DEPTH_RANGE)
+                                .custom_parser(aurora_i18n::parse_number)
+                                .fixed_decimals(1)
+                                .suffix(" m")
+                                .trailing_fill(true),
+                        )
+                        .changed()
+                    },
+                );
+                cx.toggle(
+                    tr!("water-effects-ocean-ride"),
+                    tr!("water-effects-ocean-ride-help"),
+                    &field!(water_effects.ocean_ride),
+                );
+            });'''
+
+[[patch]]
+id = "ocean-swell-text-en"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: ocean-swell-text-en
+water-effects-ocean-depth = Ocean swell
+water-effects-ocean-depth-help = Long rolling swells on open water, away from land: how far below the water's level their troughs go. Their crests stay where the waves reach now. 0 turns them off. On this screen only: nothing is sent.
+water-effects-ocean-ride = Objects ride the swell
+water-effects-ocean-ride-help = Physical objects floating at the surface, the avatars sitting on them and swimming avatars rise and fall with the swell, on this screen only: their positions in the region do not change. Off, only your own avatar and the camera follow it.'''
+
+[[patch]]
+id = "ocean-swell-text-fr"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: ocean-swell-text-fr
+water-effects-ocean-depth = Houle du large
+water-effects-ocean-depth-help = De longues vagues de houle en eau libre, loin des terres : jusqu'où leurs creux descendent sous le niveau de l'eau. Les crêtes restent là où les vagues montent déjà. 0 la désactive. Sur cet écran seulement : rien n'est envoyé.
+water-effects-ocean-ride = Les objets suivent la houle
+water-effects-ocean-ride-help = Les objets physiques qui flottent en surface, les avatars assis dessus et les avatars qui nagent montent et descendent avec la houle, sur cet écran seulement : leurs positions dans la région ne changent pas. Désactivé, seuls votre avatar et la caméra la suivent.'''
+
+[[patch]]
+id = "ocean-swell-text-ja"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: ocean-swell-text-ja
+water-effects-ocean-depth = 外洋のうねり
+water-effects-ocean-depth-help = 陸から離れた外洋に、長くゆったりとしたうねりを加えます。値は、谷が水面からどこまで下がるかです。山は今の波が届く高さのままです。０でオフになります。この画面だけの表示で、何も送信されません。
+water-effects-ocean-ride = オブジェクトがうねりに乗る
+water-effects-ocean-ride-help = 水面に浮かぶ物理オブジェクト、それに座っているアバター、泳いでいるアバターが、この画面の上だけでうねりに合わせて上下します。リージョン内の位置は変わりません。オフのときは、自分のアバターとカメラだけがうねりに合わせて動きます。'''
+
+# ------------------------------------------------------------ viewer: field, water, contacts
+
+[[patch]]
+id = "ocean-swell-field-module"
+why = "the land-distance field around the camera"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/ocean_field.rs"]
+source = "files/ocean-swell/ocean_field.rs"
+
+[[patch]]
+id = "ocean-swell-ride-module"
+why = "what rides the swell, drawn only"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/ocean_ride.rs"]
+source = "files/ocean-swell/ocean_ride.rs"
+
+[[patch]]
+id = "ocean-swell-modules"
+why = "the two modules of the scene"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "mod water_effects;"
+replace = """mod water_effects;
+// aurora-local-patch: ocean-swell-modules
+mod ocean_field;
+mod ocean_ride;"""
+
+[[patch]]
+id = "ocean-swell-water-at"
+why = "the field and the riders read each region's water as the contacts do"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = "fn water_at(world: &World, p: Vec3) -> Option<f32> {"
+replace = """// aurora-local-patch: ocean-swell-water-at
+pub(super) fn water_at(world: &World, p: Vec3) -> Option<f32> {"""
+
+[[patch]]
+id = "ocean-swell-effects-state"
+why = "the effects keep the swell's drawing mode, the big wave's direction and the field"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = """    bodies: water_contacts::Bodies,
+    visible: HashMap<Uuid, u32>,
+}"""
+replace = """bodies: water_contacts::Bodies,
+    visible: HashMap<Uuid, u32>,
+    // aurora-local-patch: ocean-swell-effects-state
+    /// The open-sea swell: on (the far water's patches are drawn), the
+    /// environment's big wave (its direction), its land-distance field.
+    pub ocean: bool,
+    pub(super) ocean_wave1: Vec2,
+    ocean_field: super::ocean_field::Builder,
+}"""
+
+[[patch]]
+id = "ocean-swell-ground-literal"
+why = "the bathymetry's new field, set each frame below"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = """                heights: heights.into(),
+            };"""
+replace = """heights: heights.into(),
+                ocean: Default::default(), // aurora-local-patch: ocean-swell-ground-literal
+            };"""
+
+[[patch]]
+id = "ocean-swell-ground-update"
+why = "each frame: the swell's state with the bathymetry, before the contacts read it"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = """        if settings.flags() & (4 | 16 | 64 | 128) == 0 {
+            self.events.clear();"""
+replace = """// aurora-local-patch: ocean-swell-ground-update
+        self.ocean = settings.waves && settings.ocean_depth > 0.0;
+        self.ground.ocean = self
+            .ocean_field
+            .update(world, eye, time, settings, self.ocean_wave1)
+            .at_eye(eye.truncate(), time, settings);
+        if settings.flags() & (4 | 16 | 64 | 128) == 0 {
+            self.events.clear();"""
+
+[[patch]]
+id = "ocean-swell-body-surface"
+why = "body contacts meet the swell's surface"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = "let surface = aurora_render::water_effects::surface_level(center.truncate(), time, settings, water, ground);"
+replace = "let surface = self.ground.surface(center.truncate(), time, settings, water, ground); // aurora-local-patch: ocean-swell-body-surface"
+
+[[patch]]
+id = "ocean-swell-object-flat"
+why = "objects' contacts against the swell: their drawn position less its drop, measured against the flat water the events carry"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = """            let Some(water) = water_at(world, p) else {
+                continue;
+            };
+            if !o.is_avatar() {"""
+replace = """let Some(water) = water_at(world, p) else {
+                continue;
+            };
+            // aurora-local-patch: ocean-swell-object-flat
+            // (the GPU lowers the events' rings and crowns with the swell)
+            let p = match self.ground.ocean_dz(p.truncate(), time, settings) {
+                Some(dz) => p - Vec3::Z * dz,
+                None => p,
+            };
+            if !o.is_avatar() {"""
+
+[[patch]]
+id = "ocean-swell-far-grid-field"
+why = "the coarse grid of the far patches"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+find = "near_grids: [Option<MeshAlloc>; 4],"
+replace = """near_grids: [Option<MeshAlloc>; 4],
+    far_grid: Option<MeshAlloc>, // aurora-local-patch: ocean-swell-far-grid-field"""
+
+[[patch]]
+id = "ocean-swell-far-grid-free"
+why = "goes with ocean-swell-far-grid-field"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+find = "for grid in self.grids.iter_mut().chain(&mut self.near_grids) {"
+replace = """// aurora-local-patch: ocean-swell-far-grid-free
+        for grid in self
+            .grids
+            .iter_mut()
+            .chain(&mut self.near_grids)
+            .chain(std::iter::once(&mut self.far_grid))
+        {"""
+
+[[patch]]
+id = "ocean-swell-far-grid-mesh"
+why = "made with the other grids, drawn only while the swell is on"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+find = """            for (i, n) in [64, 96, 160, 224].into_iter().enumerate() {
+                self.near_grids[i] = mesh(renderer, n);
+            }"""
+replace = """for (i, n) in [64, 96, 160, 224].into_iter().enumerate() {
+                self.near_grids[i] = mesh(renderer, n);
+            }
+            // aurora-local-patch: ocean-swell-far-grid-mesh
+            self.far_grid = mesh(renderer, aurora_render::water_effects::ocean::FAR_GRID_CELLS);"""
+
+[[patch]]
+id = "ocean-swell-draws-sig"
+why = "the swell's far water: patches out to SUBDIVIDE, the coarse grid out to FAR_GRID"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+find = "pub fn draws(&self, view: &super::CullView, quality: Option<u8>) -> impl Iterator<Item = DrawCmd> + '_ {"
+replace = """// aurora-local-patch: ocean-swell-draws-sig
+    // `ocean`: the open-sea swell is on (ocean_swell.rs): the far water
+    // keeps its 64 m patches out to SUBDIVIDE, on the coarse grid out to
+    // FAR_GRID, so that the swell can move it
+    pub fn draws(&self, view: &super::CullView, quality: Option<u8>, ocean: bool) -> impl Iterator<Item = DrawCmd> + '_ {"""
+
+[[patch]]
+id = "ocean-swell-draws-far"
+why = "goes with ocean-swell-draws-sig"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+fn = "draws"
+find = "let quad = self.quad;"
+replace = """let quad = self.quad;
+        let far_grid = self.far_grid.filter(|_| ocean); // aurora-local-patch: ocean-swell-draws-far"""
+
+[[patch]]
+id = "ocean-swell-draws-subdivide"
+why = "goes with ocean-swell-draws-sig; off, 160 m as upstream"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+fn = "draws"
+find = "let subdivide = grid.is_some() && !tile.patches.is_empty() && closest.distance(view.eye.truncate()) < 160.0;"
+replace = """// aurora-local-patch: ocean-swell-draws-subdivide
+            let reach = if ocean {
+                aurora_render::water_effects::ocean::SUBDIVIDE
+            } else {
+                160.0
+            };
+            let subdivide = grid.is_some() && !tile.patches.is_empty() && closest.distance(view.eye.truncate()) < reach;"""
+
+[[patch]]
+id = "ocean-swell-draws-mesh"
+why = "goes with ocean-swell-draws-sig: a patch beyond the dense grid takes the coarse one"
+paths = ["crates/aurora-viewer/src/scene/water.rs"]
+op = "literal"
+fn = "draws"
+find = """                    } else if dense {
+                        grid.or(quad)
+                    } else {
+                        quad
+                    };"""
+replace = """} else if dense {
+                        grid.or(quad)
+                    } else if far_grid.is_some()
+                        && size.max_element() <= 64.1
+                        && nearest.distance(view.eye.truncate()) < aurora_render::water_effects::ocean::FAR_GRID
+                    {
+                        // aurora-local-patch: ocean-swell-draws-mesh
+                        far_grid
+                    } else {
+                        quad
+                    };"""
+
+[[patch]]
+id = "ocean-swell-draws-call"
+why = "goes with ocean-swell-draws-sig"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "self.lists.water.extend(self.water.draws(view, self.water_effects.geometry));"
+replace = """self.lists
+                .water
+                .extend(self.water.draws(view, self.water_effects.geometry, self.water_effects.ocean)); // aurora-local-patch: ocean-swell-draws-call"""
+
+# ------------------------------------------------------------ viewer: riding and heave
+
+[[patch]]
+id = "ocean-swell-ride-roots"
+why = "a riding linkset's root is drawn at its offset; what is linked or seated on it follows its transform"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "object_transform_in"
+find = """                + world.water_visual_dz(&o.full_id)
+        } else {
+            0.0
+        };"""
+replace = """+ world.water_visual_dz(&o.full_id)
+        } else if o.parent_id == 0 {
+            // aurora-local-patch: ocean-swell-ride-roots
+            // a linkset riding the open-sea swell (ocean_ride.rs), 0 otherwise
+            world.water_visual_dz(&o.full_id)
+        } else {
+            0.0
+        };"""
+
+[[patch]]
+id = "ocean-swell-ride-state"
+why = "the scene keeps the riders' candidates"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    water_effects: water_effects::Effects,"
+replace = """water_effects: water_effects::Effects,
+    ocean_riders: ocean_ride::Riders, // aurora-local-patch: ocean-swell-ride-state"""
+
+[[patch]]
+id = "ocean-swell-ride-init"
+why = "goes with ocean-swell-ride-state"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "            water_effects: Default::default(),"
+replace = """water_effects: Default::default(),
+            ocean_riders: Default::default(), // aurora-local-patch: ocean-swell-ride-init"""
+
+[[patch]]
+id = "ocean-swell-ride-world-field"
+why = "the drawn offsets of what rides the swell, by id"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "    pub water_float: crate::movement::water_float::Follower,"
+replace = """pub water_float: crate::movement::water_float::Follower,
+    // aurora-local-patch: ocean-swell-ride-world-field
+    /// Drawn-only offsets of what rides the open-sea swell (scene
+    /// ocean_ride.rs); empty while "Objects ride the swell" is off.
+    pub ocean_ride: HashMap<Uuid, f32>,"""
+
+[[patch]]
+id = "ocean-swell-ride-world-init"
+why = "goes with ocean-swell-ride-world-field"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "            water_float: Default::default(),"
+replace = """water_float: Default::default(),
+            ocean_ride: Default::default(), // aurora-local-patch: ocean-swell-ride-world-init"""
+
+[[patch]]
+id = "ocean-swell-ride-dz"
+why = "a rider's drawn offset; our own avatar keeps its heave, everything else 0 as before"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+fn = "water_visual_dz"
+find = """            self.water_float.offset()
+        } else {
+            0.0
+        }"""
+replace = """self.water_float.offset()
+        } else if *id != self.agent_id && !self.ocean_ride.is_empty() {
+            // aurora-local-patch: ocean-swell-ride-dz
+            self.ocean_ride.get(id).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        }"""
+
+[[patch]]
+id = "ocean-swell-heave-field"
+why = "our heave knows the swell's depth"
+paths = ["crates/aurora-viewer/src/movement/water_float.rs"]
+op = "literal"
+find = """    z: f32,
+    surface: bool,
+}"""
+replace = """z: f32,
+    surface: bool,
+    depth: f32, // aurora-local-patch: ocean-swell-heave-field
+}"""
+
+[[patch]]
+id = "ocean-swell-heave-depth"
+why = "set each frame from the settings, kept across resets"
+paths = ["crates/aurora-viewer/src/movement/water_float.rs"]
+op = "literal"
+find = """    pub fn offset(&self) -> f32 {
+        self.z
+    }"""
+replace = """pub fn offset(&self) -> f32 {
+        self.z
+    }
+
+    // aurora-local-patch: ocean-swell-heave-depth
+    /// The open-sea swell's depth (m, scene ocean_ride.rs uses the same
+    /// limits): the heave reaches that much lower and follows faster.
+    pub fn set_ocean_depth(&mut self, depth: f32) {
+        self.depth = if depth.is_finite() { depth.max(0.0) } else { 0.0 };
+    }"""
+
+[[patch]]
+id = "ocean-swell-heave-reset"
+why = "goes with ocean-swell-heave-depth"
+paths = ["crates/aurora-viewer/src/movement/water_float.rs"]
+op = "literal"
+fn = "update"
+find = """            *self = Self::default();
+            return;"""
+replace = """*self = Self {
+                depth: self.depth, // aurora-local-patch: ocean-swell-heave-reset
+                ..Self::default()
+            };
+            return;"""
+
+[[patch]]
+id = "ocean-swell-heave-limits"
+why = "the heave reaches the swell's troughs and follows it; at depth 0 upstream's 0.6 m and 1 m/s"
+paths = ["crates/aurora-viewer/src/movement/water_float.rs"]
+op = "literal"
+fn = "update"
+find = """        let change = (target.clamp(-0.6, 0.6) - self.z) * (1.0 - (-dt / 0.10).exp());
+        self.z += change.clamp(-dt, dt);"""
+replace = """// aurora-local-patch: ocean-swell-heave-limits
+        let (low, speed, settle) = heave_limits(self.depth);
+        let change = (target.clamp(low, 0.6) - self.z) * (1.0 - (-dt / settle).exp());
+        self.z += change.clamp(-dt * speed, dt * speed);"""
+
+[[patch]]
+id = "ocean-swell-heave-fn"
+why = "the limits, and their test"
+paths = ["crates/aurora-viewer/src/movement/water_float.rs"]
+op = "literal"
+find = """#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn surface_float_follows_crests_and_troughs_smoothly_at_different_frame_rates() {"""
+replace = """// aurora-local-patch: ocean-swell-heave-fn
+/// The heave's lowest target (m), its speed (m/s) and its response time
+/// (s): upstream's -0.6 m, 1 m/s and 0.1 s, deeper, faster and closer with
+/// the open-sea swell's `depth` (its waves rise and fall at up to about
+/// 0.4 m/s per metre of depth: a 0.1 s lag would leave a 5 m swell's rider
+/// some 20 cm off its surface).
+pub fn heave_limits(depth: f32) -> (f32, f32, f32) {
+    if depth > 0.0 {
+        (-(0.6 + depth), 1.0 + 0.6 * depth, 0.10 / (1.0 + 0.4 * depth))
+    } else {
+        (-0.6, 1.0, 0.10)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn surface_float_reaches_the_ocean_swells_troughs_and_keeps_upstreams_limits_without_it() {
+        assert_eq!(heave_limits(0.0), (-0.6, 1.0, 0.10));
+        for depth in [0.0f32, 2.0, 5.0] {
+            let mut follower = Follower::default();
+            follower.set_ocean_depth(depth);
+            let mut lowest = 0.0f32;
+            let mut worst = 0.0f32;
+            for frame in 0..60 * 30 {
+                let time = frame as f32 / 60.0;
+                // the swell's period is about 9 s; troughs reach the depth
+                let target = -0.5 * depth * (1.0 - (time * 0.7).sin()) + 0.2 * (time * 1.4).sin();
+                let old = follower.offset();
+                follower.update(1, Vec3::X * time * 0.01, time, target, false);
+                assert!((follower.offset() - old).abs() <= heave_limits(depth).1 / 60.0 + 1e-4);
+                lowest = lowest.min(follower.offset());
+                if time > 2.0 {
+                    worst = worst.max((follower.offset() - target.clamp(heave_limits(depth).0, 0.6)).abs());
+                }
+            }
+            assert!(lowest >= heave_limits(depth).0 - 1e-4);
+            assert!(worst < 0.12, "depth {depth}: lags by {worst}");
+            if depth == 0.0 {
+                assert!(lowest >= -0.6 - 1e-4);
+            } else {
+                assert!(lowest < -depth * 0.8, "rides down into the troughs: {lowest}");
+            }
+            // a reset keeps the depth
+            follower.update(1, Vec3::ZERO, 100.0, 0.0, true);
+            assert_eq!(follower.depth, depth);
+        }
+    }
+    #[test]
+    fn surface_float_follows_crests_and_troughs_smoothly_at_different_frame_rates() {"""
+
+[[patch]]
+id = "ocean-swell-heave-target"
+why = "our heave's target is the swell's surface"
+paths = ["crates/aurora-viewer/src/app/movement.rs"]
+op = "literal"
+find = "aurora_render::water_effects::surface_level(position.truncate(), time, self.settings.water_effects.render(), level, ground)"
+replace = """// aurora-local-patch: ocean-swell-heave-target
+            self.scene
+                .lists
+                .water_ground
+                .surface(position.truncate(), time, self.settings.water_effects.render(), level, ground)"""
+
+[[patch]]
+id = "ocean-swell-heave-set"
+why = "goes with ocean-swell-heave-depth"
+paths = ["crates/aurora-viewer/src/app/movement.rs"]
+op = "literal"
+find = """        self.world.water_float.update(
+            self.world.main_region.unwrap_or(0),"""
+replace = """// aurora-local-patch: ocean-swell-heave-set
+        self.world
+            .water_float
+            .set_ocean_depth(self.settings.water_effects.render().ocean_depth);
+        self.world.water_float.update(
+            self.world.main_region.unwrap_or(0),"""
+
+[[patch]]
+id = "ocean-swell-app"
+why = "each frame: the big wave's direction before the water effects, the riders after them"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """        if in_world {
+            self.scene.update_water_effects(
+                &self.world,
+                self.camera.position,
+                world_clock(),
+                self.settings.water_effects.render(),
+            );
+        }"""
+replace = """if in_world {
+            // aurora-local-patch: ocean-swell-app
+            self.scene.set_ocean_wave(env.water.wave1);
+            self.scene.update_water_effects(
+                &self.world,
+                self.camera.position,
+                world_clock(),
+                self.settings.water_effects.render(),
+            );
+            self.scene.update_ocean_ride(
+                &mut self.world,
+                self.camera.position,
+                world_clock(),
+                self.settings.water_effects.render(),
+                self.settings.water_effects.ocean_ride,
+            );
+        }"""
+
+[[patch]]
+id = "ocean-swell-rain-sound"
+why = "the rain sounds muffled under the swell's surface"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "underwater: (self.world.main_water_height() - self.camera.position.z).max(0.0),"
+replace = """// aurora-local-patch: ocean-swell-rain-sound
+            underwater: (self.world.main_water_height() + self.scene.lists.water_ground.ocean.eye_dz - self.camera.position.z).max(0.0),"""
+
+[[patch]]
+id = "ocean-swell-thunder-sound"
+why = "the thunder sounds muffled under the swell's surface"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "underwater: self.camera.position.z < self.world.main_water_height(),"
+replace = """// aurora-local-patch: ocean-swell-thunder-sound
+            underwater: self.camera.position.z < self.world.main_water_height() + self.scene.lists.water_ground.ocean.eye_dz,"""
+
+# ------------------------------------------------------------ demo
+
+[[patch]]
+id = "ocean-swell-demo-module"
+why = "AURORA_DEMO_OCEAN, the open sea's view and fixtures"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/demo_ocean.rs"]
+source = "files/ocean-swell/demo_ocean.rs"
+
+[[patch]]
+id = "ocean-swell-demo-mod"
+why = "a child module of the demo"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = """#[path = "demo_water.rs"]
+pub mod water;"""
+replace = """#[path = "demo_water.rs"]
+pub mod water;
+// aurora-local-patch: ocean-swell-demo-mod
+#[path = "demo_ocean.rs"]
+pub mod ocean;"""
+
+[[patch]]
+id = "ocean-swell-demo-configure"
+why = "the options into the water demo's settings"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = """        if mode.contains("parts-") {
+            settings.water_effects.shore_foam = false;"""
+replace = """crate::demo::ocean::configure(settings); // aurora-local-patch: ocean-swell-demo-configure
+        if mode.contains("parts-") {
+            settings.water_effects.shore_foam = false;"""
+
+[[patch]]
+id = "ocean-swell-demo-view"
+why = "the open sea's camera"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = """} else if mode.contains("alpha-layers") || mode.contains("alpha-cross") {"""
+replace = """} else if mode.contains("ocean") {
+            crate::demo::ocean::view() // aurora-local-patch: ocean-swell-demo-view
+        } else if mode.contains("alpha-layers") || mode.contains("alpha-cross") {"""
+
+[[patch]]
+id = "ocean-swell-demo-objects"
+why = "the open sea's fixtures, with the water demo's objects"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = """    if let Some(handle) = world.main_region {
+        world.apply(NetEvent::ObjectUpdates { handle, objects });
+        static ANIMATED: AtomicBool = AtomicBool::new(false);"""
+replace = """crate::demo::ocean::objects(mode, time, &mut objects); // aurora-local-patch: ocean-swell-demo-objects
+    if let Some(handle) = world.main_region {
+        world.apply(NetEvent::ObjectUpdates { handle, objects });
+        static ANIMATED: AtomicBool = AtomicBool::new(false);"""
+
+[[patch]]
+id = "ocean-swell-testing-table"
+why = "docs/TESTING.md: the scenario in the water table"
+paths = ["docs/TESTING.md"]
+op = "regex"
+pattern = '^\| `AURORA_DEMO_WATER_SHADERS=1` \|[^\n]*$'
+replace = '''\g<0>
+| `AURORA_DEMO_WATER=medium:ocean` + `AURORA_DEMO_OCEAN=<depth>[,ride]` | Open-sea swell over the void water, floating fixtures riding it (local patch set) <!-- // aurora-local-patch: ocean-swell-testing-table --> |'''
+
+[[patch]]
+id = "ocean-swell-testing-details"
+why = "docs/TESTING.md: what the scenario shows"
+paths = ["docs/TESTING.md"]
+op = "regex"
+pattern = '^With `AURORA_DEMO_WATER_SHADERS=1`, an offline viewer loads'
+replace = '''Open-sea swell (local patch set): `AURORA_DEMO_WATER=medium:ocean` (any
+quality) looks west from the void water beyond the demo region, more than
+a kilometre of open sea ahead and the coast about 300 m behind.
+`AURORA_DEMO_OCEAN` takes comma separated words: a number, the swell's
+depth in metres (0 to 5, 3 when absent), `ride` for "Objects ride the
+swell", and a view: `high` (above the fixtures, looking down), `horizon`
+(low, toward the far water) or `coast` (back toward the shore). 260 m out float an orange physical box with a demo avatar sitting
+on it and a swimming demo avatar, which ride the swell with `ride`, and two
+controls that never ride: a blue box that is not physical and a red
+physical box in the air. Look for long swells arriving in sets from the
+environment's big-wave direction, crests no higher than the water without
+them, troughs down to the depth, the existing small waves on top, no seam
+where the swell fades in toward the coast (it is nothing within about
+100 m of land, full from 180 m), no cracks between the near, middle and far
+water out to the horizon, streaks of foam on steep crests at the larger
+depths, slightly darker troughs. With `ride` the orange box and both avatars
+rise and fall with the surface, eased in, and the blue and red boxes stay;
+without it only the camera's own avatar would follow the water. With the
+depth at 0 the picture is the water demo's as before.
+`AURORA_PROFILE=1` gives the swell's cost (the far patches add up to about
+900 draws of small grids around the camera).
+<!-- // aurora-local-patch: ocean-swell-testing-details -->
+
+\g<0>'''

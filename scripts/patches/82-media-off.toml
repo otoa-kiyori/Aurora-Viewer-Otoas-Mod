@@ -1,0 +1,296 @@
+# With media off, nothing about media leaves the viewer or asks a question.
+#
+# Upstream keeps three paths alive while Preferences > Media > Enable media
+# (AudioStreamingMedia) or Prim media (PrimMediaMasterEnabled) is off:
+#
+# - the ObjectMedia GETs: every object with a media face is still fetched
+#   from the region's ObjectMedia capability. The Legacy Viewer queues
+#   nothing while AudioStreamingMedia is off
+#   (LLObjectMediaDataClient::enqueue, LLObjectMediaNavigateClient::enqueue,
+#   indra/newview/llmediadataclient.cpp) and makes no client at all without
+#   PrimMediaMasterEnabled (LLVOVolume::initClass, llvovolume.cpp). Here the
+#   queue keeps its entries but sends nothing; answers already in flight are
+#   still taken, and the fetches resume when media is turned back on;
+# - the media filter: a parcel media impl kept from before media was turned
+#   off still asked its site question (and told refusals in the chat) every
+#   frame. With media off it is not checked at all and stays undecided, so it
+#   is asked normally once media is on again. The filter itself is string
+#   matching on the URL (no DNS, no request): a question never meant network
+#   access;
+# - the "Open media" click action: it handed the parcel's media URL straight
+#   to the system browser, with media off too and without the link checks.
+#   With media off the click does nothing; with media on the URL goes the
+#   way of a clicked link (refused schemes, link trust, the external link
+#   confirmation). The Legacy Viewer has no gate there
+#   (handle_click_action_open_media, lltoolpie.cpp): a deliberate, stricter
+#   difference.
+#
+# Parcel music keeps its own settings and filter path; the build floater's
+# Media tab (a user edit) is unchanged.
+#
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "media-off-allowed-fn"
+why = "whether media may load, fetch or ask, as one pure function the tests can check"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+find = "const UPLOAD_BUDGET: usize = 16 << 20;"
+replace = '''const UPLOAD_BUDGET: usize = 16 << 20;
+
+// aurora-local-patch: media-off-allowed-fn
+/// Media is allowed at all (AudioStreamingMedia) and, for media on a prim,
+/// prim media too (PrimMediaMasterEnabled). Off, nothing is fetched,
+/// filtered or asked about (LLObjectMediaDataClient::enqueue in
+/// indra/newview/llmediadataclient.cpp, LLVOVolume::initClass).
+fn media_allowed(settings: &MediaSettings, prim: bool) -> bool {
+    settings.enabled && (!prim || settings.prim_media)
+}'''
+
+[[patch]]
+id = "media-off-fetch"
+why = "no ObjectMedia GET leaves while media or prim media is off; answers in flight are still taken"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "fetch_media_data"
+find = "for got in self.client.update(rt, http, Instant::now(), interest) {"
+replace = '''// aurora-local-patch: media-off-fetch
+        let send = media_allowed(f.settings, true);
+        for got in self.client.update(rt, http, Instant::now(), interest, send) {'''
+
+[[patch]]
+id = "media-off-client-signature"
+why = "the ObjectMedia queue can take its answers without sending new requests"
+paths = ["crates/aurora-viewer/src/media/entry.rs"]
+op = "literal"
+find = '''pub fn update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        http: &reqwest::Client,
+        now: Instant,
+        interest: impl Fn(&Uuid) -> Option<(f32, f32)>,
+    ) -> Vec<Fetched> {'''
+replace = '''/// With `send` false (media off) the queues keep their entries and wait.
+    // aurora-local-patch: media-off-client-signature
+    pub fn update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        http: &reqwest::Client,
+        now: Instant,
+        interest: impl Fn(&Uuid) -> Option<(f32, f32)>,
+        send: bool,
+    ) -> Vec<Fetched> {'''
+
+[[patch]]
+id = "media-off-client-send"
+why = "the queue's sending part is skipped while media is off"
+paths = ["crates/aurora-viewer/src/media/entry.rs"]
+op = "literal"
+fn = "update"
+find = "if let Some(p) = self.next(now, interest) {"
+replace = '''// aurora-local-patch: media-off-client-send
+        // nothing is taken off the queues (nor its pace slot used) while off
+        if !send {
+            return out;
+        }
+        if let Some(p) = self.next(now, interest) {'''
+
+[[patch]]
+id = "media-off-filter"
+why = "with media off the media filter neither asks, nor tells, nor records: the media stays undecided until media is on"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "apply_filter"
+find = '''
+m.filter_hold = false;
+if !m.wanted {
+'''
+replace = '''m.filter_hold = false;
+            // aurora-local-patch: media-off-filter
+            // nothing loads while media is off: no question, no refusal in
+            // the chat, and held, should a later step ever skip the setting
+            if !media_allowed(f.settings, matches!(m.key, MediaKey::Prim { .. })) {
+                m.filter_hold = true;
+                continue;
+            }
+            if !m.wanted {'''
+
+[[patch]]
+id = "media-off-open-media"
+why = "the Open media click action does nothing while media is off"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "insert_fn_start"
+fn = "click_open_media"
+impl = "MediaManager"
+expect_sig = 'settings: &MediaSettings\) -> Option<String>'
+body = '''
+// Stricter than handle_click_action_open_media (lltoolpie.cpp), which
+// opens the parcel's media URL whatever AudioStreamingMedia says.
+if !settings.enabled {
+    log::info!("media: an Open media click was ignored, media is off");
+    return None;
+}
+'''
+
+[[patch]]
+id = "media-open-link-trust"
+why = "the Open media URL goes the way of a clicked link: refused schemes, link trust, the external link confirmation"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''full.platform_output
+    .commands
+    .push(egui::OutputCommand::OpenUrl(egui::OpenUrl::new_tab(url)));'''
+replace = '''// aurora-local-patch: media-open-link-trust
+                // the parcel's URL is the land owner's: checked like any
+                // clicked link (LLWeb::loadURL opens it as is)
+                self.on_ctx_action(ui::context::CtxAction::OpenUrl(url));'''
+
+[[patch]]
+id = "media-off-test-allowed"
+why = "media_allowed: media off stops everything, prim media off stops prim media only"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+find = '''
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+'''
+replace = '''mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // aurora-local-patch: media-off-test-allowed
+    #[test]
+    fn media_off_allows_nothing_and_prim_media_off_only_stops_prims() {
+        let mut s = MediaSettings::default();
+        assert!(media_allowed(&s, true) && media_allowed(&s, false));
+        s.prim_media = false;
+        assert!(!media_allowed(&s, true));
+        assert!(media_allowed(&s, false));
+        s.prim_media = true;
+        s.enabled = false;
+        assert!(!media_allowed(&s, true));
+        assert!(!media_allowed(&s, false));
+    }
+
+    #[test]
+    fn media_off_filter_asks_nothing_and_holds() {
+        let mut w = World::new(Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        let mut m = MediaManager::default();
+        let mut parcel = MediaImpl::new(MediaKey::Parcel, "https://media.example.invalid/".into(), "text/html".into());
+        parcel.wanted = true;
+        m.impls.push(parcel);
+        fn frame<'a>(view: &'a CullView, settings: &'a MediaSettings) -> MediaFrame<'a> {
+            MediaFrame {
+                view,
+                camera: Vec3::ZERO,
+                settings,
+                autoplay: true,
+                channel_volume: 1.0,
+                agent_speed: 0.0,
+                window_focused: true,
+                gaming_mode: false,
+                net: None,
+                cache_dir: std::path::Path::new(""),
+                language: "en",
+            }
+        }
+        let view = CullView::new(Mat4::IDENTITY, Vec3::ZERO, 720.0, 1.0);
+        let off = MediaSettings {
+            enabled: false,
+            ..MediaSettings::default()
+        };
+        m.apply_filter(&mut w, &frame(&view, &off));
+        assert!(m.impls[0].filter_hold && m.impls[0].wanted);
+        assert!(w.media_filter.question().is_none());
+        assert!(w.media_filter.messages.is_empty());
+        // media on again: the site is asked about as usual
+        m.apply_filter(&mut w, &frame(&view, &MediaSettings::default()));
+        assert!(m.impls[0].filter_hold);
+        assert!(w.media_filter.question().is_some());
+    }'''
+
+[[patch]]
+id = "media-off-test-client"
+why = "the ObjectMedia queue sends nothing while media is off, keeps its entries once each and still takes answers in flight"
+paths = ["crates/aurora-viewer/src/media/entry.rs"]
+op = "literal"
+find = '''
+mod tests {
+    use super::*;
+'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: media-off-test-client
+    #[test]
+    fn media_off_queue_waits_and_takes_answers_in_flight() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+        let http = reqwest::Client::new();
+        let mut c = MediaDataClient::default();
+        let interest = |_: &Uuid| Some((1.0, 1.0));
+        let waiting = Uuid::from_u128(7);
+        c.request(waiting, "http://127.0.0.1:9/cap", false, WORLD);
+        c.request(waiting, "http://127.0.0.1:9/cap", false, WORLD);
+        assert!(c.update(rt.handle(), &http, Instant::now(), interest, false).is_empty());
+        assert!(c.is_queued(&waiting));
+        assert_eq!((c.sorted.len(), c.last_send), (1, None));
+        let answered = Uuid::from_u128(8);
+        // in flight: its generation and priority as `request` keeps them
+        let generation = 99;
+        c.queued.insert(answered, (generation, WORLD));
+        let pending = Pending {
+            object: answered,
+            generation,
+            cap: String::new(),
+            attempts: 0,
+            update: false,
+            priority: WORLD,
+        };
+        let data = Ok(ObjectMediaData {
+            version: 1,
+            faces: Vec::new(),
+        });
+        c.tx.send((pending, data)).expect("channel");
+        let got = c.update(rt.handle(), &http, Instant::now(), interest, false);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].object, answered);
+        assert!(!c.is_queued(&answered));
+        assert_eq!((c.sorted.len(), c.last_send), (1, None));
+    }'''
+
+[[patch]]
+id = "media-off-test-click"
+why = "the Open media click gives no URL and toggles nothing while media is off"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = '''
+mod click_tests {
+    use super::*;
+'''
+replace = '''mod click_tests {
+    use super::*;
+
+    // aurora-local-patch: media-off-test-click
+    #[test]
+    fn open_media_does_nothing_while_media_is_off() {
+        let mut w = World::new(std::sync::Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        for ev in crate::demo::events().into_iter().chain(crate::demo::action_events()) {
+            w.apply(ev);
+        }
+        let p = std::sync::Arc::make_mut(w.parcel.as_mut().expect("demo parcel"));
+        p.media_url = "https://example.invalid/media".into();
+        p.media.mime = "text/html".into();
+        p.media.media_id = crate::demo::ACTION_MEDIA_TEX;
+        let settings = MediaSettings {
+            enabled: false,
+            ..MediaSettings::default()
+        };
+        let mut m = MediaManager::default();
+        let idx = w.objects.index_of_uuid(&crate::demo::action_id(970)).expect("demo object");
+        assert!(m.click_open_media(&w, idx, 0, &settings).is_none());
+        let idx = w.objects.index_of_uuid(&crate::demo::action_id(978)).expect("demo object");
+        assert!(m.click_open_media(&w, idx, 0, &settings).is_none());
+        assert!(m.find(&MediaKey::Parcel).is_none());
+    }
+'''

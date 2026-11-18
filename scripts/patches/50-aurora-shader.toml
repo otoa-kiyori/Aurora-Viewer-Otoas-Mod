@@ -1,0 +1,273 @@
+# aurora-shader: a generic host for user post effects (WGSL) on the finished
+# world image, loaded from <config>/aurora-shader/ (installed by the separate
+# aurora-shader repository; this patch set knows no effect). The module comes
+# in whole with `add_file` (files/aurora-shader/), plus six small anchors.
+# Binding contracts v1 (frozen) and v2 (v1 plus the blended faces' depth),
+# chosen and checked per effect in files/aurora-shader/user_post_library.rs:
+# a v1 effect is compiled, bound and fed as before v2.
+#
+# The chain sits between tone mapping and the photo look, before the spatial
+# anti-aliasing of the AA setting, so its own edges are smoothed like the
+# scene's:
+#   SMAA:       tone map -> user chain -> SMAA -> [photo look] -> scene_target
+#   FXAA:       tone map (its FXAA off) -> user chain -> host FXAA -> ...
+#   MSAA:       (resolved scene) tone map -> user chain -> host FXAA masked
+#               to the chain's own edges -> ...
+#   TAA, FSR:   (resolved scene) tone map -> user chain -> host temporal
+#               resolve of what the chain changed (the effects read the
+#               jittered depth: their lines would move every frame), with
+#               the motion vectors -> ... (AURORA_SHADER_TEMPORAL=0: the
+#               masked FXAA as under MSAA; =always: the resolve under
+#               every AA, for comparisons)
+#   None:       tone map -> user chain -> ...
+# so the selection outline, RLVa's spheres, name tags, HUDs and the interface
+# stay on top, and photos (Capture::Snapshot) include it. Without effects
+# the frame is the unpatched one (same targets, same passes).
+
+[[patch]]
+id = "aurora-shader-host"
+why = "the host module: configure(), the GPU chain, the timer"
+op = "add_file"
+paths = ["crates/aurora-render/src/user_post.rs"]
+source = "files/aurora-shader/user_post.rs"
+
+[[patch]]
+id = "aurora-shader-host-config"
+why = "the strict TOML subset of config.toml and of the effect headers"
+op = "add_file"
+paths = ["crates/aurora-render/src/user_post_config.rs"]
+source = "files/aurora-shader/user_post_config.rs"
+
+[[patch]]
+id = "aurora-shader-host-library"
+why = "the folder watcher, naga validation and reflection, the contract checks"
+op = "add_file"
+paths = ["crates/aurora-render/src/user_post_library.rs"]
+source = "files/aurora-shader/user_post_library.rs"
+
+[[patch]]
+id = "aurora-shader-host-gui"
+why = "what a GUI reads and writes: the effects' [ui] hints, config.toml edited in place, atomic writes"
+op = "add_file"
+paths = ["crates/aurora-render/src/user_post_gui.rs"]
+source = "files/aurora-shader/user_post_gui.rs"
+
+[[patch]]
+id = "aurora-shader-host-tests"
+why = "unit tests of the host (GPU ones are #[ignore])"
+op = "add_file"
+paths = ["crates/aurora-render/src/user_post_tests.rs"]
+source = "files/aurora-shader/user_post_tests.rs"
+
+[[patch]]
+id = "aurora-shader-host-prelude"
+why = "contract v1: the prelude put before every effect"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/user_post_prelude.wgsl"]
+source = "files/aurora-shader/shaders/user_post_prelude.wgsl"
+
+[[patch]]
+id = "aurora-shader-host-prelude-v2"
+why = "contract v2: what it adds after the v1 prelude for an `api = 2` effect"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/user_post_prelude_v2.wgsl"]
+source = "files/aurora-shader/shaders/user_post_prelude_v2.wgsl"
+
+[[patch]]
+id = "aurora-shader-host-shaders"
+why = "the host's own passes: full-screen vertex, normals, sRGB blit"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/user_post_host.wgsl"]
+source = "files/aurora-shader/shaders/user_post_host.wgsl"
+
+# A1
+[[patch]]
+id = "aurora-shader-mod"
+why = "declare the module (pub: the viewer calls user_post::configure)"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = "pub mod upload;"
+replace = """pub mod upload;
+pub mod user_post; // aurora-local-patch: aurora-shader-mod"""
+
+# A2
+[[patch]]
+id = "aurora-shader-field"
+why = "each Backend (each VR eye too) has its own chain"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+find = "looks: Option<crate::looks::Looks>,"
+replace = """looks: Option<crate::looks::Looks>,
+    /// aurora-shader's user effects (user_post.rs).
+    user_post: crate::user_post::UserPost, // aurora-local-patch: aurora-shader-field"""
+
+# A3
+[[patch]]
+id = "aurora-shader-init"
+why = "the chain starts empty: nothing is made before its first active frame"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+find = "looks: None,"
+replace = """looks: None,
+            user_post: Default::default(), // aurora-local-patch: aurora-shader-init"""
+
+# A4: the post pass draws into the chain's input while it runs; the chain
+# then writes where it used to (the look's input, else the scene target), or
+# SMAA's input under SMAA. Under FXAA the post pass's FXAA (and the CAS it
+# excludes) is turned off: the host does it on the chain's output.
+# `offset_of!` per field: a reordered PostU still works, a renamed field
+# fails to build.
+[[patch]]
+id = "aurora-shader-slot-input"
+why = "redirect the post pass into the chain's input when effects run, in SMAA's format under SMAA"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+fn = "render_view"
+find = "let post_target = looks.map_or(scene_target, |(_, input)| input);"
+replace = """// aurora-local-patch: aurora-shader-slot-input
+        let user_out = looks.map_or(scene_target, |(_, input)| input);
+        let user_context = crate::user_post::Context {
+            photo: snapshot.is_some(),
+            vr_eye: self.external,
+            aa: crate::user_post::ChainAa::for_setting(self.settings.aa, self.msaa_samples, snapshot.is_some()),
+        };
+        // under SMAA the chain runs on SMAA's gamma-encoded 8-bit input
+        let user_format = if self.smaa_targets.is_some() {
+            Smaa::LDR
+        } else {
+            self.config.format
+        };
+        // at the size of the image after the anti-aliasing (FSR's display
+        // size when it upscales, else the world's)
+        let user_on = self.user_post.prepare(&self.device, user_format, post_size, user_context);
+        // (AURORA_SHADER_TEMPORAL=always: the post pass keeps its FXAA)
+        if user_on && self.settings.aa == AntiAliasing::Fxaa && user_context.aa == crate::user_post::ChainAa::Fxaa {
+            // FXAA moves to the chain's end; CAS stays off, as in FXAA mode
+            let off = bytemuck::bytes_of(&0.0f32);
+            self.queue
+                .write_buffer(&self.post_buffer, std::mem::offset_of!(PostU, fxaa) as u64, off);
+            self.queue
+                .write_buffer(&self.post_buffer, std::mem::offset_of!(PostU, sharpen) as u64, off);
+        }
+        let post_target = if user_on { self.user_post.input() } else { None }.unwrap_or(user_out);"""
+
+# A7: under SMAA the post pass draws into the chain's input (SMAA's format)
+# instead of SMAA's own input, which the chain then writes.
+[[patch]]
+id = "aurora-shader-smaa-input"
+why = "with SMAA, the post pass feeds the chain, and the chain SMAA"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+fn = "render_view"
+find = "Some(st) => (&st.ldr, &self.smaa.post_ldr, None, ts),"
+replace = """Some(st) => (if user_on { post_target } else { &st.ldr }, &self.smaa.post_ldr, None, ts), // aurora-local-patch: aurora-shader-smaa-input"""
+
+# A5: after the post pass, before SMAA (when on) and the photo look. The
+# whole SMAA call is replaced: it now reads the chain's result and writes
+# where the post pass's target was (`user_out`, which is `post_target`
+# without the chain: unchanged then). The water writes no depth, so the
+# chain also gets the water interface and mask, above water and when there
+# is water, to merge the surface into its depth (aerial haze on the open
+# ocean); under water the frame is
+# as before. Contract v2 effects also get the occlusion's depth (the blended
+# faces at least half covered over the prepass), when the renderer made it
+# (ambient occlusion or FSR on) and the chain's depth is `depth_ss` itself:
+# under FSR upscaling the display depth is made from the occlusion's, so it
+# holds those faces already and has nothing left to tell.
+[[patch]]
+id = "aurora-shader-slot-encode"
+why = "draw the user chain from its input into SMAA's input, the look's input or the scene, with the water surface in its depth"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "regex"
+fn = "render_view"
+pattern = '^([ \t]*)if let Some\(st\) = &self\.smaa_targets \{\n[ \t]*self\.smaa\.encode\(&mut encoder, st, post_target, smaa_ts\);\n[ \t]*\}\n'
+replace = '''\1// aurora-local-patch: aurora-shader-slot-encode
+\1if user_on {
+\1    let frame = crate::user_post::FrameInputs {
+\1        // the depth at the chain's size: FSR's display depth when it upscales
+\1        depth: post_depth,
+\1        mesh_normals: self.targets.gtao.as_ref().filter(|_| self.gtao_normals_now).map(|g| &g.normals),
+\1        water: (above_water_possible && !lists.water.is_empty()).then_some(crate::user_post::WaterInputs {
+\1            interface: &self.targets.water_interface,
+\1            mask: &self.targets.water_mask,
+\1        }),
+\1        alpha_depth: self
+\1            .targets
+\1            .ao_depth
+\1            .as_ref()
+\1            .map(|(_, view)| view)
+\1            .filter(|_| std::ptr::eq(post_depth, &self.targets.depth_ss)),
+\1        proj: f.proj,
+\1        view: f.view,
+\1        draw_distance: f.far,
+\1        time: f.time,
+\1        tile: photo_part(f.photo_tile),
+\1        pixel_scale: f.photo_scale,
+\1        depth_jitter,
+\1        output_size: (self.config.width, self.config.height),
+\1        taa: self.taa.is_some(),
+\1        frame_index: self.frame_index,
+\1        // the temporal finish's reprojection, as the TAA pass's
+\1        motion: motion_view(self.motion_now, &self.targets, self.taa.as_ref()),
+\1        reproject: Mat4::from_cols_array_2d(&main.motion_reproj),
+\1        cut: self.motion_cut,
+\1    };
+\1    // under SMAA the chain writes SMAA's input, which SMAA reads below
+\1    let chain_out = self.smaa_targets.as_ref().map_or(user_out, |st| &st.ldr);
+\1    let passes = self.user_post.encode(&self.device, &self.queue, &mut encoder, &frame, chain_out);
+\1    calls.set(calls.get() + passes);
+\1}
+\1if let Some(st) = &self.smaa_targets {
+\1    self.smaa.encode(&mut encoder, st, user_out, smaa_ts);
+\1}
+'''
+
+# A6
+[[patch]]
+id = "aurora-shader-configure"
+why = "point the host at <config>/aurora-shader (demo/ in demo mode) before the renderer starts"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+pattern = '^([ \t]*)aurora_render::pipeline_cache::configure\(.*\);\n'
+replace = '''\g<0>\1// aurora-shader's effects folder (aurora-render user_post.rs); AURORA_SHADER_DIR / AURORA_SHADER=0 there
+\1aurora_render::user_post::configure(crate::settings::config_dir().join("aurora-shader")); // aurora-local-patch: aurora-shader-configure
+'''
+
+# --- docs
+
+[[patch]]
+id = "aurora-shader-testing-temporal-table"
+why = "docs/TESTING.md: the temporal finish's variable, beside AURORA_TAA_MOTION"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_TAA_MOTION=0` or `alt` [^\n]*$'
+replace = '''\g<0>
+| `AURORA_SHADER_TEMPORAL=0`, `1` or `always` | aurora-shader's effects (local patch set) under TAA and FSR without their resolve over the frames, with it (default), or with it under every AA (see Details) <!-- // aurora-local-patch: aurora-shader-testing-temporal-table --> |'''
+
+[[patch]]
+id = "aurora-shader-testing-temporal-details"
+why = "docs/TESTING.md: what the temporal finish does and how to see it"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^- \*\*`AURORA_FSR_\*`\*\*'
+replace = '''- **`AURORA_SHADER_TEMPORAL=0|1|always`** (local patch set,
+  `user_post.rs`): aurora-shader's effects read the frame's depth, which
+  TAA and FSR jitter by up to half a pixel each frame after the scene's
+  history has resolved it, so their lines (ink, colour fringes) would land
+  somewhere else every frame and flicker. By default (`1`) the host
+  resolves what the chain changed over the frames instead of its masked
+  FXAA: the last frame's result follows each pixel's motion (else the
+  camera through the depth), clamped to the current 3 x 3 neighbourhood,
+  weighted per frame as the scene's TAA. `0` keeps the masked FXAA, the
+  old finish; `always` resolves under every AA but a photo's (there is no
+  jitter to average there: it only steadies what changes from one frame to
+  the next; under FXAA the post pass then keeps its own FXAA). To see it,
+  set `AURORA_SHADER_DIR` to a folder with an effect that draws lines
+  (`ink`), park the camera, and capture two frames in a row
+  (`AURORA_CAPTURE_FRAMES=700,701`) under `AURORA_AA=5` or `7` with `0`
+  and with the default: with `0` the lines differ between the two frames,
+  with the default they hardly do.
+  <!-- // aurora-local-patch: aurora-shader-testing-temporal-details -->
+\g<0>'''

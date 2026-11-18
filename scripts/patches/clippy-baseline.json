@@ -1,0 +1,665 @@
+{
+ "version": 1,
+ "clippy": "clippy 0.1.99 (58cf8f9c35 2026-10-13)",
+ "strict": true,
+ "findings": [
+  {
+   "lint": "clippy::expect_used",
+   "file": "crates/aurora-assets/src/import_mesh/skin.rs",
+   "message": "used `expect()` on an `Option` value",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::expect_used",
+   "file": "crates/aurora-assets/src/import_sound.rs",
+   "message": "used `expect()` on an `Option` value",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/anim.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_animation.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 12
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_animation.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_gltf.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 17
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_gltf.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/collada.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 23
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/collada.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/encode.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 13
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/gltf.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 72
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/gltf_skin.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 26
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/mod.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/process.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 18
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_mesh/skin.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 22
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_sound.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 9
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_sound.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/import_texture.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/j2k.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 14
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/j2k.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 6
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/j2k/encode.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/j2k/encode.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/lib.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 7
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/llm.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 9
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/llm.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/material.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 16
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/material.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/mesh.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 14
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/mesh_physics.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/wearable.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-assets/src/wearable.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/binary.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 6
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/binary.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/lib.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 12
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/notation.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/notation.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/xml.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/xml.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 8
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-llsd/src/xml_llsd.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-msg/src/lib.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-msg/src/lib.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 6
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-msg/src/packet.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 13
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-msg/src/packet.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/bridge.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 19
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/bridge/query.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 14
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/estate.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 8
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/groups.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/groups.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/inventory/notecard.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/inventory/notecard.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/land.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 5
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/land.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/objcache.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/objects.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 19
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/objects.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 5
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/pathfinding.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/probe.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 18
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/probe.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/profile.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/region_restart.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/script_controls.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 10
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 5
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session/inventory_upload.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session/object_actions.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session/object_actions.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session/terrain_raw.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session/terrain_raw.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session_offline.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session_social.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/session_social.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/social.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/terrain.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 24
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/terrain.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-net/src/throttle.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 5
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/extra.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 10
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/flexible.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 23
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/flexible.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/grass.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 8
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/noise.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 33
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/particles.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 3
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/sculpt.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 9
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/te.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 16
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/te.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 5
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/tree.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 2
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/face.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 37
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/face.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 4
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/mod.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 13
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/path.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/profile.rs",
+   "message": "indexing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::indexing_slicing",
+   "file": "crates/aurora-prim/src/volume/profile.rs",
+   "message": "slicing may panic",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::panic",
+   "file": "crates/aurora-prim/src/grass.rs",
+   "message": "`panic` should not be present in production code",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::panic",
+   "file": "crates/aurora-prim/src/tree.rs",
+   "message": "`panic` should not be present in production code",
+   "group": "restriction",
+   "count": 1
+  },
+  {
+   "lint": "clippy::unwrap_used",
+   "file": "crates/aurora-net/src/session_social.rs",
+   "message": "used `unwrap()` on an `Option` value",
+   "group": "restriction",
+   "count": 1
+  }
+ ]
+}

@@ -1,0 +1,372 @@
+# The Animation explorer's "Played" column is accurate per row.
+#
+# Upstream records one row each time a (source, animation) pair newly appears
+# in the simulator's list, and prunes the pair when it leaves it. But a row's
+# "Still playing" came from a check of the pair alone, so after a stop and a
+# restart every old row of the pair said "Still playing", and a stopped row
+# counted its "N seconds ago" from its start, not from its stop.
+#
+# Now the log entry records when its pair left the simulator's list (the
+# `retain` that prunes `animation_sources`, and `stop_motion_from_source`,
+# which removes a pair the same way). A row is playing only if it is the
+# newest start of its pair (`AnimationLog::live_ids`), has no stop recorded,
+# and the simulator still lists the pair. Every older row stays, never hidden,
+# and says "stopped 12 s ago, played 3 s" (`animation-explorer-stopped`); a
+# stopped row with no stop time keeps the old "N seconds ago". The column is
+# wider for it (WEIGHTS), and the full text is also in the row's tooltip in case
+# a narrow window elides it.
+#
+# This deliberately differs from the Legacy Viewer's AnimationExplorer
+# (indra/newview/animationexplorer.cpp), which marks every row of a listed pair
+# "still playing". Sorting, selection, the stand-in preview, Stop / Revoke /
+# Blacklist and the asset-id rule are untouched.
+#
+# The demo (AURORA_DEMO_ANIMATION_EXPLORER) restarts the dance once more, so it
+# shows a playing row above a stopped one of the same pair.
+#
+# Tests: files/animation-explorer-played/ (the log's rules, the row texts) and
+# one in world/mod.rs (the simulator's list stamps the stop). Texts are added
+# to every catalogue; the idempotence marker of the Fluent files is a Fluent
+# comment line. Apply or skip the whole file, not one patch of it.
+
+# --------------------------------------------------------------------- log
+
+[[patch]]
+id = "animation-explorer-played-entry"
+why = "the log entry records when the simulator stopped listing its pair"
+paths = ["crates/aurora-viewer/src/world/animation_log.rs"]
+op = "literal"
+find = "pub started: Instant,"
+replace = '''pub started: Instant,
+    /// When the pair left the simulator's list: this start stopped then.
+    pub stopped: Option<Instant>, // aurora-local-patch: animation-explorer-played-entry'''
+
+[[patch]]
+id = "animation-explorer-played-record"
+why = "a new start has not stopped"
+paths = ["crates/aurora-viewer/src/world/animation_log.rs"]
+op = "literal"
+find = "started: now,"
+replace = '''started: now,
+            stopped: None, // aurora-local-patch: animation-explorer-played-record'''
+
+[[patch]]
+id = "animation-explorer-played-entry-impl"
+why = "how long a stopped start played"
+paths = ["crates/aurora-viewer/src/world/animation_log.rs"]
+op = "literal"
+find = '''#[derive(Default)]
+pub struct AnimationLog {'''
+replace = '''impl Entry {
+    /// How long this start played, once its pair has left the simulator's list.
+    // aurora-local-patch: animation-explorer-played-entry-impl
+    pub fn played_for(&self) -> Option<std::time::Duration> {
+        self.stopped.map(|stopped| stopped.saturating_duration_since(self.started))
+    }
+}
+
+#[derive(Default)]
+pub struct AnimationLog {'''
+
+[[patch]]
+id = "animation-explorer-played-log-methods"
+why = "stamp the stop of a pair's running start, and tell which rows can be playing"
+paths = ["crates/aurora-viewer/src/world/animation_log.rs"]
+op = "literal"
+find = "/// Oldest first."
+replace = '''/// The simulator no longer lists the pair: its newest start, if still
+    /// running, stopped now. Older starts of the pair stopped earlier.
+    // aurora-local-patch: animation-explorer-played-log-methods
+    pub fn stop(&mut self, animation: Uuid, source: Uuid, now: Instant) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.animation == animation && e.source == source)
+            && entry.stopped.is_none()
+        {
+            entry.stopped = Some(now);
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    /// The rows that can be playing: the newest start of each pair, when no
+    /// stop is recorded for it. The window also asks the simulator's list.
+    pub fn live_ids(&self) -> std::collections::HashSet<u64> {
+        let mut seen = std::collections::HashSet::new();
+        self.entries
+            .iter()
+            .rev()
+            .filter(|e| seen.insert((e.animation, e.source)) && e.stopped.is_none())
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// Oldest first.'''
+
+[[patch]]
+id = "animation-explorer-played-log-tests-mod"
+why = "declare the log's tests beside it"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "pub mod animation_log;"
+replace = '''pub mod animation_log;
+#[cfg(test)]
+mod animation_log_played_tests; // aurora-local-patch: animation-explorer-played-log-tests-mod'''
+
+[[patch]]
+id = "animation-explorer-played-log-tests"
+why = "three starts of one pair, a pair that stopped, two sources of one animation"
+paths = ["crates/aurora-viewer/src/world/animation_log_played_tests.rs"]
+op = "add_file"
+source = "files/animation-explorer-played/log_tests.rs"
+
+# ------------------------------------------------------------------- world
+
+[[patch]]
+id = "animation-explorer-played-prune"
+why = "the pairs the simulator no longer lists stopped now: stamp them where they are pruned"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''self.animation_sources.retain(|_, motions| {
+                        motions.retain(|id| anims.iter().any(|(active, _)| active == id));
+                        !motions.is_empty()
+                    });'''
+replace = '''// The log's rows learn when their pair stopped (the Animation
+                    // explorer's "Played"); the Legacy Viewer has no such stamp.
+                    // aurora-local-patch: animation-explorer-played-prune
+                    let log = &mut self.animation_log;
+                    self.animation_sources.retain(|source, motions| {
+                        motions.retain(|id| {
+                            let listed = anims.iter().any(|(active, _)| active == id);
+                            if !listed {
+                                log.stop(*id, *source, now);
+                            }
+                            listed
+                        });
+                        !motions.is_empty()
+                    });'''
+
+[[patch]]
+id = "animation-explorer-played-release"
+why = "a source released here leaves the list the same way: its rows stop now"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+fn = "stop_motion_from_source"
+find = '''for id in motions {'''
+replace = '''for id in motions {
+                self.animation_log.stop(id, source, Instant::now()); // aurora-local-patch: animation-explorer-played-release'''
+
+[[patch]]
+id = "animation-explorer-played-world-test"
+why = "the simulator's list stamps the stop of a row, and a restart is a new playing row"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "fn ao_smart_sit_uses_only_the_seat_and_linkset_sources() {"
+replace = '''fn animation_explorer_rows_learn_when_the_simulator_stops_listing_their_pair() {
+        // aurora-local-patch: animation-explorer-played-world-test
+        let (mut world, _, _, root, linked) = seated_fixture();
+        let (sit, hands) = (Uuid::from_u128(71), Uuid::from_u128(72));
+        let signal = |world: &mut World, anims: Vec<(Uuid, i32)>, sources: Vec<Uuid>| {
+            world.apply(NetEvent::AvatarAnimations {
+                avatar: world.agent_id,
+                anims,
+                sources,
+            });
+        };
+        signal(&mut world, vec![(sit, 1), (hands, 1)], vec![root, linked]);
+        signal(&mut world, vec![(hands, 2)], vec![linked]);
+        signal(&mut world, vec![(sit, 3), (hands, 3)], vec![root, linked]);
+        let rows: Vec<_> = world.animation_log.entries().copied().collect();
+        assert_eq!(rows.len(), 3, "the restart of the sit is a new row, the old one stays");
+        assert_eq!((rows[0].animation, rows[0].source), (sit, root));
+        assert!(rows[0].stopped.is_some_and(|at| at >= rows[0].started), "its pair left the list");
+        assert_eq!((rows[1].animation, rows[2].animation), (hands, sit));
+        assert_eq!(rows[1].stopped, None, "the hands never left the list");
+        assert_eq!(world.animation_log.live_ids(), HashSet::from([rows[1].id, rows[2].id]));
+        // releasing a source stops its running row the same way
+        world.stop_motion_from_source(linked);
+        assert!(world.animation_log.entries().nth(1).is_some_and(|e| e.stopped.is_some()));
+        assert_eq!(world.animation_log.live_ids(), HashSet::from([rows[2].id]));
+    }
+
+    #[test]
+    fn ao_smart_sit_uses_only_the_seat_and_linkset_sources() {'''
+
+# --------------------------------------------------------------- the window
+
+[[patch]]
+id = "animation-explorer-played-live"
+why = "the rows that can be playing, asked once for the whole list"
+paths = ["crates/aurora-viewer/src/app/animation_explorer.rs"]
+op = "literal"
+find = "let entries: Vec<_> = self.world.animation_log.entries().rev().copied().collect();"
+replace = '''let entries: Vec<_> = self.world.animation_log.entries().rev().copied().collect();
+        let live = self.world.animation_log.live_ids(); // aurora-local-patch: animation-explorer-played-live'''
+
+[[patch]]
+id = "animation-explorer-played-row-built"
+why = "only the newest start of a pair, still listed by the simulator, is playing; older rows carry their stop"
+paths = ["crates/aurora-viewer/src/app/animation_explorer.rs"]
+op = "literal"
+find = "playing: self.world.animation_playing_from(&entry.source, &entry.animation),"
+replace = '''// Deliberately not the Legacy Viewer's AnimationExplorer::updateList,
+                // which marks every row of a listed pair "still playing".
+                // aurora-local-patch: animation-explorer-played-row-built
+                playing: live.contains(&entry.id) && self.world.animation_playing_from(&entry.source, &entry.animation),
+                stopped: entry.stopped,'''
+
+[[patch]]
+id = "animation-explorer-played-demo"
+why = "the demo restarts the dance, to show a playing row above a stopped one of the same pair"
+paths = ["crates/aurora-viewer/src/app/animation_explorer.rs"]
+op = "literal"
+find = "(vec![(crate::demo::IDLE_ANIM, 2), (dance, 1)], vec![agent, ball]),"
+replace = '''(vec![(crate::demo::IDLE_ANIM, 2), (dance, 1)], vec![agent, ball]),
+            // the dance stops, then starts again: two rows, one stopped
+            // aurora-local-patch: animation-explorer-played-demo
+            (vec![(crate::demo::IDLE_ANIM, 2)], vec![agent]),
+            (vec![(crate::demo::IDLE_ANIM, 2), (dance, 2)], vec![agent, ball]),'''
+
+[[patch]]
+id = "animation-explorer-played-row-field"
+why = "the row carries when its start stopped"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = "pub started: Instant,"
+replace = '''pub started: Instant,
+    /// When the simulator stopped listing this start's pair; `playing` rows
+    /// have none.
+    pub stopped: Option<Instant>, // aurora-local-patch: animation-explorer-played-row-field'''
+
+[[patch]]
+id = "animation-explorer-played-tooltip"
+why = "a stopped row's tooltip carries the whole text of its cell, which can be elided"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = '''#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {'''
+replace = '''impl Row {
+    /// The tooltip, and for a stopped row the whole "Played" text, which its
+    /// cell can elide.
+    // aurora-local-patch: animation-explorer-played-tooltip
+    fn tooltip_at(&self, now: Instant) -> String {
+        if self.playing {
+            self.tooltip()
+        } else {
+            format!("{}\n{}", self.tooltip(), played_text(self, now))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {'''
+
+[[patch]]
+id = "animation-explorer-played-tooltip-use"
+why = "the list shows the longer tooltip"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = "let response = response.on_hover_text(row.tooltip());"
+replace = '''let response = response.on_hover_text(row.tooltip_at(now)); // aurora-local-patch: animation-explorer-played-tooltip-use'''
+
+[[patch]]
+id = "animation-explorer-played-weights"
+why = "the Played column is wider, so that 'stopped 10 s ago, played 3 s' is not elided; Priority holds one number"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = "const WEIGHTS: [f32; 3] = [0.5, 0.3, 0.2];"
+replace = """const WEIGHTS: [f32; 3] = [0.38, 0.46, 0.16]; // aurora-local-patch: animation-explorer-played-weights"""
+
+[[patch]]
+id = "animation-explorer-played-doc"
+why = "the column's doc says what it now shows"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = '''/// "Still playing" or how long ago it started (animation_explorer_seconds_ago).'''
+replace = '''/// "Still playing" for the start the simulator still lists; for an older or
+/// stopped one, when it stopped and how long it played (the Legacy Viewer's
+/// animation_explorer_seconds_ago counts from the start).
+// aurora-local-patch: animation-explorer-played-doc'''
+
+[[patch]]
+id = "animation-explorer-played-text"
+why = "a stopped row says when it stopped and how long it played; one with no stop time keeps the old text"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "replace_fn_body"
+fn = "played_text"
+expect_sig = 'pub fn played_text\(row: &Row, now: Instant\) -> String'
+body = '''if row.playing {
+    return aurora_i18n::tr!("animation-explorer-still-playing").to_owned();
+}
+match row.stopped {
+    Some(stopped) => aurora_i18n::tr!(
+        "animation-explorer-stopped",
+        ago = now.saturating_duration_since(stopped).as_secs(),
+        played = stopped.saturating_duration_since(row.started).as_secs()
+    ),
+    None => aurora_i18n::tr!(
+        "animation-explorer-seconds-ago",
+        seconds = now.saturating_duration_since(row.started).as_secs()
+    ),
+}'''
+
+[[patch]]
+id = "animation-explorer-played-ui-tests-mod"
+why = "declare the row texts' tests beside the window's tests"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer.rs"]
+op = "literal"
+find = '''#[cfg(test)]
+mod tests;'''
+replace = '''#[cfg(test)]
+mod played_tests; // aurora-local-patch: animation-explorer-played-ui-tests-mod
+#[cfg(test)]
+mod tests;'''
+
+[[patch]]
+id = "animation-explorer-played-ui-tests"
+why = "the texts of a stopped row, the playing row and the tooltip"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer/played_tests.rs"]
+op = "add_file"
+source = "files/animation-explorer-played/ui_tests.rs"
+
+[[patch]]
+id = "animation-explorer-played-test-row"
+why = "the window's own test helper builds a Row"
+paths = ["crates/aurora-viewer/src/ui/animation_explorer/tests.rs"]
+op = "literal"
+find = "started: Instant::now() - Duration::from_secs(ago),"
+replace = '''started: Instant::now() - Duration::from_secs(ago),
+        stopped: None, // aurora-local-patch: animation-explorer-played-test-row'''
+
+# -------------------------------------------------------------------- texts
+
+[[patch]]
+id = "animation-explorer-played-ftl-en"
+why = "when a row stopped and how long it played (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "animation-explorer-unknown-priority ="
+replace = '''# // aurora-local-patch: animation-explorer-played-ftl-en
+animation-explorer-stopped = stopped { $ago } s ago, played { $played } s
+animation-explorer-unknown-priority ='''
+
+[[patch]]
+id = "animation-explorer-played-ftl-fr"
+why = "when a row stopped and how long it played (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "animation-explorer-unknown-priority ="
+replace = '''# // aurora-local-patch: animation-explorer-played-ftl-fr
+animation-explorer-stopped = arrêtée il y a { $ago } s, jouée { $played } s
+animation-explorer-unknown-priority ='''
+
+[[patch]]
+id = "animation-explorer-played-ftl-ja"
+why = "when a row stopped and how long it played (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "animation-explorer-unknown-priority ="
+replace = '''# // aurora-local-patch: animation-explorer-played-ftl-ja
+animation-explorer-stopped = { $ago }秒前に停止、{ $played }秒再生
+animation-explorer-unknown-priority ='''

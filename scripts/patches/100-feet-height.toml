@@ -1,0 +1,538 @@
+# Feet height: grounded avatars stand a little higher or lower.
+#
+# Preferences › Avatars › Feet, under "Use Aurora foot placement" (greyed
+# while it is off): a "Feet height" slider from -0.10 to +0.10 m in 1 cm
+# steps, 0 by default (no change until moved). Positive lifts, negative
+# lowers.
+#
+# It applies to exactly the avatars Aurora's foot grounding grounds (our own
+# and the remote ones within "Maximum other avatars", foot_scope.rs), all by
+# the same amount, as a whole: body, feet, attachments and rigged mesh follow
+# the skeleton. It works inside the grounding, not on a draw matrix: the
+# solver (Placement::apply, scene/anim/grounding.rs) queries every support as
+# if it were `lift` higher, so the feet plant at support + lift and the body
+# settles there through the same filters, acquisition and release as a
+# change of terrain. It therefore eases in and out with the grounding's own
+# 0.5 s transition (TRANSITION_SECONDS) when grounding starts or stops on an
+# avatar (walking with "while moving" off, sitting, flying, out of scope),
+# and moving the slider glides instead of popping. The user's "Maximum foot
+# adjustment" still bounds the terrain correction, now around the lifted
+# floor. Where grounding is not active, or for the native (Legacy) placement
+# (`legacy_grounding_frame` keeps lift 0), there is no shift.
+#
+# Purely visual and local: nothing is sent to the simulator; the SL hover
+# height (world/hover_height.rs, AgentPreferences) and its settings are
+# unchanged, and this adds on top of it. The camera is not moved by it,
+# like by the grounding itself; only the opt-in mouselook "follow the eyes"
+# camera, which follows the posed eyes, sees it as it sees any grounding.
+#
+# Stored as `ground_feet_height_offset`, bounded on load
+# (settings::feet_height_offset), and kept per account with the other
+# ground-feet options (settings/hover_height.rs Preferences).
+#
+# Aurora's own design: the Legacy Viewer has no equivalent.
+#
+# Tests: scene/anim/grounding_lift_tests.rs (zero shift changes nothing and
+# leaves no trace, the whole avatar moves by the shift, the blend), the
+# settings' bounds and round trip, the per-account switch, and the Options
+# page lists. Texts are in every catalogue; the idempotence marker of the
+# Fluent files is a Fluent comment line. Apply or skip the whole file, not
+# one patch of it.
+
+# ---------------------------------------------------------------- settings
+
+[[patch]]
+id = "feet-height-setting"
+why = "the saved Feet height"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''pub ground_feet_max_avatars: u32,
+    /// The region restart alert'''
+replace = '''pub ground_feet_max_avatars: u32,
+    /// Vertical shift in metres of every avatar whose feet Aurora grounds,
+    /// on top of the grounding's own correction: positive lifts, negative
+    /// lowers. Local and visual only; the hover height is unchanged.
+    pub ground_feet_height_offset: f32, // aurora-local-patch: feet-height-setting
+    /// The region restart alert'''
+
+[[patch]]
+id = "feet-height-limit"
+why = "the bound of Feet height, for the slider, the load and the solver"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "pub(crate) fn foot_height_limit(value: f32) -> f32 {"
+replace = '''// aurora-local-patch: feet-height-limit
+/// The largest shift of Preferences › Avatars › Feet height, either way.
+pub(crate) const MAX_GROUND_FEET_OFFSET: f32 = 0.1;
+
+/// Feet height, bounded: a saved or typed value outside the slider (or not a
+/// number) can never move the avatars further.
+pub(crate) fn feet_height_offset(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(-MAX_GROUND_FEET_OFFSET, MAX_GROUND_FEET_OFFSET)
+    } else {
+        0.0
+    }
+}
+
+pub(crate) fn foot_height_limit(value: f32) -> f32 {'''
+
+[[patch]]
+id = "feet-height-default"
+why = "no shift until the slider is moved"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''ground_feet_max_avatars: DEFAULT_GROUND_FEET_AVATARS,
+            region_restart: Default::default(),'''
+replace = '''ground_feet_max_avatars: DEFAULT_GROUND_FEET_AVATARS,
+            ground_feet_height_offset: 0.0, // aurora-local-patch: feet-height-default
+            region_restart: Default::default(),'''
+
+[[patch]]
+id = "feet-height-sanitize"
+why = "bounded on load, like the other foot options"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "self.ground_feet_max_avatars = self.ground_feet_max_avatars.min(MAX_GROUND_FEET_AVATARS);"
+replace = '''self.ground_feet_max_avatars = self.ground_feet_max_avatars.min(MAX_GROUND_FEET_AVATARS);
+        self.ground_feet_height_offset = feet_height_offset(self.ground_feet_height_offset); // aurora-local-patch: feet-height-sanitize'''
+
+[[patch]]
+id = "feet-height-sanitize-test"
+why = "old settings get no shift; a save keeps it; the load bounds it"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''#[test]
+    fn foot_height_settings_sanitize_limits_and_nonfinite_values() {'''
+replace = '''// aurora-local-patch: feet-height-sanitize-test
+    #[test]
+    fn feet_height_offset_defaults_to_zero_and_is_bounded_on_load() {
+        let old: Settings = serde_json::from_str(r#"{"ground_avatar_feet":true}"#).unwrap();
+        assert_eq!(old.ground_feet_height_offset, 0.0, "existing preferences do not move");
+        for (value, expected) in [
+            (0.0, 0.0),
+            (0.05, 0.05),
+            (-0.07, -0.07),
+            (0.1, 0.1),
+            (-0.1, -0.1),
+            (0.5, 0.1),
+            (-3.0, -0.1),
+            (f32::NAN, 0.0),
+            (f32::INFINITY, 0.0),
+            (f32::NEG_INFINITY, 0.0),
+        ] {
+            let settings = Settings {
+                ground_feet_height_offset: value,
+                ..Settings::default()
+            };
+            if value.is_finite() {
+                let saved = serde_json::to_string(&settings).unwrap();
+                let restored: Settings = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored.sanitized().ground_feet_height_offset, expected, "{value} after a save");
+            }
+            assert_eq!(settings.sanitized().ground_feet_height_offset, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn foot_height_settings_sanitize_limits_and_nonfinite_values() {'''
+
+# ---------------------------------------------------------------- accounts
+
+[[patch]]
+id = "feet-height-account"
+why = "Feet height is kept per account, with the other ground-feet options"
+paths = ["crates/aurora-viewer/src/settings/hover_height.rs"]
+op = "literal"
+find = '''ground_max_height: f32,
+}'''
+replace = '''ground_max_height: f32,
+    ground_height_offset: f32, // aurora-local-patch: feet-height-account
+}'''
+
+[[patch]]
+id = "feet-height-account-default"
+why = "goes with feet-height-account: a new account has no shift"
+paths = ["crates/aurora-viewer/src/settings/hover_height.rs"]
+op = "literal"
+find = '''ground_max_height: super::DEFAULT_GROUND_FEET_HEIGHT,
+        }'''
+replace = '''ground_max_height: super::DEFAULT_GROUND_FEET_HEIGHT,
+            ground_height_offset: 0.0, // aurora-local-patch: feet-height-account-default
+        }'''
+
+[[patch]]
+id = "feet-height-account-current"
+why = "goes with feet-height-account: remember the account's shift"
+paths = ["crates/aurora-viewer/src/settings/hover_height.rs"]
+op = "literal"
+find = '''ground_max_height: super::foot_height_limit(settings.ground_feet_max_height),
+        }'''
+replace = '''ground_max_height: super::foot_height_limit(settings.ground_feet_max_height),
+            ground_height_offset: super::feet_height_offset(settings.ground_feet_height_offset), // aurora-local-patch: feet-height-account-current
+        }'''
+
+[[patch]]
+id = "feet-height-account-apply"
+why = "goes with feet-height-account: restore the account's shift, bounded"
+paths = ["crates/aurora-viewer/src/settings/hover_height.rs"]
+op = "literal"
+find = '''settings.ground_feet_max_height = super::foot_height_limit(self.ground_max_height);
+    }'''
+replace = '''settings.ground_feet_max_height = super::foot_height_limit(self.ground_max_height);
+        settings.ground_feet_height_offset = super::feet_height_offset(self.ground_height_offset); // aurora-local-patch: feet-height-account-apply
+    }'''
+
+[[patch]]
+id = "feet-height-account-tests"
+why = "two accounts, a restart, the login screen and saved values out of bounds"
+paths = ["crates/aurora-viewer/src/settings/hover_height.rs"]
+op = "literal"
+find = '''mod tests {
+    use super::*;'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: feet-height-account-tests
+    #[test]
+    fn hover_accounts_keep_the_feet_height_per_account_and_bound_it() {
+        let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut settings = Settings::default();
+        settings.select_hover_account(first);
+        settings.ground_feet_height_offset = 0.06;
+        settings.select_hover_account(second);
+        assert_eq!(settings.ground_feet_height_offset, 0.0, "a new account starts at no shift");
+        settings.ground_feet_height_offset = -0.04;
+        settings.select_hover_account(first);
+        assert_eq!(settings.ground_feet_height_offset, 0.06);
+        let mut loaded = restart(&settings);
+        loaded.select_hover_account(second);
+        assert_eq!(loaded.ground_feet_height_offset, -0.04);
+        loaded.select_hover_account(first);
+        assert_eq!(loaded.ground_feet_height_offset, 0.06);
+        loaded.release_hover_account();
+        assert_eq!(loaded.ground_feet_height_offset, 0.0, "the login screen has no shift");
+        let mut saved: Settings = serde_json::from_value(serde_json::json!({
+            "hover_height_accounts": {
+                "00000000-0000-0000-0000-000000000001": {"ground_height_offset": 4.0},
+                "00000000-0000-0000-0000-000000000002": {"ground_height_offset": -4.0}
+            }
+        }))
+        .unwrap();
+        saved.select_hover_account(first);
+        assert_eq!(saved.ground_feet_height_offset, crate::settings::MAX_GROUND_FEET_OFFSET);
+        saved.select_hover_account(second);
+        assert_eq!(saved.ground_feet_height_offset, -crate::settings::MAX_GROUND_FEET_OFFSET);
+    }'''
+
+# ------------------------------------------------------------------- scene
+
+[[patch]]
+id = "feet-height-scene"
+why = "the scene's copy of the setting, like ground_feet_max_height"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''pub ground_feet_max_height: f32,
+    /// Verified native Movelock'''
+replace = '''pub ground_feet_max_height: f32,
+    /// Preferences › Avatars › Feet height: the grounded avatars' shift.
+    pub ground_feet_height_offset: f32, // aurora-local-patch: feet-height-scene
+    /// Verified native Movelock'''
+
+[[patch]]
+id = "feet-height-scene-init"
+why = "goes with feet-height-scene: no shift before the settings arrive"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''ground_feet_max_height: crate::settings::DEFAULT_GROUND_FEET_HEIGHT,
+            ground_feet_native_stand: false,'''
+replace = '''ground_feet_max_height: crate::settings::DEFAULT_GROUND_FEET_HEIGHT,
+            ground_feet_height_offset: 0.0, // aurora-local-patch: feet-height-scene-init
+            ground_feet_native_stand: false,'''
+
+[[patch]]
+id = "feet-height-app"
+why = "goes with feet-height-scene: the setting reaches the scene every frame"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.scene.ground_feet_max_height = self.settings.ground_feet_max_height;"
+replace = '''self.scene.ground_feet_max_height = self.settings.ground_feet_max_height;
+            self.scene.ground_feet_height_offset = self.settings.ground_feet_height_offset; // aurora-local-patch: feet-height-app'''
+
+[[patch]]
+id = "feet-height-frame"
+why = "only Aurora's grounding frame carries the shift, so only grounded avatars move"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+fn = "grounding_frame"
+find = "self.support_frame(world, idx, now, standing_anchor)"
+replace = '''// Only Aurora's grounding carries Feet height: the native placement
+        // below and an avatar without grounding stay where they are.
+        // aurora-local-patch: feet-height-frame
+        self.support_frame(world, idx, now, standing_anchor).map(|frame| Frame {
+            lift: crate::settings::feet_height_offset(self.ground_feet_height_offset),
+            ..frame
+        })'''
+
+[[patch]]
+id = "feet-height-support-frame"
+why = "goes with feet-height-frame: the shared frame (and the native one) has no shift"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+fn = "support_frame"
+find = '''max_height: crate::settings::foot_height_limit(self.ground_feet_max_height),
+            standing_anchor,
+        })'''
+replace = '''max_height: crate::settings::foot_height_limit(self.ground_feet_max_height),
+            standing_anchor,
+            lift: 0.0, // aurora-local-patch: feet-height-support-frame
+        })'''
+
+[[patch]]
+id = "feet-height-frame-tests"
+why = "goes with feet-height-frame-field: the upstream tests' frames have no shift"
+paths = [
+    "crates/aurora-viewer/src/scene/foot_support.rs",
+    "crates/aurora-viewer/src/scene/grounding.rs",
+    "crates/aurora-viewer/src/scene/anim/grounding.rs",
+    "crates/aurora-viewer/src/scene/anim/legacy_grounding/tests.rs",
+]
+op = "regex"
+pattern = '(max_height: [^\n]+,\n([ \t]*)standing_anchor: false,\n)'
+replace = '\1\2lift: 0.0, // aurora-local-patch: feet-height-frame-tests\n'
+expect = 4
+
+# ------------------------------------------------------------------ solver
+
+[[patch]]
+id = "feet-height-frame-field"
+why = "the grounding frame says how much higher the supports count"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+find = '''pub standing_anchor: bool,
+}'''
+replace = '''pub standing_anchor: bool,
+    /// Preferences › Avatars › Feet height, in metres: the supports count as
+    /// this much higher, so the feet plant and the body settles above (or
+    /// below) them. Zero for the native placement.
+    pub lift: f32, // aurora-local-patch: feet-height-frame-field
+}'''
+
+[[patch]]
+id = "feet-height-lift"
+why = "the frame's shift, bounded"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = "let max_height = crate::settings::foot_height_limit(frame.max_height);"
+replace = '''let max_height = crate::settings::foot_height_limit(frame.max_height);
+        // aurora-local-patch: feet-height-lift
+        // Feet height moves the supports, not the drawn avatar: the feet,
+        // the body and everything they carry reach support + lift through
+        // the same filters, acquisition and release as a change of terrain,
+        // so it eases in and out with the grounding itself.
+        let lift = crate::settings::feet_height_offset(frame.lift);'''
+
+[[patch]]
+id = "feet-height-floor"
+why = "the floor the user's limit is measured from, lifted"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = "let reference_floor = frame.to_world.transform_point3(Vec3::Z * setup.floor + pose.reference_offset).z;"
+replace = '''let reference_floor = frame.to_world.transform_point3(Vec3::Z * setup.floor + pose.reference_offset).z;
+        // aurora-local-patch: feet-height-floor
+        // The user's limit bounds the terrain correction around the lifted
+        // floor: Feet height itself is not terrain correction.
+        let lifted_floor = reference_floor + lift;'''
+
+[[patch]]
+id = "feet-height-query"
+why = "every support of the solver counts as lifted (the one place it asks the world)"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = '''let query = |point: Vec3| {
+            ground(point)
+                .filter('''
+replace = '''let query = |point: Vec3| {
+            // aurora-local-patch: feet-height-query
+            ground(point - Vec3::Z * lift)
+                .map(|hit| Surface {
+                    position: hit.position + Vec3::Z * lift,
+                    ..hit
+                })
+                .filter('''
+
+[[patch]]
+id = "feet-height-band-feet"
+why = "goes with feet-height-floor: the feet's limit around the lifted floor"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = "elevation.constrain(reference_floor - max_height, reference_floor + max_height);"
+replace = "elevation.constrain(lifted_floor - max_height, lifted_floor + max_height); // aurora-local-patch: feet-height-band-feet"
+
+[[patch]]
+id = "feet-height-band-reach"
+why = "goes with feet-height-floor: the body's reach band starts around the lifted floor"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = '''let mut lower = reference_floor - max_height;
+        let mut upper = reference_floor + max_height;'''
+replace = '''// aurora-local-patch: feet-height-band-reach
+        let mut lower = lifted_floor - max_height;
+        let mut upper = lifted_floor + max_height;'''
+
+[[patch]]
+id = "feet-height-band-goal"
+why = "goes with feet-height-floor: the body's goal, and its fallback, around the lifted floor"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = '''let goal = goal
+            .unwrap_or(reference_floor)
+            .clamp(reference_floor - max_height, reference_floor + max_height);'''
+replace = '''// aurora-local-patch: feet-height-band-goal
+        let goal = goal
+            .unwrap_or(lifted_floor)
+            .clamp(lifted_floor - max_height, lifted_floor + max_height);'''
+
+[[patch]]
+id = "feet-height-band-body"
+why = "goes with feet-height-floor: the body's limit around the lifted floor"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+fn = "apply"
+find = "height.constrain(reference_floor - max_height, reference_floor + max_height);"
+replace = "height.constrain(lifted_floor - max_height, lifted_floor + max_height); // aurora-local-patch: feet-height-band-body"
+
+[[patch]]
+id = "feet-height-tests-mod"
+why = "declare the solver's Feet height tests as a child of grounding (they use its private parts)"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding.rs"]
+op = "literal"
+find = '''#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {'''
+replace = '''#[cfg(test)]
+#[path = "grounding_lift_tests.rs"]
+mod lift_tests; // aurora-local-patch: feet-height-tests-mod
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {'''
+
+[[patch]]
+id = "feet-height-tests"
+why = "zero changes nothing, the whole avatar moves by the shift, the blend in and out"
+paths = ["crates/aurora-viewer/src/scene/anim/grounding_lift_tests.rs"]
+op = "add_file"
+source = "files/feet-height/grounding_lift_tests.rs"
+
+# -------------------------------------------------------------------- page
+
+[[patch]]
+id = "feet-height-row"
+why = "the slider, under Aurora ground feet (greyed while it is off)"
+paths = ["crates/aurora-viewer/src/ui/options/pages/avatars.rs"]
+op = "literal"
+find = '''&field!(ground_feet_max_avatars),
+                        0..=crate::settings::MAX_GROUND_FEET_AVATARS,
+                        "",
+                    );'''
+replace = '''&field!(ground_feet_max_avatars),
+                        0..=crate::settings::MAX_GROUND_FEET_AVATARS,
+                        "",
+                    );
+                    // aurora-local-patch: feet-height-row
+                    // Aurora's own (no Legacy Viewer equivalent): the grounded
+                    // avatars a little higher or lower, in centimetre steps.
+                    cx.row(
+                        tr!("ui-options-aurora-ground-feet-offset"),
+                        tr!("ui-options-aurora-ground-feet-offset-help"),
+                        &field!(ground_feet_height_offset),
+                        |ui, s| {
+                            let limit = crate::settings::MAX_GROUND_FEET_OFFSET;
+                            ui.spacing_mut().slider_width = super::super::SLIDER_W;
+                            ui.add(crate::ui::widgets::restricted_number(
+                                egui::Slider::new(&mut s.ground_feet_height_offset, -limit..=limit)
+                                    .suffix(" m")
+                                    .custom_parser(aurora_i18n::parse_number)
+                                    .step_by(0.01)
+                                    .fixed_decimals(2)
+                                    .trailing_fill(true),
+                                crate::ui::widgets::TextPolicy::Decimal,
+                            ))
+                            .changed()
+                        },
+                    );'''
+
+[[patch]]
+id = "feet-height-options-list"
+why = "the setting is on a page (the Options tests' list of shown settings)"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = '''"ground_feet_max_avatars",
+    "plates_hover_expand",'''
+replace = '''"ground_feet_max_avatars",
+    "ground_feet_height_offset", // aurora-local-patch: feet-height-options-list
+    "plates_hover_expand",'''
+
+[[patch]]
+id = "feet-height-options-reset"
+why = "the Avatars page's reset brings Feet height back to 0"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = "s.ground_feet_max_avatars = 50;"
+replace = '''s.ground_feet_max_avatars = 50;
+    s.ground_feet_height_offset = 0.07; // aurora-local-patch: feet-height-options-reset'''
+
+[[patch]]
+id = "feet-height-options-reset-check"
+why = "goes with feet-height-options-reset"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = "assert_eq!(s.ground_feet_max_avatars, 5);"
+replace = '''assert_eq!(s.ground_feet_max_avatars, 5);
+    assert_eq!(s.ground_feet_height_offset, 0.0); // aurora-local-patch: feet-height-options-reset-check'''
+
+# ------------------------------------------------------------------- texts
+
+[[patch]]
+id = "feet-height-ftl-en"
+why = "the row's label and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "ui-options-aurora-ground-feet-height-help ="
+replace = '''# // aurora-local-patch: feet-height-ftl-en
+ui-options-aurora-ground-feet-offset = Feet height
+ui-options-aurora-ground-feet-offset-help = Raise (above 0) or lower (below 0) by this height every avatar whose feet Aurora places on the ground: yours and the others within the limit above, all together, with their attachments. Only on your screen: nothing is sent to the region and your hover height does not change. Default: 0 m.
+ui-options-aurora-ground-feet-height-help ='''
+
+[[patch]]
+id = "feet-height-ftl-fr"
+why = "the row's label and help (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "ui-options-aurora-ground-feet-height-help ="
+replace = '''# // aurora-local-patch: feet-height-ftl-fr
+ui-options-aurora-ground-feet-offset = Hauteur des pieds
+ui-options-aurora-ground-feet-offset-help = Élève (au-dessus de 0) ou abaisse (en dessous de 0) de cette hauteur chaque avatar dont Aurora pose les pieds au sol : le vôtre et les autres dans la limite ci-dessus, tous ensemble, avec leurs attachements. Uniquement sur votre écran : rien n’est envoyé à la région et votre hauteur de survol ne change pas. Par défaut : 0 m.
+ui-options-aurora-ground-feet-height-help ='''
+
+[[patch]]
+id = "feet-height-ftl-ja"
+why = "the row's label and help (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "ui-options-aurora-ground-feet-height-help ="
+replace = '''# // aurora-local-patch: feet-height-ftl-ja
+ui-options-aurora-ground-feet-offset = 足の高さ
+ui-options-aurora-ground-feet-offset-help = Auroraが足を地面に置いているすべてのアバター（自分と、上の上限内の他のアバター）を、装着物ごとこの高さだけまとめて上げます（０より大きい値）または下げます（０より小さい値）。自分の画面にのみ反映され、リージョンには何も送信されず、ホバーの高さも変わりません。デフォルト：０ｍ。
+ui-options-aurora-ground-feet-height-help ='''

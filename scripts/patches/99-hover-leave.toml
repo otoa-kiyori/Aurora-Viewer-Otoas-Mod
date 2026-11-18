@@ -1,0 +1,145 @@
+# The world hover stops while the cursor is outside the window.
+#
+# Upstream runs the world hover (the cursor's pick, the hover tips, the
+# look-at point, the drawn pick of posed surfaces every 100 ms) whenever egui
+# does not own the pointer. Nothing tells it that the cursor left the window:
+# `cursor_pos` keeps its last place, and the hover goes on picking there for
+# as long as the cursor is away, other windows in front included.
+#
+# Now the window's own events say where the cursor is, as the Legacy
+# Viewer's mMouseInWindow does (LLViewerWindow::handleMouseLeave and
+# handleMouseMove, indra/newview/llviewerwindow.cpp; updateUI only hovers
+# the current tool while it is set): CursorLeft stops the world hover and
+# forgets its pending drawn pick (the branch upstream already takes when the
+# hover may not run), CursorEntered and CursorMoved bring it back. The
+# demos' scripted cursor (camera demo Step::Cursor) counts as inside.
+#
+# One difference from the Legacy Viewer: mMouseInWindow starts false there
+# until the first mouse move; here the cursor counts as inside until a
+# CursorLeft, so a window opened under a resting cursor hovers at once, as
+# upstream does.
+#
+# Tests: hover_pick::tests (the events' rule). Apply or skip the whole file,
+# not one patch of it.
+
+[[patch]]
+id = "hover-leave-rule"
+why = "the rule: where the window's events put the cursor"
+paths = ["crates/aurora-viewer/src/app/hover_pick.rs"]
+op = "literal"
+find = "type Hit = (Option<Vec3>, Option<usize>);"
+replace = """type Hit = (Option<Vec3>, Option<usize>);
+
+// aurora-local-patch: hover-leave-rule
+/// Whether the cursor is inside the window after `event`, `was` before
+/// (LLViewerWindow::handleMouseLeave / handleMouseMove,
+/// indra/newview/llviewerwindow.cpp, originally LGPL 2.1): the world hover
+/// stops while it is outside.
+pub(super) fn cursor_inside(event: &winit::event::WindowEvent, was: bool) -> bool {
+    use winit::event::WindowEvent;
+    match event {
+        WindowEvent::CursorLeft { .. } => false,
+        WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => true,
+        _ => was,
+    }
+}"""
+
+[[patch]]
+id = "hover-leave-rule-test"
+why = "goes with hover-leave-rule: its unit test"
+paths = ["crates/aurora-viewer/src/app/hover_pick.rs"]
+op = "literal"
+find = """mod tests {
+    use super::*;"""
+replace = """mod tests {
+    use super::*;
+
+    // aurora-local-patch: hover-leave-rule-test
+    #[test]
+    fn the_hover_stops_while_the_cursor_is_outside_the_window() {
+        use winit::event::{DeviceId, WindowEvent};
+        let device_id = DeviceId::dummy();
+        let left = WindowEvent::CursorLeft { device_id };
+        let entered = WindowEvent::CursorEntered { device_id };
+        let moved = WindowEvent::CursorMoved {
+            device_id,
+            position: winit::dpi::PhysicalPosition::new(10.0, 20.0),
+        };
+        assert!(!cursor_inside(&left, true));
+        assert!(cursor_inside(&entered, false));
+        assert!(cursor_inside(&moved, false));
+        // anything else leaves it where it was
+        for was in [false, true] {
+            assert_eq!(cursor_inside(&WindowEvent::Focused(true), was), was);
+            assert_eq!(cursor_inside(&WindowEvent::Focused(false), was), was);
+        }
+    }"""
+
+[[patch]]
+id = "hover-leave-field"
+why = "where the window's events put the cursor"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "    hover_drawn: hover_pick::HoverDrawn,"
+replace = """hover_drawn: hover_pick::HoverDrawn,
+    // aurora-local-patch: hover-leave-field
+    /// The cursor is inside the window (`hover_pick::cursor_inside`): the
+    /// world hover stops while it is not.
+    cursor_in_window: bool,"""
+
+[[patch]]
+id = "hover-leave-init"
+why = "goes with hover-leave-field: inside until the window says otherwise"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "            hover_drawn: Default::default(),"
+replace = """hover_drawn: Default::default(),
+            cursor_in_window: true, // aurora-local-patch: hover-leave-init"""
+
+[[patch]]
+id = "hover-leave-event"
+why = "goes with hover-leave-field: every window event goes through the rule"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """        match &event {
+            WindowEvent::CloseRequested => {
+                self.request_exit();
+            }"""
+replace = """self.cursor_in_window = hover_pick::cursor_inside(&event, self.cursor_in_window); // aurora-local-patch: hover-leave-event
+        match &event {
+            WindowEvent::CloseRequested => {
+                self.request_exit();
+            }"""
+
+[[patch]]
+id = "hover-leave-gate"
+why = "goes with hover-leave-field: no world hover outside the window (the other branch forgets its drawn pick)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """            && self.media_cursor.is_none()
+            && !ctx.is_pointer_over_egui()
+            && !ctx.egui_wants_pointer_input()
+        {
+            let hud = self.scene.hover_hud(&self.world, self.cursor_pos);"""
+replace = """&& self.media_cursor.is_none()
+            && !ctx.is_pointer_over_egui()
+            && !ctx.egui_wants_pointer_input()
+            // aurora-local-patch: hover-leave-gate
+            && self.cursor_in_window
+        {
+            let hud = self.scene.hover_hud(&self.world, self.cursor_pos);"""
+
+[[patch]]
+id = "hover-leave-demo-cursor"
+why = "goes with hover-leave-field: a demo's scripted cursor is inside the window"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """        for step in crate::camera::demo::steps(spec, self.frame_count) {
+            match step {
+                Step::Cursor(x, y) => self.cursor_pos = (x, y),"""
+replace = """for step in crate::camera::demo::steps(spec, self.frame_count) {
+            match step {
+                Step::Cursor(x, y) => {
+                    self.cursor_pos = (x, y);
+                    self.cursor_in_window = true; // aurora-local-patch: hover-leave-demo-cursor
+                }"""

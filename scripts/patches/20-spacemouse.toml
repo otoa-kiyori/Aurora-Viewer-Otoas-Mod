@@ -1,0 +1,451 @@
+# SpaceMouse on Linux without a udev rule.
+#
+# The joystick worker reads 3D mice only through hidapi (hidraw). /dev/hidraw*
+# is root-only by default, so with the input on the open fails with EACCES and
+# the snapshot drops the mouse: the choice looks lost. The same mouse has an
+# input node the seat's user can already read, and gilrs already opens it.
+#
+# 1. When hidraw cannot be opened, read the mouse's own input node instead.
+# 2. A mouse nothing can open stays listed, after the working devices, so a
+#    selection survives and the existing error line says why.
+# 3. The persisted id hashes the HID port, not the hidrawN number that shifts
+#    with each replug.
+#
+# Windows and macOS keep their behaviour: all of it is behind
+# cfg(target_os = "linux").
+
+[[patch]]
+id = "spacemouse-hid-field"
+why = "a 3D mouse can be read through its input node"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "axis_at: [Instant; 2],"
+replace = '''axis_at: [Instant; 2],
+    // aurora-local-patch: spacemouse-hid-field
+    /// Its input node, read when hidraw is denied.
+    #[cfg(target_os = "linux")]
+    evdev: Option<evdev::Reader>,'''
+
+[[patch]]
+id = "spacemouse-hid-init"
+why = "the input node starts closed"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "axis_at: [Instant::now(); 2],"
+replace = '''axis_at: [Instant::now(); 2],
+                // aurora-local-patch: spacemouse-hid-init
+                #[cfg(target_os = "linux")]
+                evdev: None,'''
+
+[[patch]]
+id = "spacemouse-stable-id"
+why = "hidrawN shifts with each replug, which lost a saved selection"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "d.path().hash(&mut hash);"
+replace = '''// aurora-local-patch: spacemouse-stable-id
+            #[cfg(target_os = "linux")]
+            evdev::port(d.path())
+                .map_or_else(|| d.path().to_bytes().to_vec(), String::into_bytes)
+                .hash(&mut hash);
+            #[cfg(not(target_os = "linux"))]
+            d.path().hash(&mut hash);'''
+
+[[patch]]
+id = "spacemouse-list-closes"
+why = "the input off closes the input node like the HID handle"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = '''if !enabled {
+    m.handle = None;'''
+replace = '''if !enabled {
+                // aurora-local-patch: spacemouse-list-closes
+                #[cfg(target_os = "linux")]
+                {
+                    m.evdev = None;
+                }
+                m.handle = None;'''
+
+[[patch]]
+id = "spacemouse-open-guard"
+why = "no hidraw retry while the input node is being read"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = '''if m.handle.is_none()
+    && scanning'''
+replace = '''if !m.connected() // aurora-local-patch: spacemouse-open-guard
+                && scanning'''
+
+[[patch]]
+id = "spacemouse-evdev-fallback"
+why = "hidraw is root-only by default; the input node is readable by the seat's user"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = '''log::debug!("SpaceMouse open: {e}");
+self.error = e.to_string();'''
+replace = '''log::debug!("SpaceMouse open: {e}");
+                        self.error = e.to_string();
+                        // aurora-local-patch: spacemouse-evdev-fallback
+                        #[cfg(target_os = "linux")]
+                        match evdev::Reader::open(&m.path, &mut m.info) {
+                            Ok(reader) => {
+                                log::info!("SpaceMouse: {e}; reading {} instead", reader.node.display());
+                                m.evdev = Some(reader);
+                                if self.gilrs.is_some() {
+                                    self.error.clear();
+                                }
+                            }
+                            Err(fallback) => log::debug!("SpaceMouse input node: {fallback}"),
+                        }'''
+
+[[patch]]
+id = "spacemouse-evdev-read"
+why = "the frame's axes and buttons come from the input node when it is the one open"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "if let Some(handle) = &m.handle {"
+replace = '''// aurora-local-patch: spacemouse-evdev-read
+            #[cfg(target_os = "linux")]
+            if let Some(reader) = &mut m.evdev {
+                match reader.read(&mut m.info) {
+                    Ok(changed) => {
+                        for (i, moved) in changed.into_iter().enumerate() {
+                            // The kernel drops repeats of an absolute value, so
+                            // the silence below means "held", not "lost"; an
+                            // unplug ends in the read error.
+                            if moved || reader.absolute() {
+                                m.axis_at[i] = Instant::now();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("SpaceMouse input node read: {e}");
+                        self.error = e.to_string();
+                        m.evdev = None;
+                        m.info.axes = [0.0; AXES];
+                        m.info.buttons = 0;
+                    }
+                }
+            }
+            if let Some(handle) = &m.handle {'''
+
+[[patch]]
+id = "spacemouse-keep-listed"
+why = "a mouse that cannot be opened stays selectable and keeps its name, after the working devices so that First connected device never prefers it"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = '''.filter(|m| !enabled || m.handle.is_some())
+.map(|m| m.info.clone())
+.chain(self.pads.values().cloned())'''
+replace = '''.filter(|m| !enabled || m.connected())
+                .map(|m| m.info.clone())
+                .chain(self.pads.values().cloned())
+                // aurora-local-patch: spacemouse-keep-listed
+                .chain(
+                    self.mice
+                        .iter()
+                        .filter(|m| cfg!(target_os = "linux") && enabled && !m.connected())
+                        .map(|m| m.info.clone()),
+                )'''
+
+[[patch]]
+id = "spacemouse-evdev-reader"
+why = "the Linux reader of a 3D mouse's input node, with the same axes and buttons as decode_hid"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "const SPACE_MOUSE_VENDORS: [u16; 2] = [0x046d, 0x256f];"
+replace = '''// aurora-local-patch: spacemouse-evdev-reader
+impl Hid {
+    /// Something reads this device.
+    fn connected(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.evdev.is_some() {
+            return true;
+        }
+        self.handle.is_some()
+    }
+}
+
+/// A 3D mouse through its input node, when its hidraw node is denied:
+/// /dev/hidraw* is root-only without a udev rule, the input nodes are open to
+/// the seat's user. Read-only and never grabbed, the other readers keep their
+/// events. A 3D mouse's input events are its HID report fields, one to one
+/// (hid-input maps Generic Desktop X..Rz to ABS or REL X..RZ and the Button
+/// page to BTN_MISC + n), so this gives what decode_hid gives.
+#[cfg(target_os = "linux")]
+mod evdev {
+    use super::{Device, normalize};
+    use std::ffi::{CStr, OsStr};
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawFd};
+    use std::path::{Path, PathBuf};
+
+    const EV_SYN: u16 = 0;
+    const EV_KEY: u16 = 1;
+    const EV_REL: u16 = 2;
+    const EV_ABS: u16 = 3;
+    const SYN_DROPPED: u16 = 3;
+    const BTN_MISC: u16 = 0x100;
+    /// X, Y, Z, RX, RY, RZ are the first six codes of both ABS and REL.
+    const MOTION: usize = 6;
+    /// What a relative 3D mouse reports at full displacement, as in decode_hid.
+    const REL_RANGE: (i32, i32) = (-350, 350);
+    const EVENT: usize = size_of::<libc::input_event>();
+
+    pub struct Reader {
+        pub node: PathBuf,
+        file: std::fs::File,
+        /// Minimum and maximum of absolute axes; `None` for relative ones.
+        ranges: Option<[(i32, i32); MOTION]>,
+    }
+
+    impl Reader {
+        pub fn open(hidraw: &CStr, state: &mut Device) -> std::io::Result<Self> {
+            let Some((node, absolute)) = motion_node(hidraw) else {
+                return Err(Error::new(ErrorKind::NotFound, "no six-axis input node"));
+            };
+            let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&node)?;
+            let mut reader = Self { node, file, ranges: None };
+            if absolute {
+                let mut ranges = [REL_RANGE; MOTION];
+                for (axis, range) in ranges.iter_mut().enumerate() {
+                    let info = reader.abs_info(axis)?;
+                    *range = (info[1], info[2]);
+                }
+                reader.ranges = Some(ranges);
+                reader.sync(state);
+            }
+            Ok(reader)
+        }
+
+        pub fn absolute(&self) -> bool {
+            self.ranges.is_some()
+        }
+
+        /// Applies what the kernel queued; which of translation and rotation
+        /// moved. `Err` when the device is gone.
+        pub fn read(&mut self, state: &mut Device) -> std::io::Result<[bool; 2]> {
+            let mut changed = [false; 2];
+            let mut dropped = false;
+            let mut buf = [0u8; 64 * EVENT];
+            loop {
+                let read = match self.file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => break,
+                    Err(e) => return Err(e),
+                };
+                for event in buf[..read].as_chunks::<EVENT>().0 {
+                    let (kind, code, value) = fields(event);
+                    dropped |= kind == EV_SYN && code == SYN_DROPPED;
+                    for (seen, moved) in changed.iter_mut().zip(apply(state, self.ranges.as_ref(), kind, code, value)) {
+                        *seen |= moved;
+                    }
+                }
+            }
+            // The queue overflowed and may have lost the return to centre.
+            if dropped {
+                self.sync(state);
+            }
+            Ok(changed)
+        }
+
+        /// The axes' present values, which no event repeats.
+        fn sync(&self, state: &mut Device) {
+            for axis in 0..MOTION {
+                if let Ok(info) = self.abs_info(axis)
+                    && let Ok(code) = u16::try_from(axis)
+                {
+                    apply(state, self.ranges.as_ref(), EV_ABS, code, info[0]);
+                }
+            }
+        }
+
+        /// EVIOCGABS: value, minimum, maximum, fuzz, flat, resolution.
+        fn abs_info(&self, axis: usize) -> std::io::Result<[i32; 6]> {
+            let mut info = [0i32; 6];
+            let request = (2u32 << 30) | ((size_of_val(&info) as u32) << 16) | (u32::from(b'E') << 8) | (0x40 + axis as u32);
+            // SAFETY: the fd is open for the whole call, and the request writes
+            // one struct input_absinfo (six s32) into `info`, which outlives it.
+            let result = unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, info.as_mut_ptr()) };
+            if result < 0 { Err(Error::last_os_error()) } else { Ok(info) }
+        }
+    }
+
+    /// Type, code and value: the last 8 bytes of struct input_event, after its
+    /// timestamp whose size depends on the architecture.
+    fn fields(event: &[u8]) -> (u16, u16, i32) {
+        let tail = &event[event.len() - 8..];
+        (
+            u16::from_ne_bytes([tail[0], tail[1]]),
+            u16::from_ne_bytes([tail[2], tail[3]]),
+            i32::from_ne_bytes([tail[4], tail[5], tail[6], tail[7]]),
+        )
+    }
+
+    /// One event, with decode_hid's scale and signs.
+    fn apply(state: &mut Device, ranges: Option<&[(i32, i32); MOTION]>, kind: u16, code: u16, value: i32) -> [bool; 2] {
+        let mut changed = [false; 2];
+        let axis = usize::from(code);
+        match (kind, ranges) {
+            (EV_ABS, Some(_)) | (EV_REL, None) if axis < MOTION => {
+                let (min, max) = ranges.map_or(REL_RANGE, |r| r[axis]);
+                let value = normalize(value, min, max);
+                // Not -value: a centred axis stays +0.00 in the monitor.
+                state.axes[axis] = if matches!(axis, 2..=4) { 0.0 - value } else { value };
+                changed[axis / 3] = true;
+            }
+            (EV_KEY, _) if code >= BTN_MISC => state.button(usize::from(code - BTN_MISC), value != 0),
+            _ => {}
+        }
+        changed
+    }
+
+    /// The input node of a hidraw node that carries the six axes, and whether
+    /// they are absolute. Reads sysfs only.
+    fn motion_node(hidraw: &CStr) -> Option<(PathBuf, bool)> {
+        let name = Path::new(OsStr::from_bytes(hidraw.to_bytes())).file_name()?;
+        let inputs = Path::new("/sys/class/hidraw").join(name).join("device/input");
+        let mut inputs: Vec<_> = std::fs::read_dir(inputs).ok()?.flatten().map(|e| e.path()).collect();
+        inputs.sort();
+        inputs.into_iter().find_map(|input| {
+            let caps = |kind: &str| std::fs::read_to_string(input.join("capabilities").join(kind)).unwrap_or_default();
+            let absolute = six_axes(&caps("abs"));
+            if !absolute && !six_axes(&caps("rel")) {
+                return None;
+            }
+            let event = std::fs::read_dir(&input)
+                .ok()?
+                .flatten()
+                .map(|e| e.file_name())
+                .find(|e| e.as_bytes().starts_with(b"event"))?;
+            Some((Path::new("/dev/input").join(event), absolute))
+        })
+    }
+
+    /// A sysfs capability mask, most significant word first, has the six axes.
+    fn six_axes(caps: &str) -> bool {
+        caps.split_whitespace()
+            .last()
+            .and_then(|word| u64::from_str_radix(word, 16).ok())
+            .is_some_and(|bits| bits & 0x3f == 0x3f)
+    }
+
+    /// The physical port of a hidraw node, which outlives its hidrawN number.
+    pub fn port(hidraw: &CStr) -> Option<String> {
+        let name = Path::new(OsStr::from_bytes(hidraw.to_bytes())).file_name()?;
+        let uevent = std::fs::read_to_string(Path::new("/sys/class/hidraw").join(name).join("device/uevent")).ok()?;
+        phys(&uevent).map(str::to_owned)
+    }
+
+    fn phys(uevent: &str) -> Option<&str> {
+        uevent.lines().find_map(|l| l.strip_prefix("HID_PHYS=")).filter(|p| !p.is_empty())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::{Hid, Use, Worker};
+        use super::*;
+        use std::time::Instant;
+
+        fn device() -> Device {
+            Device::new("test".into(), "test".into(), 6)
+        }
+
+        fn mouse(id: &str) -> Hid {
+            Hid {
+                path: c"/nonexistent/hidraw99".to_owned(),
+                info: Device::new(id.into(), "mouse".into(), 6),
+                handle: None,
+                axis_at: [Instant::now(); 2],
+                evdev: None,
+            }
+        }
+
+        #[test]
+        fn spacemouse_evdev_gives_what_the_hid_report_gives() {
+            // The six axes of a wired SpaceMouse (vendor 256f), as both sides read them.
+            let values = [350i16, -350, 175, -175, 0, 350];
+            let mut report = vec![1];
+            for v in values {
+                report.extend(v.to_le_bytes());
+            }
+            let mut hid = device();
+            assert_eq!(super::super::decode_hid(&mut hid, &report), [true, true]);
+            let ranges = [(-350, 350); MOTION];
+            let mut ev = device();
+            for (code, v) in values.into_iter().enumerate() {
+                let code = u16::try_from(code).expect("axis");
+                apply(&mut ev, Some(&ranges), EV_ABS, code, i32::from(v));
+            }
+            assert_eq!(ev.axes, hid.axes);
+            // The same numbers from a relative device.
+            let mut rel = device();
+            for (code, v) in values.into_iter().enumerate() {
+                let code = u16::try_from(code).expect("axis");
+                apply(&mut rel, None, EV_REL, code, i32::from(v));
+            }
+            assert_eq!(rel.axes, hid.axes);
+        }
+
+        #[test]
+        fn spacemouse_evdev_buttons_and_foreign_events() {
+            let ranges = [(-350, 350); MOTION];
+            let mut d = device();
+            assert_eq!(apply(&mut d, Some(&ranges), EV_KEY, BTN_MISC + 1, 1), [false; 2]);
+            assert_eq!(d.buttons, 0b10);
+            assert_eq!(d.presses[1], 1);
+            apply(&mut d, Some(&ranges), EV_KEY, BTN_MISC + 1, 0);
+            assert_eq!(d.buttons, 0);
+            // A button past the bitset, a seventh axis, the wrong axis kind.
+            apply(&mut d, Some(&ranges), EV_KEY, BTN_MISC + 64, 1);
+            assert_eq!(apply(&mut d, Some(&ranges), EV_ABS, 6, 350), [false; 2]);
+            assert_eq!(apply(&mut d, Some(&ranges), EV_REL, 0, 350), [false; 2]);
+            assert_eq!(apply(&mut d, None, EV_ABS, 0, 350), [false; 2]);
+            assert_eq!(d.axes, [0.0; super::super::AXES]);
+            // Translation and rotation report apart, for the stale check.
+            assert_eq!(apply(&mut d, Some(&ranges), EV_ABS, 2, 1), [true, false]);
+            assert_eq!(apply(&mut d, Some(&ranges), EV_ABS, 3, 1), [false, true]);
+        }
+
+        #[test]
+        fn spacemouse_evdev_event_layout_and_sysfs_text() {
+            assert_eq!(std::mem::offset_of!(libc::input_event, type_), EVENT - 8);
+            assert_eq!(std::mem::offset_of!(libc::input_event, value), EVENT - 4);
+            let mut event = vec![0u8; EVENT];
+            event[EVENT - 8..EVENT - 6].copy_from_slice(&EV_ABS.to_ne_bytes());
+            event[EVENT - 6..EVENT - 4].copy_from_slice(&5u16.to_ne_bytes());
+            event[EVENT - 4..].copy_from_slice(&(-350i32).to_ne_bytes());
+            assert_eq!(fields(&event), (EV_ABS, 5, -350));
+            assert!(six_axes("3f\n"));
+            assert!(six_axes("30000 3f\n"));
+            assert!(!six_axes("0\n"));
+            assert!(!six_axes("3\n"));
+            assert!(!six_axes(""));
+            assert_eq!(phys("DRIVER=x\nHID_PHYS=usb-1/input0\nHID_UNIQ=\n"), Some("usb-1/input0"));
+            assert_eq!(phys("HID_PHYS=\n"), None);
+            assert_eq!(phys("HID_NAME=x\n"), None);
+        }
+
+        #[test]
+        fn spacemouse_nothing_can_open_stays_listed_after_working_devices() {
+            let mut worker = Worker {
+                started: true,
+                // Never due, the scan would look for the real devices.
+                scan_at: Some(Instant::now() + std::time::Duration::from_secs(3600)),
+                ..Default::default()
+            };
+            worker.mice.push(mouse("ndof:denied"));
+            worker.pads.insert(0, Device::new("pad".into(), "pad".into(), 2));
+            let ids = |worker: &mut Worker, mode| {
+                let snapshot = worker.poll(mode);
+                snapshot.devices.iter().map(|d| d.id.clone()).collect::<Vec<_>>()
+            };
+            // A pad stays First connected device; the choice still resolves.
+            assert_eq!(ids(&mut worker, Use::On), ["pad", "ndof:denied"]);
+            assert_eq!(ids(&mut worker, Use::List), ["ndof:denied", "pad"]);
+        }
+    }
+}
+
+const SPACE_MOUSE_VENDORS: [u16; 2] = [0x046d, 0x256f];'''

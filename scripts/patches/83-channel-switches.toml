@@ -1,0 +1,861 @@
+# The volume rows of Preferences > Sound and voice: the box switches a channel
+# off, the switch beside it only mutes.
+#
+# Rule (Otoa's): the speaker switch mutes (still connected, still receiving,
+# silent); the box turns the channel off (nothing fetched, received or
+# played). Per row (the master has no box):
+#
+# - Interface (audio.enabled[1]): off, no interface sound is wanted, loaded
+#   or played (play_ui_sound). They are local sounds: there is nothing to
+#   disconnect. Sound previews (inventory, sound explorer) and the photo
+#   shutter play on this channel too: they are the user's own actions and
+#   stay silent through the engine's channel switch. The Legacy Viewer has no
+#   box on this row (MuteUI only).
+# - Ambient (audio.enabled[2]): the wind is the only sound of that channel
+#   here; off, it is not synthesised (fades to nothing, then WindGen skips
+#   its work). The Legacy Viewer's box on that row is EnableCollisionSounds,
+#   which Aurora keeps as its own toggle (Music and sounds group).
+# - Sounds (audio.enabled[3]): every world sound (attached, triggered,
+#   collision, gesture, typing). Off: SoundTrigger and PreloadSound are
+#   neither recorded nor fetched, one-shots are dropped, playing voices stop,
+#   what was wanted but not loaded yet is forgotten and fetch() starts no
+#   cache read or download for world sounds. Looping sources stay known and
+#   pending: when the box is ticked again their sounds are wanted and they
+#   start again (the way a loop out of reach already resumes). A download
+#   already in flight finishes and goes to the disk cache (not cancelled).
+#   The Legacy Viewer's box on that row is EnableGestureSounds, also kept as
+#   its own toggle here.
+# - Music (audio.enabled[4], the Legacy Viewer's AudioStreamingMusic,
+#   enable_music): off, the radio is turned off and a /music stream
+#   forgotten, so the stream is stopped at once and never started: no
+#   autoplay, no media filter question (filterAudioUrl is only reached with a
+#   stream wanted, as optionallyStartMusic is gated on AudioStreamingMusic in
+#   llviewerparcelmgr.cpp), and the top-bar radio is greyed with a tooltip
+#   (mStreamToggle enabled = AudioStreamingMusic && hasParcelAudio,
+#   LLStatusBar::refresh). Ticked again, nothing restarts by itself: the radio
+#   button, or autoplay on the next parcel, as in the Legacy Viewer (no
+#   listener on AudioStreamingMusic). Stricter: the Legacy Viewer leaves a
+#   playing stream alone until the next parcel; here it stops at once. The
+#   existing audio.enabled[4] is reused, no second setting: upstream's
+#   Radio::target (app/parcel_music.rs) already wants nothing while it is
+#   off but keeps the radio on, so ticking it would restart the stream; the
+#   gate turns the radio itself off (Radio::switch_off) and the account's
+#   remembered radio choice (parcel_music_accounts) with it.
+# - Multimedia (settings.media.enabled, AudioStreamingMedia, enable_media):
+#   the same switch as Preferences > Media > Enable media, live, with the
+#   gates of 82-media-off. The top-bar media button is greyed while media is
+#   off (upstream's media_available includes Enable media; since #3544 its
+#   hover opens the nearby media panel instead of a tooltip, so the button
+#   has no "media is off" tip of its own any more).
+# - Voice (audio.voice_enabled, EnableVoiceChat, enable_voice_check): the
+#   same switch as Voice > Enable voice: off, voice disconnects, microphone
+#   included. The top-bar panel's box already was this one.
+#
+# audio.enabled[5] and [6] lose their box everywhere: loading the settings
+# sets them on (Settings::sanitized), so an earlier session cannot leave
+# media or voice silent with nothing to tick. The engine's channel switches
+# (app.rs, set_enabled) stay as a backstop for every channel.
+#
+# Reset: a Sound row's reset still covers volume, mute and audio.enabled[i]:
+# the box for Interface, Ambient, Sounds and Music. Enable media stays owned
+# by the Media page and Enable voice by its own row of the Voice tab (one
+# page per setting, a_setting_has_one_page): resetting the volumes never turns
+# media back on.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ---------------------------------------------------------------- settings
+
+[[patch]]
+id = "channel-switch-consts"
+why = "the rows of audio_channels by name, and the tooltip of each row's box"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "pub fn audio_channels() -> [&'static str; 7] {"
+replace = '''// aurora-local-patch: channel-switch-consts
+/// Rows of `audio_channels` whose box is special-cased.
+pub const UI_CHANNEL: usize = 1;
+pub const AMBIENT_CHANNEL: usize = 2;
+pub const SOUNDS_CHANNEL: usize = 3;
+/// Its box is `audio.enabled[4]`, AudioStreamingMusic.
+pub const MUSIC_CHANNEL: usize = 4;
+/// Its box is `MediaSettings::enabled` (AudioStreamingMedia).
+pub const MEDIA_CHANNEL: usize = 5;
+/// Its box is `audio.voice_enabled` (EnableVoiceChat).
+pub const VOICE_CHANNEL: usize = 6;
+
+/// The tooltip of the box of row `i`: off means off, the mute is beside it.
+pub fn channel_box_tip(i: usize) -> &'static str {
+    match i {
+        UI_CHANNEL => aurora_i18n::tr!("ui-options-channel-switch-ui"),
+        AMBIENT_CHANNEL => aurora_i18n::tr!("ui-options-channel-switch-ambient"),
+        SOUNDS_CHANNEL => aurora_i18n::tr!("ui-options-channel-switch-sounds"),
+        MUSIC_CHANNEL => aurora_i18n::tr!("ui-options-channel-switch-music"),
+        MEDIA_CHANNEL => aurora_i18n::tr!("ui-options-channel-switch-media"),
+        _ => aurora_i18n::tr!("ui-options-channel-switch-voice"),
+    }
+}
+
+pub fn audio_channels() -> [&'static str; 7] {'''
+
+[[patch]]
+id = "channel-switch-forced-on"
+why = "the media and voice channels have no box any more: an earlier session's unticked box is set on at load"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "insert_fn_start"
+fn = "sanitized"
+impl = "Settings"
+expect_sig = 'fn sanitized\(mut self\) -> Settings'
+body = '''
+// the boxes of these rows became Enable media and Enable voice: nothing
+// ticks the channels themselves back on, so they are always on
+self.audio.enabled[MEDIA_CHANNEL] = true;
+self.audio.enabled[VOICE_CHANNEL] = true;'''
+
+[[patch]]
+id = "channel-switch-test-settings"
+why = "the special-cased rows are the right channels; loading turns the media and voice channels on"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "mod tests {"
+replace = '''mod tests {
+    // aurora-local-patch: channel-switch-test-settings
+    #[test]
+    fn the_channel_rows_are_named_and_media_and_voice_channels_are_on_after_loading() {
+        use super::*;
+        let names = audio_channels();
+        assert_eq!(names[UI_CHANNEL], aurora_i18n::tr!("common-interface"));
+        assert_eq!(names[AMBIENT_CHANNEL], aurora_i18n::tr!("common-ambient"));
+        assert_eq!(names[SOUNDS_CHANNEL], aurora_i18n::tr!("common-sounds"));
+        assert_eq!(names[MUSIC_CHANNEL], aurora_i18n::tr!("common-music"));
+        assert_eq!(names[MEDIA_CHANNEL], aurora_i18n::tr!("settings-multimedia"));
+        assert_eq!(names[VOICE_CHANNEL], aurora_i18n::tr!("common-voice"));
+        let mut old = Settings::default();
+        old.audio.enabled = [false; 7];
+        old.media.enabled = false;
+        old.audio.voice_enabled = false;
+        let s = old.sanitized();
+        assert!(s.audio.enabled[MEDIA_CHANNEL] && s.audio.enabled[VOICE_CHANNEL]);
+        // the real switches are kept as they were
+        for i in [UI_CHANNEL, AMBIENT_CHANNEL, SOUNDS_CHANNEL, MUSIC_CHANNEL] {
+            assert!(!s.audio.enabled[i]);
+        }
+        assert!(!s.media.enabled && !s.audio.voice_enabled);
+    }
+'''
+
+# ------------------------------------------------- Preferences > Sound and voice
+
+[[patch]]
+id = "channel-switch-sound-fn"
+why = "the setting behind each row's box, as one function the tests check"
+paths = ["crates/aurora-viewer/src/ui/options/pages/sound.rs"]
+op = "literal"
+find = "fn volumes(cx: &mut Cx) {"
+replace = '''// aurora-local-patch: channel-switch-sound-fn
+/// The setting the box of volume row `i` (not the master) switches: the
+/// channel itself, or for media and voice the real switch the Legacy Viewer
+/// binds there (enable_media: AudioStreamingMedia, enable_voice_check:
+/// EnableVoiceChat, panel_preferences_sound.xml).
+fn channel_box(s: &mut crate::settings::Settings, i: usize) -> &mut bool {
+    use crate::settings::{MEDIA_CHANNEL, VOICE_CHANNEL};
+    match i {
+        MEDIA_CHANNEL => &mut s.media.enabled,
+        VOICE_CHANNEL => &mut s.audio.voice_enabled,
+        _ => &mut s.audio.enabled[i],
+    }
+}
+
+fn volumes(cx: &mut Cx) {'''
+
+[[patch]]
+id = "channel-switch-sound-test"
+why = "the boxes switch media, voice and the other channels (at the end of the file: clippy's items_after_test_module)"
+paths = ["crates/aurora-viewer/src/ui/options/pages/sound.rs"]
+op = "regex"
+pattern = '\n\Z'
+replace = '''
+
+
+// aurora-local-patch: channel-switch-sound-test
+#[cfg(test)]
+mod channel_switch_tests {
+    use super::channel_box;
+    use crate::settings::{MEDIA_CHANNEL, MUSIC_CHANNEL, Settings, VOICE_CHANNEL};
+
+    #[test]
+    fn the_boxes_switch_media_voice_and_the_other_channels() {
+        let mut s = Settings::default();
+        *channel_box(&mut s, MEDIA_CHANNEL) = false;
+        assert!(!s.media.enabled && s.audio.enabled[MEDIA_CHANNEL]);
+        *channel_box(&mut s, VOICE_CHANNEL) = false;
+        assert!(!s.audio.voice_enabled && s.audio.enabled[VOICE_CHANNEL]);
+        for i in 1..=MUSIC_CHANNEL {
+            *channel_box(&mut s, i) = false;
+            assert!(!s.audio.enabled[i]);
+        }
+        // muting is another setting: the boxes leave it alone
+        assert_eq!(s.audio.muted, Settings::default().audio.muted);
+    }
+}
+'''
+
+[[patch]]
+id = "channel-switch-sound-slider"
+why = "a row's slider is dimmed by its box's real setting"
+paths = ["crates/aurora-viewer/src/ui/options/pages/sound.rs"]
+op = "literal"
+fn = "volumes"
+find = "let enabled = !a.muted[i] && a.enabled[i];"
+replace = '''// aurora-local-patch: channel-switch-sound-slider
+                let on = match i {
+                    crate::settings::MEDIA_CHANNEL => s.media.enabled,
+                    crate::settings::VOICE_CHANNEL => a.voice_enabled,
+                    _ => a.enabled[i],
+                };
+                let enabled = !a.muted[i] && on;'''
+
+[[patch]]
+id = "channel-switch-sound-mute-tip"
+why = "the switch says it only mutes"
+paths = ["crates/aurora-viewer/src/ui/options/pages/sound.rs"]
+op = "literal"
+fn = "volumes"
+find = '''.on_hover_text(if on { tr!("common-cut") } else { tr!("ui-options-restore") })'''
+replace = '''// aurora-local-patch: channel-switch-sound-mute-tip
+                    .on_hover_text(if on {
+                        tr!("ui-options-channel-mute")
+                    } else {
+                        tr!("ui-options-channel-unmute")
+                    })'''
+
+[[patch]]
+id = "channel-switch-sound-box"
+why = "each row's box reads and writes its real switch, with a tooltip saying off is off"
+paths = ["crates/aurora-viewer/src/ui/options/pages/sound.rs"]
+op = "literal"
+fn = "volumes"
+find = '''if i > 0 {
+                    ch |= widgets::checkbox(ui, &p, &mut a.enabled[i], "")
+                        .on_hover_text(tr!("ui-options-enable-this-channel"))
+                        .changed();
+                }'''
+replace = '''if i > 0 {
+                    // aurora-local-patch: channel-switch-sound-box
+                    // off: nothing fetched, received or played (the switch
+                    // beside it only mutes); live, the consumers read it
+                    // every frame
+                    ch |= widgets::checkbox(ui, &p, channel_box(s, i), "")
+                        .on_hover_text(crate::settings::channel_box_tip(i))
+                        .changed();
+                }'''
+
+# ------------------------------------------------------------- the texts
+
+[[patch]]
+id = "channel-switch-text-en"
+why = "the tooltips of the boxes and the mute switches (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-enable-this-channel = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: channel-switch-text-en
+ui-options-channel-switch-ui = Interface sounds on or off. Off: none is loaded or played. The switch beside it only mutes.
+ui-options-channel-switch-ambient = Ambient sound (the wind) on or off. Off: it is not made at all. The switch beside it only mutes.
+ui-options-channel-switch-sounds = World sounds on or off. Off: the sounds of objects, gestures and collisions are neither downloaded nor played; looping sounds start again once it is back on. The switch beside it only mutes.
+ui-options-channel-switch-music = Parcel music on or off. Off: the stream is disconnected and nothing downloads; it does not start again by itself. The switch beside it only mutes.
+ui-options-channel-switch-media = Media on or off. Off: nothing loads or plays (the same switch as Media › Enable media). The switch beside it only mutes.
+ui-options-channel-switch-voice = Voice chat on or off. Off: voice is disconnected, microphone included (the same switch as Enable voice). The switch beside it only mutes the others.
+ui-options-channel-mute = Mute: silent, but still connected and receiving
+ui-options-channel-unmute = Unmute
+ui-audio-music-off = Parcel music is off (its box in the volume panel)'''
+
+[[patch]]
+id = "channel-switch-text-fr"
+why = "goes with channel-switch-text-en (French); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-enable-this-channel = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: channel-switch-text-fr
+ui-options-channel-switch-ui = Sons de l'interface activés ou non. Désactivés : aucun n'est chargé ni joué. L'interrupteur à côté coupe seulement le son.
+ui-options-channel-switch-ambient = Son d'ambiance (le vent) activé ou non. Désactivé : il n'est pas produit du tout. L'interrupteur à côté coupe seulement le son.
+ui-options-channel-switch-sounds = Sons du monde activés ou non. Désactivés : les sons des objets, des gestes et des collisions ne sont ni téléchargés ni joués ; les sons en boucle reprennent une fois réactivés. L'interrupteur à côté coupe seulement le son.
+ui-options-channel-switch-music = Musique de la parcelle activée ou non. Désactivée : le flux est déconnecté et rien n'est téléchargé ; elle ne reprend pas d'elle-même. L'interrupteur à côté coupe seulement le son.
+ui-options-channel-switch-media = Médias activés ou non. Désactivés : rien ne se charge ni ne se lit (le même interrupteur que Médias › Activer les médias). L'interrupteur à côté coupe seulement le son.
+ui-options-channel-switch-voice = Chat vocal activé ou non. Désactivé : la voix est déconnectée, micro compris (le même interrupteur que Activer la voix). L'interrupteur à côté coupe seulement le son des autres.
+ui-options-channel-mute = Couper le son : silencieux, mais toujours connecté et en réception
+ui-options-channel-unmute = Rétablir le son
+ui-audio-music-off = La musique de la parcelle est désactivée (sa case dans le panneau des volumes)'''
+
+[[patch]]
+id = "channel-switch-text-ja"
+why = "goes with channel-switch-text-en (Japanese); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-enable-this-channel = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: channel-switch-text-ja
+ui-options-channel-switch-ui = インターフェースのサウンドのオン・オフ。オフにすると、読み込みも再生もされません。横のスイッチはミュートだけです。
+ui-options-channel-switch-ambient = アンビエント音（風）のオン・オフ。オフにすると、まったく生成されません。横のスイッチはミュートだけです。
+ui-options-channel-switch-sounds = ワールドのサウンドのオン・オフ。オフにすると、オブジェクト・ジェスチャー・衝突のサウンドはダウンロードも再生もされません。ループするサウンドはオンに戻すと再開します。横のスイッチはミュートだけです。
+ui-options-channel-switch-music = 区画の音楽のオン・オフ。オフにすると、ストリームが切断され、何もダウンロードされません。自動では再開しません。横のスイッチはミュートだけです。
+ui-options-channel-switch-media = メディアのオン・オフ。オフにすると、何も読み込まれず再生もされません（メディア › メディアを有効にする と同じスイッチ）。横のスイッチはミュートだけです。
+ui-options-channel-switch-voice = ボイスチャットのオン・オフ。オフにすると、マイクを含めボイスが切断されます（ボイスチャットを有効にする と同じスイッチ）。横のスイッチは他の人の声のミュートだけです。
+ui-options-channel-mute = ミュート：無音ですが、接続と受信は続きます
+ui-options-channel-unmute = ミュートを解除
+ui-audio-music-off = 区画の音楽はオフです（音量パネルのチェックボックス）'''
+
+# ------------------------------------------------- the top-bar volume panel
+
+[[patch]]
+id = "channel-switch-panel-state"
+why = "the speaker panel learns whether media is on, to draw its media box"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+find = '''/// A media is on.
+    pub media_playing: bool,'''
+replace = '''/// A media is on.
+    pub media_playing: bool,
+    /// Media › Enable media (AudioStreamingMedia): the media row's box.
+    pub media_enabled: bool, // aurora-local-patch: channel-switch-panel-state'''
+
+[[patch]]
+id = "channel-switch-panel-action"
+why = "the speaker panel's media box asks the app to switch media, the panel has no media settings"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+find = '''LLViewerMedia::setAllMediaEnabled).
+    ToggleMedia,'''
+replace = '''LLViewerMedia::setAllMediaEnabled).
+    ToggleMedia,
+    /// The media row's box: Media › Enable media on or off.
+    SetMediaEnabled(bool), // aurora-local-patch: channel-switch-panel-action'''
+
+[[patch]]
+id = "channel-switch-panel-enable-box"
+why = "the media row's box is the media switch, drawn apart; music keeps its channel (AudioStreamingMusic)"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "enable_box"
+find = "6 => Some(&mut audio.voice_enabled),"
+replace = '''6 => Some(&mut audio.voice_enabled),
+        // aurora-local-patch: channel-switch-panel-enable-box
+        // the media box is the media switch (enable_media of
+        // panel_volume_pulldown.xml, AudioStreamingMedia), drawn apart
+        crate::settings::MEDIA_CHANNEL => None,'''
+
+[[patch]]
+id = "channel-switch-panel-channel-on"
+why = "whether a row of the speaker panel is drawn live: the real switch behind its box"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+find = "/// What the parcel offers and what is playing."
+replace = '''// aurora-local-patch: channel-switch-panel-channel-on
+/// Whether row `i` of the panel is drawn live: the switch behind its box.
+fn channel_on(audio: &AudioSettings, media: MediaState, i: usize) -> bool {
+    match i {
+        crate::settings::MEDIA_CHANNEL => media.media_enabled,
+        crate::settings::VOICE_CHANNEL => audio.voice_enabled,
+        _ => audio.enabled[i],
+    }
+}
+
+/// What the parcel offers and what is playing.'''
+
+[[patch]]
+id = "channel-switch-panel-music-tip"
+why = "the radio says the music is off rather than absent (mStreamToggle disabled without AudioStreamingMusic)"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "top_controls"
+find = '''if !media.music_available {
+                    aurora_i18n::tr!("ui-audio-no-music-on-this-parcel")'''
+replace = '''if !audio.enabled[crate::settings::MUSIC_CHANNEL] {
+                // aurora-local-patch: channel-switch-panel-music-tip
+                aurora_i18n::tr!("ui-audio-music-off")
+            } else if !media.music_available {
+                aurora_i18n::tr!("ui-audio-no-music-on-this-parcel")'''
+
+[[patch]]
+id = "channel-switch-panel-row-on"
+why = "computed before the slider borrows the volume"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "top_controls"
+find = "let r = super::widgets::volume_slider("
+replace = '''let on = channel_on(audio, media, i); // aurora-local-patch: channel-switch-panel-row-on
+                            let r = super::widgets::volume_slider('''
+
+[[patch]]
+id = "channel-switch-panel-slider"
+why = "the panel's slider is dimmed like its row"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "top_controls"
+find = '''super::widgets::VolumeScale::Gain,
+                                audio.enabled[i],'''
+replace = '''super::widgets::VolumeScale::Gain,
+                                on, // aurora-local-patch: channel-switch-panel-slider'''
+
+[[patch]]
+id = "channel-switch-panel-mute"
+why = "the panel's mute icon is dimmed like its row"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "top_controls"
+find = "icon_toggle(ui, p, icons, icon, tip, audio.muted[i], audio.enabled[i]).clicked() {"
+replace = '''icon_toggle(ui, p, icons, icon, tip, audio.muted[i], on) // aurora-local-patch: channel-switch-panel-mute
+                                .clicked()
+                            {'''
+
+[[patch]]
+id = "channel-switch-panel-box"
+why = "the panel's media box shows and switches Enable media; every box gets the tooltip of its row"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "top_controls"
+find = '''} else if let Some(on) = enable_box(audio, i) {
+                                let tip = if *on {
+                                    aurora_i18n::tr!("ui-audio-disable")
+                                } else {
+                                    aurora_i18n::tr!("common-enable")
+                                };'''
+replace = '''} else if i == crate::settings::MEDIA_CHANNEL {
+                                // aurora-local-patch: channel-switch-panel-box
+                                let mut on = media.media_enabled;
+                                if super::widgets::checkbox(ui, p, &mut on, "")
+                                    .on_hover_text(crate::settings::channel_box_tip(i))
+                                    .changed()
+                                {
+                                    action = AudioAction::SetMediaEnabled(on);
+                                }
+                            } else if let Some(on) = enable_box(audio, i) {
+                                let tip = crate::settings::channel_box_tip(i);'''
+
+[[patch]]
+id = "channel-switch-test-panel"
+why = "the panel's rows follow their real switches"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+find = '''mod tests {
+    use super::*;'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: channel-switch-test-panel
+    #[test]
+    fn the_panel_rows_follow_their_real_switches() {
+        use crate::settings::{MEDIA_CHANNEL, MUSIC_CHANNEL, VOICE_CHANNEL};
+        let mut a = AudioSettings::default();
+        assert!(enable_box(&mut a, MEDIA_CHANNEL).is_none());
+        let off = MediaState {
+            media_enabled: false,
+            ..MediaState::default()
+        };
+        let on = MediaState {
+            media_enabled: true,
+            ..MediaState::default()
+        };
+        assert!(!channel_on(&a, off, MEDIA_CHANNEL));
+        assert!(channel_on(&a, on, MEDIA_CHANNEL));
+        // the media and voice channels' own flags no longer count
+        a.enabled[MEDIA_CHANNEL] = false;
+        a.enabled[VOICE_CHANNEL] = false;
+        assert!(channel_on(&a, on, MEDIA_CHANNEL));
+        assert!(channel_on(&a, on, VOICE_CHANNEL));
+        a.voice_enabled = false;
+        assert!(!channel_on(&a, on, VOICE_CHANNEL));
+        // music is its channel (AudioStreamingMusic)
+        assert!(channel_on(&a, off, MUSIC_CHANNEL));
+        *enable_box(&mut a, MUSIC_CHANNEL).expect("the music has a box") = false;
+        assert!(!channel_on(&a, on, MUSIC_CHANNEL));
+    }'''
+
+# ------------------------------------------------------------- world sounds
+
+[[patch]]
+id = "channel-switch-sounds-field"
+why = "whether world sounds are on (the Sounds row's box)"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+find = '''pub doppler: doppler::Doppler,
+}'''
+replace = '''pub doppler: doppler::Doppler,
+    /// The Sounds row's box (`set_world_sounds`): off, no world sound is
+    /// asked for, fetched or played.
+    world_on: bool, // aurora-local-patch: channel-switch-sounds-field
+}'''
+
+[[patch]]
+id = "channel-switch-sounds-init"
+why = "world sounds start on"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "new"
+find = "audible: Vec::new(),"
+replace = '''audible: Vec::new(),
+            world_on: true, // aurora-local-patch: channel-switch-sounds-init'''
+
+[[patch]]
+id = "channel-switch-sounds-set"
+why = "turning world sounds off stops and forgets them at once, loops excepted; on again, the loops are wanted again"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+find = "    /// Ask for a sound (PreloadSound, or before playing it)."
+replace = '''// aurora-local-patch: channel-switch-sounds-set
+    /// The Sounds row's box. Off: the playing world sounds stop, one-shots
+    /// and triggered sounds are dropped, looping sources stay pending (as a
+    /// loop out of reach does) and what was only wanted, not loaded yet, is
+    /// forgotten. On again: the pending loops' sounds are wanted, so they
+    /// load and start again.
+    pub fn set_world_sounds(&mut self, engine: Option<&AudioEngine>, on: bool) {
+        if on == self.world_on {
+            return;
+        }
+        self.world_on = on;
+        if on {
+            let wanted: Vec<Uuid> = self.sources.values().filter(|s| s.pending.is_some()).map(|s| s.sound).collect();
+            for id in wanted {
+                self.want(id);
+            }
+            return;
+        }
+        let now = Instant::now();
+        for s in self.sources.values_mut() {
+            if let (Some(p), Some(e)) = (s.playing.take(), engine) {
+                e.stop_world(p.voice);
+            }
+            s.pending = (s.flags & FLAG_LOOP != 0).then_some(now);
+            s.queued = None;
+        }
+        for t in self.triggered.drain(..) {
+            if let (Some(p), Some(e)) = (t.playing, engine) {
+                e.stop_world(p.voice);
+            }
+        }
+        let local = self.local_sounds().unwrap_or_default();
+        self.clips.retain(|id, c| c.state >= 3 || c.kept || local.contains(id));
+    }
+
+    /// While world sounds are off, the sounds that still load: the
+    /// interface sounds waiting for their clip and the previews. None while
+    /// they are on.
+    fn local_sounds(&self) -> Option<HashSet<Uuid>> {
+        (!self.world_on).then(|| {
+            self.previews
+                .keys()
+                .copied()
+                .chain(self.ui_pending.iter().map(|(id, _)| *id))
+                .collect()
+        })
+    }
+
+    /// Ask for a sound (PreloadSound, or before playing it).'''
+
+[[patch]]
+id = "channel-switch-sounds-attached-drop"
+why = "an attached one-shot while world sounds are off is dropped, as it would replace the current sound"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "set_attached"
+find = "// already looping this sound: only the volume changes"
+replace = '''// aurora-local-patch: channel-switch-sounds-attached-drop
+        // world sounds off: a one-shot is dropped (and, not queued, it ends
+        // the current sound as it would have replaced it); a loop is kept
+        // pending below, without asking for its sound
+        if !self.world_on && flags & FLAG_LOOP == 0 {
+            if let Some(s) = self.sources.get_mut(&object) {
+                if let (Some(p), Some(e)) = (s.playing.take(), engine) {
+                    e.stop_world(p.voice);
+                }
+                s.pending = None;
+                s.queued = None;
+            }
+            return;
+        }
+        // already looping this sound: only the volume changes'''
+
+[[patch]]
+id = "channel-switch-sounds-attached-want"
+why = "a loop set while world sounds are off is not fetched until they are on"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "set_attached"
+find = '''self.want(sound);
+        let s = self.sources.entry(object).or_insert(Source {'''
+replace = '''if self.world_on {
+            self.want(sound); // aurora-local-patch: channel-switch-sounds-attached-want
+        }
+        let s = self.sources.entry(object).or_insert(Source {'''
+
+[[patch]]
+id = "channel-switch-sounds-trigger"
+why = "a triggered sound while world sounds are off is not even asked for"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "trigger_owned"
+find = "if sound.is_nil() || gain < f32::EPSILON * 2.0 || self.triggered.len() > 128 {"
+replace = '''// aurora-local-patch: channel-switch-sounds-trigger
+        if !self.world_on || sound.is_nil() || gain < f32::EPSILON * 2.0 || self.triggered.len() > 128 {'''
+
+[[patch]]
+id = "channel-switch-sounds-fetch"
+why = "while world sounds are off, no cache read or download starts for them"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "fetch"
+find = '''let now = Instant::now();
+        for (id, c) in self.clips.iter_mut() {
+            if c.retry_at.is_some_and(|t| now < t) {
+                continue;
+            }'''
+replace = '''let now = Instant::now();
+        // aurora-local-patch: channel-switch-sounds-fetch
+        let local = self.local_sounds();
+        for (id, c) in self.clips.iter_mut() {
+            if c.retry_at.is_some_and(|t| now < t) {
+                continue;
+            }
+            // world sounds off: only interface sounds and previews load
+            if local.as_ref().is_some_and(|l| !c.kept && !l.contains(id)) {
+                continue;
+            }'''
+
+[[patch]]
+id = "channel-switch-sounds-update"
+why = "while world sounds are off nothing starts (set_world_sounds stopped what played)"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+fn = "update"
+find = "// positions; objects gone stop their sound"
+replace = '''// aurora-local-patch: channel-switch-sounds-update
+        // world sounds off: nothing placed, started or logged
+        if !self.world_on {
+            self.audible.clear();
+            self.history.sync(std::iter::empty(), now);
+            return;
+        }
+        // positions; objects gone stop their sound'''
+
+[[patch]]
+id = "channel-switch-test-sounds"
+why = "world sounds off: nothing asked for or played, loops come back"
+paths = ["crates/aurora-viewer/src/scene/sounds.rs"]
+op = "literal"
+find = '''mod tests {
+    use super::*;'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: channel-switch-test-sounds
+    #[test]
+    fn world_sounds_off_are_neither_asked_for_nor_played_and_loops_come_back() {
+        let id = Uuid::from_u128;
+        let mut sounds = SoundManager::new(std::env::temp_dir().join("aurora-sound-switch-tests"));
+        // asked for while on, not loaded yet: forgotten once off
+        sounds.set_attached(None, id(200), id(5), 1.0, 0);
+        sounds.trigger(id(6), Vec3::ZERO, None, 1.0);
+        sounds.set_world_sounds(None, false);
+        assert!(!sounds.clips.contains_key(&id(5)) && !sounds.clips.contains_key(&id(6)));
+        assert!(sounds.sources[&id(200)].pending.is_none());
+        assert!(sounds.triggered.is_empty());
+        // off: a loop is known but not fetched, one-shots are dropped
+        sounds.set_attached(None, id(100), id(1), 1.0, FLAG_LOOP);
+        sounds.set_attached(None, id(101), id(2), 1.0, 0);
+        sounds.trigger(id(3), Vec3::ZERO, None, 1.0);
+        for s in [1, 2, 3] {
+            assert!(!sounds.clips.contains_key(&id(s)), "sound {s} asked for");
+        }
+        assert!(sounds.sources[&id(100)].pending.is_some());
+        assert!(sounds.sources.get(&id(101)).is_none_or(|s| s.pending.is_none()));
+        assert!(sounds.triggered.is_empty());
+        // the interface sounds still load
+        sounds.play_ui(None, id(4));
+        assert!(sounds.local_sounds().is_some_and(|l| l.contains(&id(4))));
+        // on again: the loop is wanted, the dropped one-shot is not
+        sounds.set_world_sounds(None, true);
+        assert!(sounds.clips.contains_key(&id(1)));
+        assert!(!sounds.clips.contains_key(&id(2)));
+        assert!(sounds.local_sounds().is_none());
+    }'''
+
+# ------------------------------------------------------------- the app
+
+[[patch]]
+id = "channel-switch-app-state"
+why = "the speaker panel is told whether media is on"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "media_playing: self.media.any_media_on(),"
+replace = '''media_playing: self.media.any_media_on(),
+                    media_enabled: self.settings.media.enabled, // aurora-local-patch: channel-switch-app-state'''
+
+[[patch]]
+id = "channel-switch-app-music-available"
+why = "the radio is greyed while parcel music is off (LLStatusBar::refresh: AudioStreamingMusic && hasParcelAudio)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "music_available: !self.parcel_music.station().is_empty() || self.parcel_music.requested(),"
+replace = """music_available: self.settings.audio.enabled[crate::settings::MUSIC_CHANNEL] // aurora-local-patch: channel-switch-app-music-available
+                        && (!self.parcel_music.station().is_empty() || self.parcel_music.requested()),"""
+
+[[patch]]
+id = "channel-switch-app-action"
+why = "the speaker panel's media box switches Enable media, live like the Media page"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "ui::audio::AudioAction::Changed => {}"
+replace = '''ui::audio::AudioAction::Changed => {}
+            // aurora-local-patch: channel-switch-app-action
+            // read by the media manager every frame; saved with the settings on exit
+            ui::audio::AudioAction::SetMediaEnabled(on) => self.settings.media.enabled = on,'''
+
+[[patch]]
+id = "channel-switch-app-music"
+why = "parcel music off: the radio and a /music stream are turned off before anything is wanted, filtered or played"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_audio"
+find = "let available = !self.parcel_music.station().is_empty();"
+replace = """// aurora-local-patch: channel-switch-app-music
+        // the radio turned off is remembered for the account like the radio
+        // button's stop (saved once, not each time autoplay re-arms it on a
+        // new parcel)
+        if audio_mute::music_gate(&self.settings.audio, &mut self.parcel_music)
+            && self.settings.parcel_music_accounts.contains(&self.world.agent_id)
+        {
+            self.remember_music_choice();
+        }
+        let available = !self.parcel_music.station().is_empty();"""
+
+[[patch]]
+id = "channel-switch-radio-off"
+why = "the radio's own way to be switched off by the Music row's box: off, and a /music stream forgotten"
+paths = ["crates/aurora-viewer/src/app/parcel_music.rs"]
+op = "literal"
+find = """    pub fn toggle(&mut self) {
+        self.requested = !self.requested;
+    }"""
+replace = """pub fn toggle(&mut self) {
+        self.requested = !self.requested;
+    }
+
+    // aurora-local-patch: channel-switch-radio-off
+    /// The Music row's box off (AudioStreamingMusic, a local rule): the radio
+    /// is off and a `/music` stream forgotten. The parcel's station stays
+    /// known, so an unchanged parcel does not autoplay it again once the box
+    /// is ticked. True when the radio was on.
+    pub fn switch_off(&mut self) -> bool {
+        self.manual = None;
+        std::mem::replace(&mut self.requested, false)
+    }"""
+
+[[patch]]
+id = "channel-switch-app-preload"
+why = "no PreloadSound fetch while world sounds are off"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''if !self.world.sound_blacklisted(sound.sound, sound.object, sound.owner) {
+                        self.scene.sounds.want(sound.sound);'''
+replace = '''// aurora-local-patch: channel-switch-app-preload
+                    if self.settings.audio.enabled[crate::settings::SOUNDS_CHANNEL]
+                        && !self.world.sound_blacklisted(sound.sound, sound.object, sound.owner)
+                    {
+                        self.scene.sounds.want(sound.sound);'''
+
+[[patch]]
+id = "channel-switch-app-world-sounds"
+why = "the sound manager follows the Sounds row's box every frame"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "sounds.update(engine, &self.world, &listener, now);"
+replace = '''sounds.set_world_sounds(engine, self.settings.audio.enabled[crate::settings::SOUNDS_CHANNEL]); // aurora-local-patch: channel-switch-app-world-sounds
+        sounds.update(engine, &self.world, &listener, now);'''
+
+[[patch]]
+id = "channel-switch-app-ui-sounds"
+why = "the Interface row's box off: no interface sound is wanted, loaded or played"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "play_ui_sound"
+find = "if !self.settings.audio.ui_sounds {"
+replace = '''// aurora-local-patch: channel-switch-app-ui-sounds
+        if !self.settings.audio.ui_sounds || !self.settings.audio.enabled[crate::settings::UI_CHANNEL] {'''
+
+[[patch]]
+id = "channel-switch-app-wind"
+why = "the Ambient row's box off: the wind is not made (it fades out, then the generator rests)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_wind_sound"
+find = "&& agent.position.z >= self.world.main_water_height(),"
+replace = '''&& agent.position.z >= self.world.main_water_height()
+                // aurora-local-patch: channel-switch-app-wind
+                && self.settings.audio.enabled[crate::settings::AMBIENT_CHANNEL],'''
+
+[[patch]]
+id = "channel-switch-music-gate"
+why = "the music gate as one pure function the tests check"
+paths = ["crates/aurora-viewer/src/app/audio_mute.rs"]
+op = "literal"
+find = "/// Plugins play outside the audio mixer and need its transient master mute."
+replace = """// aurora-local-patch: channel-switch-music-gate
+/// AudioStreamingMusic (enable_music): with the Music row's box off the
+/// radio is off and a `/music` stream forgotten, so no stream is wanted,
+/// filtered (filterAudioUrl) or played, and none starts again by itself once
+/// the box is ticked (optionallyStartMusic, llviewerparcelmgr.cpp, checks it
+/// before autoplay). Upstream's Radio::target already wants nothing while the
+/// channel is off, but keeps the radio on, so ticking the box would restart
+/// it. True when this turned the radio off.
+pub(super) fn music_gate(audio: &AudioSettings, radio: &mut super::parcel_music::Radio) -> bool {
+    !audio.enabled[crate::settings::MUSIC_CHANNEL] && radio.switch_off()
+}
+
+/// Plugins play outside the audio mixer and need its transient master mute."""
+
+[[patch]]
+id = "channel-switch-test-music"
+why = "music off never keeps or starts a stream; the mute leaves it playing"
+paths = ["crates/aurora-viewer/src/app/audio_mute.rs"]
+op = "literal"
+find = """mod tests {
+    use super::*;"""
+replace = """mod tests {
+    use super::*;
+
+    // aurora-local-patch: channel-switch-test-music
+    #[test]
+    fn music_off_stops_the_radio_and_the_mute_does_not() {
+        use super::super::parcel_music::Radio;
+        let music = crate::settings::MUSIC_CHANNEL;
+        let mut audio = AudioSettings::default();
+        let mut radio = Radio::default();
+        radio.update(Some("http://radio.example.org/live"), false);
+        radio.play("http://radio.example.org/other".into());
+        // muted: silent, still playing
+        audio.muted[music] = true;
+        assert!(!music_gate(&audio, &mut radio));
+        assert!(radio.requested());
+        assert_eq!(radio.station(), "http://radio.example.org/other");
+        // off: nothing wanted and the /music stream forgotten, every frame
+        // (autoplay or the radio set it again)
+        audio.enabled[music] = false;
+        assert!(music_gate(&audio, &mut radio));
+        assert!(!radio.requested());
+        assert_eq!(radio.station(), "http://radio.example.org/live");
+        assert_eq!(radio.wanted(true, true), "");
+        radio.toggle();
+        assert!(music_gate(&audio, &mut radio));
+        assert!(!radio.requested());
+        assert!(!music_gate(&audio, &mut radio), "already off: nothing to remember");
+        // on again: nothing restarts by itself (the same parcel does not
+        // autoplay again), the radio does
+        audio.enabled[music] = true;
+        radio.update(Some("http://radio.example.org/live"), true);
+        assert!(!music_gate(&audio, &mut radio));
+        assert!(!radio.requested());
+        radio.toggle();
+        assert!(!music_gate(&audio, &mut radio));
+        assert_eq!(radio.wanted(true, true), "http://radio.example.org/live");
+    }"""

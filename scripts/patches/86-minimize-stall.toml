@@ -1,0 +1,315 @@
+# A minimized or hidden window is not a graphics card that stopped answering.
+#
+# On KDE Plasma Wayland with an NVIDIA card and vsync on (Fifo), minimizing the
+# viewer brought up "the graphics card is not responding" after 6 s. The
+# compositor sends no frame callbacks to a hidden surface, and the driver's
+# vkQueuePresentKHR waits for the next one inside wl_display_dispatch_queue
+# (the render thread's stack in gpu-stall.txt: Backend::render_view ->
+# Queue::present -> libGLX_nvidia -> libnvidia-glcore -> libwayland-client)
+# for as long as the window stays hidden. The stall watch (main_thread.rs
+# `render_thread_free` / `stalled_for`, shown by app/gpu_stall.rs) only
+# knows the render thread kept its frame past 2 s, and counted it as a GPU
+# hang. winit 0.30 cannot tell a Wayland client it is minimized
+# (`is_minimized` is None, no `Occluded` event), so the viewer cannot just
+# stop drawing as the Legacy Viewer does (llviewerdisplay.cpp `display`).
+#
+# Here the render thread notes when it is inside `present`, and whether the
+# GPU had finished every frame before the presented one when it began (a
+# bounded wait, GPU_WAIT, on the render thread just before the present).
+# A frame kept inside `present` with the GPU caught up while the window is
+# not in front (unfocused, minimized or occluded) is the compositor's: the
+# drawing pauses, the main loop goes on as during a stall (world, network,
+# sound, 20 frames a second), no notice, no "GPU stall" in the crash
+# session. Everything else still counts as before: a wait outside present
+# (acquire, fences), a present begun with the GPU behind, and a present
+# that keeps the frame once the window is in front again, counted from
+# then (files/minimize-stall/present_watch.rs, with tests).
+#
+# Apply or skip the whole file, not one patch of it. Drop it once upstream
+# stops counting a hidden window's present as a GPU stall.
+
+[[patch]]
+id = "minimize-stall-module"
+why = "the present watch and the pure rules that excuse a hidden window's present, with tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/present_watch.rs"]
+source = "files/minimize-stall/present_watch.rs"
+
+[[patch]]
+id = "minimize-stall-mod"
+why = "declare the module beside the presentation one"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = "pub mod present;"
+replace = """pub mod present;
+mod present_watch; // aurora-local-patch: minimize-stall-mod"""
+
+[[patch]]
+id = "minimize-stall-watch-field"
+why = "the watch travels with the frames' GPU news, shared by the render thread and the main thread"
+paths = ["crates/aurora-render/src/pacing.rs"]
+op = "literal"
+find = """finished: Mutex<Option<u64>>,
+    news: Condvar,
+}"""
+replace = """finished: Mutex<Option<u64>>,
+    news: Condvar,
+    /// The render thread inside `present`, and whether the GPU was caught
+    /// up then (present_watch.rs).
+    // aurora-local-patch: minimize-stall-watch-field
+    pub(crate) present: crate::present_watch::PresentWatch,
+}"""
+
+[[patch]]
+id = "minimize-stall-watch-new"
+why = "the watch starts empty"
+paths = ["crates/aurora-render/src/pacing.rs"]
+op = "literal"
+find = """news: Condvar::new(),"""
+replace = """news: Condvar::new(),
+            present: Default::default(), // aurora-local-patch: minimize-stall-watch-new"""
+
+[[patch]]
+id = "minimize-stall-present"
+why = "note the present and whether the GPU had finished the frames before it (the world frame's present)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "render_view"
+find = """if let FrameTarget::Surface(t) = surface_tex {
+            self.queue.present(t);
+            stats.presented = true;
+            stats.input_ms"""
+replace = """if let FrameTarget::Surface(t) = surface_tex {
+            // aurora-local-patch: minimize-stall-present
+            // a present that then waits with the GPU caught up is the
+            // compositor's (a hidden window), not a GPU stall: present_watch.rs
+            let gpu_done = self.earlier_frames_done(index);
+            self.gpu_frames.present.enter(gpu_done);
+            self.queue.present(t);
+            self.gpu_frames.present.leave();
+            stats.presented = true;
+            stats.input_ms"""
+
+[[patch]]
+id = "minimize-stall-present-alone"
+why = "goes with minimize-stall-present: the interface-only present while video memory is full"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "render_view"
+find = """if let FrameTarget::Surface(t) = surface_tex {
+                self.queue.present(t);
+                stats.presented = true;
+            }
+            let captured"""
+replace = """if let FrameTarget::Surface(t) = surface_tex {
+                // aurora-local-patch: minimize-stall-present-alone
+                // (the same as minimize-stall-present)
+                let gpu_done = self.earlier_frames_done(index);
+                self.gpu_frames.present.enter(gpu_done);
+                self.queue.present(t);
+                self.gpu_frames.present.leave();
+                stats.presented = true;
+            }
+            let captured"""
+
+[[patch]]
+id = "minimize-stall-earlier-done"
+why = "the bounded wait for the frames before the one presented, on the render thread"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """/// Frame pacing (pacing.rs), once frame `frame` is presented: wait, at"""
+replace = """/// Whether the GPU has finished every frame before `frame`, waiting at
+    /// most [`crate::main_thread::GPU_WAIT`]: asked right before `frame` is
+    /// presented, so that a present that then waits is known not to wait
+    /// for our own work (present_watch.rs). Only the frames before: the one
+    /// presented is already submitted, the GPU keeps drawing meanwhile.
+    /// Done here, on the thread that submits and presents (a wait on the
+    /// device holds its locks).
+    // aurora-local-patch: minimize-stall-earlier-done
+    fn earlier_frames_done(&self, frame: u64) -> bool {
+        let Some(index) = self.gpu_frames.before(frame) else {
+            return !self.lost.get();
+        };
+        let wait = wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(crate::main_thread::GPU_WAIT),
+        };
+        matches!(self.lost.poll_with(&self.device, wait), Some(Ok(_)))
+    }
+
+    /// Frame pacing (pacing.rs), once frame `frame` is presented: wait, at"""
+
+[[patch]]
+id = "minimize-stall-fields"
+why = "the renderer's side: a hold excused as the compositor's, and whether the window is in front"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = """stalled: bool,"""
+replace = """stalled: bool,
+    // aurora-local-patch: minimize-stall-fields
+    /// The frame held is the compositor's (a hidden window, present_watch.rs):
+    /// drawing paused, no GPU stall.
+    paused: bool,
+    /// The stall of the frame held is in the log.
+    stall_logged: bool,
+    /// When the frame held was last the compositor's: a hold that goes on
+    /// once the window is in front again counts from then.
+    excused_at: Option<Instant>,
+    /// Focused, not minimized nor hidden (`set_in_front`, each frame).
+    in_front: bool,"""
+
+[[patch]]
+id = "minimize-stall-init"
+why = "start in front, nothing held"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = """stalled: false,"""
+replace = """stalled: false,
+            // aurora-local-patch: minimize-stall-init
+            paused: false,
+            stall_logged: false,
+            excused_at: None,
+            in_front: true,"""
+
+[[patch]]
+id = "minimize-stall-stalled-for"
+why = "a frame the compositor keeps is no GPU stall; one kept on once the window is back counts from then"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "replace_fn_body"
+fn = "stalled_for"
+impl = "Renderer"
+expect_sig = 'pub fn stalled_for\(&self\) -> Option<Duration>'
+body = '''
+let Host::Thread { owner, .. } = &self.host else {
+    return None;
+};
+// a hidden window's present: the compositor's, not the GPU's (present_watch.rs)
+if !self.stalled || self.compositor_holds() {
+    return None;
+}
+let held = owner.held_for()?;
+// (past STALL_AFTER only, as before: the main thread may stop waiting sooner)
+let counted = crate::present_watch::counted_stall(held, self.excused_at.map(|at| at.elapsed()));
+(counted >= STALL_AFTER).then_some(counted)
+'''
+
+[[patch]]
+id = "minimize-stall-api"
+why = "the app says whether the window is in front; the paused drawing is told apart from a stall"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = """/// Before a frame is built: wait for the render thread to be free, at"""
+replace = """/// Whether the window is in front: focused, not minimized nor hidden
+    /// (the app, each frame). A frame the compositor keeps is only excused
+    /// when it is not (present_watch.rs).
+    // aurora-local-patch: minimize-stall-api
+    pub fn set_in_front(&mut self, in_front: bool) {
+        self.in_front = in_front;
+    }
+
+    /// The drawing is paused because the compositor takes no image (a
+    /// minimized or hidden window): no GPU stall, but nothing is drawn.
+    pub fn presentation_paused(&self) -> bool {
+        self.stalled && self.compositor_holds()
+    }
+
+    /// The render thread is inside `present`, the GPU caught up, the window
+    /// not in front, for long enough (present_watch.rs).
+    fn compositor_holds(&self) -> bool {
+        crate::present_watch::compositor_holds(self.gpu_frames.present.compositor_wait(), self.in_front)
+    }
+
+    /// Before a frame is built: wait for the render thread to be free, at"""
+
+[[patch]]
+id = "minimize-stall-free"
+why = "stop waiting as soon as the compositor is known to keep the frame, and log a pause as a pause, not a stall"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "replace_fn_body"
+fn = "render_thread_free"
+impl = "Renderer"
+expect_sig = 'fn render_thread_free\(&mut self\) -> bool'
+body = '''
+let Host::Thread { owner, .. } = &self.host else {
+    return true;
+};
+// in short steps: a present that waits with the GPU caught up (a hidden
+// window) is known within COMPOSITOR_WAIT, the main loop need not wait the
+// whole STALL_AFTER; its events (the focus leaving) come first, the next
+// frame decides whether the compositor keeps the frame
+let wait = if self.stalled { STALL_POLL } else { STALL_AFTER };
+let deadline = Instant::now() + wait;
+let free = loop {
+    match owner.wait_until_free((Instant::now() + STALL_POLL).min(deadline)) {
+        Ok(true) => break true,
+        Ok(false) => {
+            let waits = crate::present_watch::present_waits(self.gpu_frames.present.compositor_wait());
+            if waits || Instant::now() >= deadline {
+                break false;
+            }
+        }
+        Err(_) => {
+            self.fail();
+            return false;
+        }
+    }
+};
+if free {
+    // (a hold that never reached STALL_AFTER nor a pause logs nothing)
+    if std::mem::take(&mut self.stalled) {
+        if self.stall_logged {
+            log::warn!("the graphics card finished its frame again: drawing resumes");
+        } else if self.paused {
+            log::info!("the window takes images again: drawing resumes");
+        }
+    }
+    self.paused = false;
+    self.stall_logged = false;
+    self.excused_at = None;
+    return true;
+}
+self.stalled = true;
+let held = owner.held_for().unwrap_or(wait);
+if self.compositor_holds() {
+    self.excused_at = Some(Instant::now());
+    if !std::mem::replace(&mut self.paused, true) {
+        log::info!(
+            "the window is not shown, the compositor takes no image ({held:?} in present, the GPU done): drawing paused, the world goes on"
+        );
+    }
+} else if !self.stall_logged {
+    let counted = crate::present_watch::counted_stall(held, self.excused_at.map(|at| at.elapsed()));
+    if counted >= STALL_AFTER {
+        self.stall_logged = true;
+        log::warn!("the graphics card has not finished a frame for {counted:?}: frames wait, the window keeps answering");
+    }
+}
+false
+'''
+
+[[patch]]
+id = "minimize-stall-in-front"
+why = "tell the renderer each frame whether the window is in front"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """self.scene.textures.set_window_state(focused, minimized);"""
+replace = """self.scene.textures.set_window_state(focused, minimized);
+        // a hidden window's present is the compositor's, not a GPU stall
+        // (aurora-render present_watch.rs); `focused` and `minimized` are
+        // upstream's effective state (a VR headset presenting counts as in
+        // front)
+        // aurora-local-patch: minimize-stall-in-front
+        let in_front = focused && !minimized && !self.occluded;
+        if let Some(g) = &mut self.gfx {
+            g.renderer.set_in_front(in_front);
+        }"""
+
+[[patch]]
+id = "minimize-stall-exit"
+why = "a paused drawing cannot show the exit prompt either: the close button closes, as during a stall"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "request_exit"
+find = """.is_some_and(|g| g.renderer.stalled_for().is_some() || g.renderer.device_lost())"""
+replace = """// aurora-local-patch: minimize-stall-exit
+            .is_some_and(|g| g.renderer.stalled_for().is_some() || g.renderer.presentation_paused() || g.renderer.device_lost())"""

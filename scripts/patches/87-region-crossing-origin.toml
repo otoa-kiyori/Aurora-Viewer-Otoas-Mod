@@ -1,0 +1,483 @@
+# Region crossings: the records follow the render origin on the GPU, no
+# upload of every record in one frame.
+#
+# What: the scene's coordinates start at the main region's corner, as the
+# Legacy Viewer's agent frame (LLWorld::updateAgentOffset, then
+# LLPipeline::shiftObjects). At every crossing (and teleport) upstream's
+# Scene::update_origin marks every object for new records, the sync places
+# them all again without a budget, and RecordStore::flush uploads every
+# face record whole (304 bytes): 85 to 140 MB in one frame on a ride across regions,
+# past the journal staging's 32 MB (write_staging.rs), so it went through
+# Queue::write_buffer. A session log with 176 region crossings: "frame
+# writes took 226.2 ms: 116063 KB in 1466 buffer", about 200 stalls of
+# 20 ms or more right after the `arrival:` lines, the sound cut at the same
+# moments.
+#
+# How (files/region-crossing-origin/origin_shift.rs and
+# scene_origin_shift.rs, unit-tested): what rests in the world (a prim or
+# mesh placed by its model: no avatar, HUD, worn, anchored, rigged or posed
+# object; ObjGpu::follows_origin) is no longer marked by update_origin.
+# Instead it moves by the delta as a placement would have moved it: its
+# faces' CPU mirror at once (a few threads over the record blocks), the
+# GPU's copies by one compute pass (origin_shift.wgsl) submitted last in the
+# frame's journal, only those the flush did not write itself (a bit mask);
+# its bounds, object table entry (48 bytes, uploaded as before) and pick
+# entry; and the detail levels' camera (lod_watch), else the 256 m jump
+# would make every object due. Everything else is marked and placed again
+# as before; a moved record placed again where its model already is (same
+# rotation, scale and height exactly, x and y within 16 ulps of the value
+# plus the move: the rounding of the other origin) is not uploaded. Nothing is spread over frames:
+# every record is right in the crossing frame itself. A face that turns out
+# not to be placed by its model sends its object back to the old path.
+#
+# Why not a render origin kept across crossings (moved past a threshold):
+# the whole world model is main-region relative (agent, camera, scripted
+# camera, flexis, ~50 callers of World::main_origin, plus region-local
+# positions used as is), so a separate render origin would need its delta
+# at every GPU-bound position (view, lights, probes, particles, water,
+# overlays, picking back), each a 256 m error if one is missed. And f32 at
+# the threshold: the near-camera geometry would sit `threshold` metres from
+# the origin instead of under ~300 m; at 2 km a unit in the last place is
+# 0.24 mm, about 1.5 px in a 30 cm close-up at 4K (vertex wobble as the
+# camera moves), so the threshold would have to stay near 512 m, a move
+# every one or two crossings: no gain once a move costs no upload. Here the
+# coordinates and their precision are upstream's; a moved translation is
+# rounded once more, to half an ulp of the largest value it held (0.03 mm
+# at 500 m), which does not grow with more crossings.
+#
+# Measure: AURORA_DEMO=1 AURORA_DEMO_CROSSING=64000 (about 384,000 records,
+# a crossing every 180 frames from frame 1200) with AURORA_PROFILE=1: the
+# `frame writes took` lines and `max:` after each `crossing demo: crossing`
+# line, then the same with AURORA_ORIGIN_SHIFT=0 (every record written
+# again, as upstream). On 2026-11-13, with a 30 fps cap and 400 m of draw distance:
+# before, every crossing wrote 115.5 MB (33 to 48 ms of writes), sync 46 to
+# 55 ms, worst frames 80 to 109 ms; after, no write over 4 ms, the move
+# 10 to 16 ms of main thread (64,000 objects), the crossing seconds as
+# smooth as the others. On the grid: the `render origin moved by` lines
+# and the `frame writes took` lines after `arrival:`.
+#
+# Apply or skip the whole file, not one patch of it. Drop it once upstream
+# stops writing every record again at an origin move.
+
+# ------------------------------------------------------------ render crate
+
+[[patch]]
+id = "region-crossing-origin-module"
+why = "the move of the records with the origin: which move, the GPU pass, the rounding rule, with tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/origin_shift.rs"]
+source = "files/region-crossing-origin/origin_shift.rs"
+
+[[patch]]
+id = "region-crossing-origin-shader"
+why = "the compute pass that moves the records' translations"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/origin_shift.wgsl"]
+source = "files/region-crossing-origin/origin_shift.wgsl"
+
+[[patch]]
+id = "region-crossing-origin-mod"
+why = "declare the module (the scene calls it)"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = "pub mod pacing;"
+replace = """pub mod origin_shift; // aurora-local-patch: region-crossing-origin-mod
+pub mod pacing;"""
+
+[[patch]]
+id = "region-crossing-origin-fields"
+why = "the record store keeps the move waiting for its flush and the GPU pass"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = """    /// The buffer could not grow (video memory full): when to try again.
+    backoff: Backoff,
+}
+
+impl RecordStore {"""
+replace = """/// The buffer could not grow (video memory full): when to try again.
+    backoff: Backoff,
+    // aurora-local-patch: region-crossing-origin-fields
+    /// A move of the render origin waiting for the flush, and the GPU pass
+    /// that moves the records (origin_shift.rs).
+    origin: crate::origin_shift::Pending,
+    origin_pass: crate::origin_shift::ShiftPass,
+}
+
+impl RecordStore {"""
+
+[[patch]]
+id = "region-crossing-origin-new"
+why = "goes with region-crossing-origin-fields: no move, the pass made with the store (at start-up)"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = """            uploaded: 0,
+            backoff: Backoff::default(),
+        }"""
+replace = """uploaded: 0,
+            backoff: Backoff::default(),
+            // aurora-local-patch: region-crossing-origin-new
+            origin: Default::default(),
+            origin_pass: crate::origin_shift::ShiftPass::new(device),
+        }"""
+
+[[patch]]
+id = "region-crossing-origin-api"
+why = "the scene moves the world's records with the origin; the flush prepares the GPU pass"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = "    pub fn set_hud_model(&mut self, id: u32, model: [[f32; 4]; 4], zoom: f32) {"
+replace = """// aurora-local-patch: region-crossing-origin-api
+    /// The render origin moved by `delta` (whole regions, x and y): records
+    /// `ids` (an object's faces, placed in the world) move with it. Their
+    /// mirror moves now, the GPU's copies after the next flush's writes,
+    /// with one compute pass instead of an upload (origin_shift.rs). Skinned
+    /// and anchored records are left alone: returned, with how many moved.
+    pub fn shift_world(&mut self, ids: impl IntoIterator<Item = u32>, delta: [f32; 2]) -> (usize, Vec<u32>) {
+        if !self.origin.begin(delta) {
+            // a second move before a flush (frames not built): the first
+            // one's records are written again instead, as without the pass
+            for id in self.origin.take_ids() {
+                self.mark(id as usize);
+            }
+            self.origin.begin(delta);
+        }
+        let mut mask = crate::origin_shift::mask_of(ids, self.mirror.len());
+        let refused = crate::origin_shift::shift_blocks(&mut self.mirror.blocks, &mut mask, BLOCK, delta);
+        self.origin.add_mask(mask);
+        (self.origin.count(), refused)
+    }
+
+    /// The origin's GPU pass prepared by the last flush, to submit after
+    /// the frame's other writes.
+    pub fn take_origin_pass(&mut self, device: &wgpu::Device) -> Option<wgpu::CommandEncoder> {
+        self.origin_pass.take(device)
+    }
+
+    /// The flush's end: the GPU pass for the moved records it did not write.
+    fn finish_origin_shift(&mut self, device: &wgpu::Device, writes: &mut GpuWrites, written: &[std::ops::Range<usize>]) {
+        if !self.origin.is_active() {
+            return;
+        }
+        let slots = (self.buffer.size() as usize / std::mem::size_of::<DrawRecord>()).min(self.mirror.len());
+        if let Some(pass) = self.origin.finish(written, slots) {
+            self.origin_pass.prepare(device, writes, &self.buffer, &pass);
+        }
+    }
+
+    pub fn set_hud_model(&mut self, id: u32, model: [[f32; 4]; 4], zoom: f32) {"""
+
+[[patch]]
+id = "region-crossing-origin-settle"
+why = "a record placed where its moved model already is (rounding of the other origin) is not uploaded"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+fn = "set_placement"
+find = """            if slot.model != model || slot.flags != old_flags {
+                slot.model = model;
+                self.mark(id as usize);
+            }"""
+replace = """if slot.model != model || slot.flags != old_flags {
+                // aurora-local-patch: region-crossing-origin-settle
+                // (moved with the origin: the new model is the GPU's moved
+                // one up to rounding, nothing to upload; origin_shift.rs)
+                let settled = slot.flags == old_flags && self.origin.settles(id, &slot.model, &model);
+                slot.model = model;
+                if !settled {
+                    self.mark(id as usize);
+                }
+            }"""
+
+[[patch]]
+id = "region-crossing-origin-clean"
+why = "a flush with nothing to write still prepares the pass of a move"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = """        self.seed_fresh(writes);
+        if !self.dirty.any() {
+            return;
+        }"""
+replace = """self.seed_fresh(writes);
+        if !self.dirty.any() {
+            self.finish_origin_shift(device, writes, &[]); // aurora-local-patch: region-crossing-origin-clean
+            return;
+        }"""
+
+[[patch]]
+id = "region-crossing-origin-written"
+why = "the ranges the flush writes carry the moved mirror: the pass leaves them alone"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = """        let mut waiting = Vec::new();
+        for range in self.dirty.take_ranges(self.mirror.len()) {
+            if range.end > fits {
+                waiting.push(range.start.max(fits)..range.end);
+            }
+            let range = range.start.min(fits)..range.end.min(fits);"""
+replace = """let mut waiting = Vec::new();
+        let mut written = Vec::new(); // aurora-local-patch: region-crossing-origin-written
+        for range in self.dirty.take_ranges(self.mirror.len()) {
+            if range.end > fits {
+                waiting.push(range.start.max(fits)..range.end);
+            }
+            let range = range.start.min(fits)..range.end.min(fits);
+            written.push(range.clone());"""
+
+[[patch]]
+id = "region-crossing-origin-flush"
+why = "goes with region-crossing-origin-written: the pass of a move after the writes"
+paths = ["crates/aurora-render/src/arena.rs"]
+op = "literal"
+find = """        for r in waiting {
+            for k in r {
+                self.dirty.mark(k);
+            }
+        }"""
+replace = """for r in waiting {
+            for k in r {
+                self.dirty.mark(k);
+            }
+        }
+        self.finish_origin_shift(device, writes, &written); // aurora-local-patch: region-crossing-origin-flush"""
+
+[[patch]]
+id = "region-crossing-origin-submit"
+why = "the pass is submitted last in the frame's journal: after every write, the staging kept for them all"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = """        self.textures.maintain(&self.device, &mut self.writes, &mut self.uploads, false);
+        let uploads = self.uploads.take_frame();"""
+replace = """self.textures.maintain(&self.device, &mut self.writes, &mut self.uploads, false);
+        // aurora-local-patch: region-crossing-origin-submit
+        // the render origin moved: the records the flush did not write move
+        // on the GPU, after every write of the frame (origin_shift.rs)
+        if let Some(enc) = self.records.take_origin_pass(&self.device) {
+            self.writes.submit(vec![enc]);
+        }
+        let uploads = self.uploads.take_frame();"""
+
+# ------------------------------------------------------------------ scene
+
+[[patch]]
+id = "region-crossing-origin-scene"
+why = "which records the scene moves with the origin, and the log line"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/origin_shift.rs"]
+source = "files/region-crossing-origin/scene_origin_shift.rs"
+
+[[patch]]
+id = "region-crossing-origin-scene-mod"
+why = "declare the scene's side"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "pub mod morph;"
+replace = """pub mod morph;
+mod origin_shift; // aurora-local-patch: region-crossing-origin-scene-mod"""
+
+[[patch]]
+id = "region-crossing-origin-sync"
+why = "the origin move moves the records before the objects are placed again (unchanged: needs_records, motion cut, water)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "sync"
+find = """        if self.update_origin(world) {
+            renderer.cut_motion_history();
+            self.water.clear(renderer);
+        }"""
+replace = """// aurora-local-patch: region-crossing-origin-sync
+        // (the records follow the origin on the GPU: origin_shift.rs)
+        let origin_before = self.last_origin;
+        if self.update_origin(world) {
+            self.shift_records(renderer, world, origin_before);
+            renderer.cut_motion_history();
+            self.water.clear(renderer);
+        }"""
+
+[[patch]]
+id = "region-crossing-origin-follow"
+why = "at an origin move, what rests in the world is not placed again: shift_records moves it (the others are marked as before)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "update_origin"
+find = """        self.last_origin = origin;
+        for (idx, object) in world.objects.slots.iter_mut().enumerate() {
+            if let Some(object) = object {
+                object.render.needs_records = true;
+                self.sets.dirty.insert(idx);
+            }
+        }
+        true"""
+replace = """// aurora-local-patch: region-crossing-origin-follow
+        // (an origin move: what rests in the world follows on the GPU and
+        // is not placed again, `shift_records`; origin_shift.rs)
+        let moved = self.last_origin.is_some() && origin.is_some() && aurora_render::origin_shift::enabled();
+        self.last_origin = origin;
+        for (idx, object) in world.objects.slots.iter_mut().enumerate() {
+            if let Some(object) = object {
+                if moved && self.gpu.get(idx).is_some_and(ObjGpu::follows_origin) {
+                    continue;
+                }
+                object.render.needs_records = true;
+                self.sets.dirty.insert(idx);
+            }
+        }
+        true"""
+
+[[patch]]
+id = "region-crossing-origin-follows"
+why = "the rule of what follows the origin without a new placement"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    pub fn sphere(&self) -> (Vec3, f32) {"
+replace = """// aurora-local-patch: region-crossing-origin-follows
+    /// At an origin move, the object follows it with no new placement: a
+    /// prim or mesh resting in the world, its faces placed by their model
+    /// (no avatar, HUD, worn, anchored, rigged or posed object, nothing
+    /// without faces). Its records, bounds, object table entry and pick
+    /// entry move by the delta (origin_shift.rs); the rest is placed again.
+    pub fn follows_origin(&self) -> bool {
+        !self.faces.is_empty() && self.rests_in_world()
+    }
+
+    /// Not an avatar, a HUD, worn, anchored, rigged nor posed.
+    pub fn rests_in_world(&self) -> bool {
+        !self.is_avatar && !self.hud && !self.rigged && self.anchor.is_none() && self.posed.is_none() && self.owner_avatar.is_none()
+    }
+
+    pub fn sphere(&self) -> (Vec3, f32) {"""
+
+[[patch]]
+id = "region-crossing-origin-lod"
+why = "the detail levels' camera follows the origin: a move is no travel (else every object would be due at once)"
+paths = ["crates/aurora-viewer/src/scene/lod_watch.rs"]
+op = "literal"
+find = "    /// Object `idx` was checked: it is due again once the camera has"
+replace = """// aurora-local-patch: region-crossing-origin-lod
+    /// The render origin moved by `d`: the camera did not travel.
+    pub fn shift(&mut self, d: Vec3) {
+        if let Some(eye) = &mut self.eye {
+            *eye += d;
+        }
+    }
+
+    /// Object `idx` was checked: it is due again once the camera has"""
+
+# ------------------------------------------------------------------- demo
+
+[[patch]]
+id = "region-crossing-origin-demo-module"
+why = "AURORA_DEMO_CROSSING: crossings to and fro in a scene of 64,000 prims, to measure them offline"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/demo_crossing.rs"]
+source = "files/region-crossing-origin/demo_crossing.rs"
+
+[[patch]]
+id = "region-crossing-origin-demo-mod"
+why = "goes with region-crossing-origin-demo-module: declared beside the water demo"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = """#[path = "demo_water.rs"]
+pub mod water;"""
+replace = """#[path = "demo_water.rs"]
+pub mod water;
+// aurora-local-patch: region-crossing-origin-demo-mod
+#[path = "demo_crossing.rs"]
+pub mod crossing;"""
+
+[[patch]]
+id = "region-crossing-origin-demo-step"
+why = "goes with region-crossing-origin-demo-module: run each frame of the demo, as the water demo"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "        if let Some(mode) = crate::demo::aa_switch::due(&mut self.aa_switch_demo, self.frame_count) {"
+replace = """// aurora-local-patch: region-crossing-origin-demo-step
+        if self.demo
+            && matches!(self.screen, Screen::World)
+            && crate::demo::crossing::update(
+                &mut self.camera,
+                &mut self.settings,
+                &mut self.world,
+                &mut self.panels,
+                self.frame_count,
+            )
+        {
+            gfx.renderer.apply_settings(self.settings.render_settings());
+        }
+        if let Some(mode) = crate::demo::aa_switch::due(&mut self.aa_switch_demo, self.frame_count) {"""
+
+[[patch]]
+id = "region-crossing-origin-demo-cross"
+why = "goes with region-crossing-origin-demo-module: the demo's crossings before the camera follows the origin, as the network's"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "            crate::demo::terrain_crossing_step(&mut self.world, self.frame_count);"
+replace = """crate::demo::terrain_crossing_step(&mut self.world, self.frame_count);
+            // (before the camera follows the origin, as a crossing from the network)
+            crate::demo::crossing::cross(&mut self.world, self.frame_count); // aurora-local-patch: region-crossing-origin-demo-cross"""
+
+# ------------------------------------------------------------------- docs
+
+[[patch]]
+id = "region-crossing-origin-testing-table"
+why = "docs/TESTING.md: the demo variable, in the load table beside AURORA_DEMO_OVERDRAW"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_DEMO_OVERDRAW=<n>` \|[^\n]*$'
+replace = '''| `AURORA_DEMO_CROSSING=<prims>[,<frames>[,<first>]]` | Region crossings to and fro in a scene of 64,000 prims by default (local patch set) <!-- // aurora-local-patch: region-crossing-origin-testing-table --> |
+\g<0>'''
+
+[[patch]]
+id = "region-crossing-origin-testing-details"
+why = "docs/TESTING.md: what the demo variable does and how to measure a crossing"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^- \*\*`AURORA_DEMO_OVERDRAW=<n>`\*\*'
+replace = '''- **`AURORA_DEMO_CROSSING=<prims>[,<frames>[,<first>]]`** (local patch
+  set): region crossings in a full scene. Eleven neighbour regions around
+  the demo region and `prims` boxes over the twelve (64,000 by default:
+  about 384,000 face records, 117 MB), a quarter of them two-prim
+  linksets, the draw distance at 400 m and the camera held across the east
+  border. From frame `first` (1,200) the main region goes to the east
+  neighbour and back every `frames` frames (180), as an agent walking to
+  and fro over the border: the render origin moves 256 m each time while
+  nothing moves in the world. Each crossing logs `crossing demo: crossing
+  <n>` and `render origin moved by … records moved on the GPU`; read the
+  `frame writes took` lines after it and, with `AURORA_PROFILE=1`, the
+  `max:` of that second. `AURORA_ORIGIN_SHIFT=0` gives the old way. A
+  capture before a crossing and one after it
+  (`AURORA_CAPTURE_FRAMES=1170,1230`) show the same boxes, shadows and
+  water.
+  <!-- // aurora-local-patch: region-crossing-origin-testing-details -->
+\g<0>'''
+
+[[patch]]
+id = "region-crossing-origin-testing-switch"
+why = "docs/TESTING.md: the A/B switch, beside AURORA_WRITE_STAGING"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_WRITE_STAGING=0` or `alt` \|[^\n]*$'
+replace = '''\g<0>
+| `AURORA_ORIGIN_SHIFT=0` | A region crossing writes every record again, as before, instead of moving them on the GPU (local patch set) <!-- // aurora-local-patch: region-crossing-origin-testing-switch --> |'''
+
+[[patch]]
+id = "region-crossing-origin-testing-switch-details"
+why = "docs/TESTING.md: what the switch changes and what to read"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^- \*\*`AURORA_MOVING_ANCHORS=0`\*\*'
+replace = '''- **`AURORA_ORIGIN_SHIFT=0`** (local patch set): at a region crossing or
+  a teleport the render origin (the main region's corner) moves, and every
+  face record is written again, as upstream does: 304 bytes each, 85 to
+  140 MB on a ride across regions, past the journal staging's 32 MB. By default the
+  records placed in the world move on the GPU instead (one compute pass,
+  `origin_shift.rs`), and what rests in the world (not avatars, what they
+  wear, HUDs, rigged or anchored objects) is not placed again: its bounds,
+  object table and pick entries move with it. To read: the
+  `render origin moved by` line, the `frame writes took` lines that follow
+  an `arrival:` line, `max:` with `AURORA_PROFILE=1`
+  (`AURORA_DEMO_CROSSING`). Nothing should change on screen.
+  <!-- // aurora-local-patch: region-crossing-origin-testing-switch-details -->
+\g<0>'''

@@ -1,0 +1,123 @@
+# Swimming and water walking keep the avatar up while the window is inactive.
+#
+# Cause: the movement frame marks the enhancers "suspended" whenever the
+# window is not focused (app/movement.rs, update_movement: `suspended: ...
+# || !self.focused`). A suspended frame makes Runtime::update inactive
+# (movement.rs: `let active = ... && !frame.suspended`), so the avatar is no
+# longer `wet`, no swim mode (3 at the surface, 6 below) is chosen, and
+# water_walk::Runtime::update drops its support motor (`|| frame.suspended`).
+# The bridge then receives an empty motion (mode 0), its motor lets go, and
+# the simulator's gravity takes the avatar down: it sinks to the bed. Focus
+# loss already clears every held key and button (App::window_event,
+# WindowEvent::Focused(false)), and the frames keep running under the
+# background frame cap, so nothing else stops: the release is the cause.
+#
+# This build: losing the focus no longer suspends the movement while the
+# water support is holding the avatar (swimming at the surface or below,
+# climbing out of the water, or walking on it). With no key held, the motor
+# keeps the avatar where it floats, exactly as when the focused window is
+# left idle. Anywhere else, an inactive window still suspends as upstream
+# does, and so do a teleport, an unfinished arrival, a free camera and the
+# autopilot. Nothing changes while the window is focused: the expression is
+# the same as upstream's when `focused` is true.
+#
+# Tests: movement/tests.rs (the surface and underwater swims and the water
+# walk keep their motor through a focus loss; on land the focus loss still
+# suspends).
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "swim-focus-rule"
+why = "whether a focus loss suspends the movement: not while the water support holds the avatar up"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "pub fn native_fly_allowed(&self) -> bool {"
+replace = '''// aurora-local-patch: swim-focus-rule
+    /// The water support holds the avatar up (local patch set,
+    /// 110-swim-focus): swimming at the surface or below, climbing out of the
+    /// water, or walking on it. Releasing it lets the simulator sink the
+    /// avatar.
+    pub fn holds_water(&self) -> bool {
+        self.state.swimming() || matches!(self.state, State::Leaving | State::WaterWalking) || self.water_walk.active()
+    }
+
+    /// Whether the window's focus suspends the movement enhancers: an
+    /// inactive window does, except while the water support holds the avatar
+    /// up (`holds_water`). A focused window never does.
+    pub fn focus_suspends(&self, focused: bool) -> bool {
+        !focused && !self.holds_water()
+    }
+
+    pub fn native_fly_allowed(&self) -> bool {'''
+
+[[patch]]
+id = "swim-focus-frame"
+why = "an inactive window keeps the swim and water walk motor instead of releasing it to the simulator's gravity"
+paths = ["crates/aurora-viewer/src/app/movement.rs"]
+op = "literal"
+fn = "update_movement"
+find = "|| !self.focused"
+replace = '''|| self.movement_runtime.focus_suspends(self.focused) // aurora-local-patch: swim-focus-frame'''
+
+[[patch]]
+id = "swim-focus-tests"
+why = "the swims and the water walk through a focus loss, and the focus loss elsewhere"
+paths = ["crates/aurora-viewer/src/movement/tests.rs"]
+op = "literal"
+find = '''"an underwater return must not count as the first surface tap"
+    );
+}'''
+replace = '''"an underwater return must not count as the first surface tap"
+    );
+}
+
+// aurora-local-patch: swim-focus-tests
+#[test]
+fn an_inactive_window_keeps_the_water_support_that_holds_the_avatar_up() {
+    let now = Instant::now();
+    let idle = MoveInput::default();
+    // swimming at the surface and below: the same motor, focused or not
+    for (depth, z, mode) in [(State::Surface, 19.55, 3), (State::Submerged, 18.0, 6)] {
+        let mut runtime = Runtime {
+            state: depth,
+            ..Default::default()
+        };
+        let mut f = frame();
+        f.position.z = z;
+        assert_eq!(runtime.update(&prefs(), &f, &idle, now).motion.mode, mode);
+        assert_eq!(runtime.state, depth);
+        assert!(runtime.holds_water());
+        assert!(!runtime.focus_suspends(true));
+        f.suspended = runtime.focus_suspends(false);
+        assert!(!f.suspended, "an inactive window keeps the swim");
+        for i in 1..5 {
+            let step = runtime.update(&prefs(), &f, &idle, now + Duration::from_millis(i * 100));
+            assert_eq!(step.motion.mode, mode);
+            assert_eq!(runtime.state, depth);
+        }
+    }
+    // walking on the water: the support motor stays
+    let walk = Preferences {
+        water_walk: true,
+        ..Default::default()
+    };
+    let mut runtime = Runtime::default();
+    let mut f = frame();
+    f.position.z = 20.85;
+    f.on_ground = false;
+    assert_eq!(runtime.update(&walk, &f, &idle, now).motion.mode, 13);
+    assert!(runtime.holds_water());
+    f.suspended = runtime.focus_suspends(false);
+    assert!(!f.suspended, "an inactive window keeps the water walk");
+    assert_eq!(runtime.update(&walk, &f, &idle, now + Duration::from_millis(100)).motion.mode, 13);
+    assert_eq!(runtime.state, State::WaterWalking);
+    // on land: an inactive window suspends as upstream
+    let mut runtime = Runtime::default();
+    let mut f = frame();
+    f.water = None;
+    runtime.update(&prefs(), &f, &idle, now);
+    assert_eq!(runtime.state, State::Ground);
+    assert!(!runtime.holds_water());
+    assert!(runtime.focus_suspends(false));
+    assert!(!runtime.focus_suspends(true));
+}'''

@@ -1,0 +1,438 @@
+# Aurora Weather: snowflakes up to three times their size, and a Drop size
+# slider that sizes the raindrops the same way.
+#
+# What: upstream's Environment › Aurora Weather has a "Flake size" slider
+# (WeatherSettings::snow_size, 0..1, 0.5 by default), turned into the
+# flakes' scale by WeatherSettings::flake_scale: 0.5 * 4^position, so 0.5
+# (fine powder) to 2 (big wet flakes), 1 in the middle. The scale reaches
+# the renderer as RainLook::snow (0: rain), packed into Frame::rain_look.w
+# by Backend's frame uniforms (renderer.rs, clamped to 0.5..2) and read by
+# env.wgsl: vs_rain (the flake's diameter), snow_landed (the flakes that
+# land) and rain_far_streaks (the distant dots).
+#
+# Snow: the curve is kept, so every position of the old slider keeps its
+# look and a saved snow_size means what it meant; the slider only goes
+# further, to SIZE_MAX = log4(6) (about 1.2925), where the scale is 3. The
+# clamps follow (flake_scale, renderer.rs). Nothing else is sized by the
+# flake: the drops pass is drawn without bounds (a box of 44 x 44 x 30 m
+# around the camera, whatever the flakes' size), the fall speed already
+# stops growing past a 12 mm flake (min(diameter, 12)), and the lying snow,
+# deep snow and avatar snow do not read it.
+#
+# Rain: a new setting, WeatherSettings::rain_size, on the same curve and
+# range, 0.5 by default (scale 1: upstream's drops exactly), with a "Drop
+# size" slider where the Flake size slider is, shown while rain falls. Its
+# scale (RainLook::rain_drop, 1 by default) multiplies what the drop's
+# size gives on screen, as the snow's does: the streak's width and its
+# length in vs_rain (the width before the RAIN_MIN_PX floor, so bigger
+# drops simply reach that floor farther away; the floor itself is a pixel
+# rule, not a size, and stays), and the splash droplets' width and length
+# in vs_rain_splash, as Flake size sizes the flakes that land. The drop's
+# fall (its speed from its diameter, the wind's slant and carry) stays the
+# drop's own, so a bigger setting draws bigger drops without making the
+# rain fall faster; the distant rain's layers stay the faint pixel-wide
+# streaks of drops too far to see (their width is the pixel's, not the
+# drop's); the puddles' rings are the wet pass's, not the drops'.
+#
+# The scale travels in the field upstream uses for the flakes:
+# Frame::rain_look.w was the flakes' scale in snow and 0 in rain, and its
+# only reader that is not snow-gated is env.wgsl `snowing()` (w > 0.25). In
+# rain it now holds the drops' scale negated (-0.5..-3, renderer.rs
+# `fall_size`, unit-tested), so `snowing()` and every snow reader read what
+# they read before, RainLook::snow keeps its meaning for the Rust readers
+# (`snow > 0.0`), the Frame uniform keeps its size and layout, and at the
+# default env.wgsl `rain_drop_scale` gives exactly 1.0.
+#
+# Upstream functions touched: WeatherSettings (field, Default,
+# flake_scale, rain_look), ui/environment.rs weather_body and
+# weather_label_width, RainLook (field, Default), the frame uniforms'
+# rain_look packing (renderer.rs), env.wgsl vs_rain and vs_rain_splash.
+# The slider of the Environment window is the only place either value is
+# set (one interface style; Preferences › Graphics › Weather has no size
+# rows); a region's or a sky's Aurora Weather carries no size, its
+# RegionDay::apply keeps the viewer's own (..own.clone()). Saved with the
+# other weather settings (#[serde(default)]: an older file gets 0.5).
+#
+# Tests: weather/mod.rs size_tests (the curve's ends, old positions, the
+# default and an older file, a save and read back), renderer.rs
+# the_frame_carries_what_falls_and_its_size. Apply or skip the whole file,
+# not one patch of it.
+
+# --- the setting (weather/mod.rs)
+
+[[patch]]
+id = "weather-size-field"
+why = "the Drop size setting beside the Flake size one, on the same curve"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+find = '''/// How big the snowflakes are, 0 (fine powder) to 1 (big wet flakes);
+    /// 0.5 is the middle.
+    pub snow_size: f32,'''
+replace = '''/// How big the snowflakes are, 0 (fine powder) to `SIZE_MAX` (flakes
+    /// three times their middle size; upstream's slider ended at 1, twice);
+    /// 0.5 is the middle.
+    pub snow_size: f32,
+    // aurora-local-patch: weather-size-field
+    /// How big the raindrops are, on the same curve and range as
+    /// `snow_size`: 0.5, the middle, draws them as upstream does.
+    pub rain_size: f32,'''
+
+[[patch]]
+id = "weather-size-default"
+why = "the drops as upstream draws them by default"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+find = "snow_size: 0.5,"
+replace = '''snow_size: 0.5,
+            rain_size: 0.5, // aurora-local-patch: weather-size-default'''
+
+[[patch]]
+id = "weather-size-scales"
+why = "the flakes' scale up to 3 on upstream's curve, and the drops' on the same"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+find = '''/// The flakes' size scale for the renderer (0.5 to 2, 1 in the middle).
+    pub fn flake_scale(&self) -> f32 {
+        0.5 * 4.0f32.powf(self.snow_size.clamp(0.0, 1.0))
+    }'''
+replace = '''/// The flakes' size scale for the renderer (0.5 to 3, 1 in the middle).
+    // aurora-local-patch: weather-size-scales
+    pub fn flake_scale(&self) -> f32 {
+        size_scale(self.snow_size)
+    }
+
+    /// The raindrops' size scale for the renderer (`RainLook::rain_drop`,
+    /// 0.5 to 3, 1 in the middle: upstream's drops).
+    pub fn drop_scale(&self) -> f32 {
+        size_scale(self.rain_size)
+    }'''
+
+[[patch]]
+id = "weather-size-look"
+why = "the drops' scale goes to the renderer with the flakes'"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+fn = "rain_look"
+find = "snow: if self.snowing() { self.flake_scale() } else { 0.0 },"
+replace = '''snow: if self.snowing() { self.flake_scale() } else { 0.0 },
+            rain_drop: self.drop_scale(), // aurora-local-patch: weather-size-look'''
+
+[[patch]]
+id = "weather-size-curve"
+why = "one curve for both sliders, its end, and its tests"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+find = '''/// The wind of the Wind sliders at their strongest (m/s, a gale).
+const WIND_MAX: f32 = 18.0;'''
+replace = '''// aurora-local-patch: weather-size-curve
+/// The right end of the Flake size and Drop size sliders (local patch set,
+/// 105-weather-size): log4(6), where `size_scale` reaches 3. Upstream's
+/// Flake size ended at 1 (a scale of 2); every position up to it keeps the
+/// scale it had.
+pub const SIZE_MAX: f32 = 1.292_481_3;
+
+/// A Flake size or Drop size position (0 to `SIZE_MAX`) as the size scale
+/// the renderer multiplies by: 0.5 * 4^position, upstream's curve (0 gives
+/// 0.5, 0.5 gives 1, 1 gives 2), now up to 3. A value that is not a number
+/// (a hand-edited settings file) is the middle.
+pub fn size_scale(position: f32) -> f32 {
+    let position = if position.is_finite() { position.clamp(0.0, SIZE_MAX) } else { 0.5 };
+    0.5 * 4.0f32.powf(position)
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn the_size_curve_keeps_upstreams_positions_and_reaches_three() {
+        assert_eq!(size_scale(0.0), 0.5);
+        assert_eq!(size_scale(0.5), 1.0);
+        assert!((size_scale(SIZE_MAX) - 3.0).abs() < 1e-5, "{}", size_scale(SIZE_MAX));
+        // past either end, or not a number
+        assert_eq!(size_scale(5.0), size_scale(SIZE_MAX));
+        assert_eq!(size_scale(-1.0), 0.5);
+        assert_eq!(size_scale(f32::NAN), 1.0);
+        // a position saved before: the scale upstream gave it
+        for s in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            assert_eq!(size_scale(s), 0.5 * 4.0f32.powf(s.clamp(0.0, 1.0)), "{s}");
+        }
+    }
+
+    #[test]
+    fn the_rain_keeps_upstreams_drops_by_default_and_in_older_files() {
+        let w = WeatherSettings::default();
+        assert_eq!(w.rain_size, 0.5);
+        assert_eq!(w.drop_scale(), 1.0);
+        assert_eq!(w.flake_scale(), 1.0);
+        assert_eq!(w.rain_look(&Wind::default()).rain_drop, 1.0);
+        // a settings file from before the Drop size slider
+        let read: WeatherSettings = serde_json::from_str("{\"snow_size\": 0.8}").expect("parse");
+        assert_eq!(read.drop_scale(), 1.0);
+        assert_eq!(read.flake_scale(), 0.5 * 4.0f32.powf(0.8));
+        // both sliders' right end: three times the middle size
+        let big = WeatherSettings {
+            snow_size: SIZE_MAX,
+            rain_size: SIZE_MAX,
+            ..Default::default()
+        };
+        assert!((big.flake_scale() - 3.0).abs() < 1e-5);
+        assert!((big.drop_scale() - 3.0).abs() < 1e-5);
+        // saved and read back
+        let back: WeatherSettings = serde_json::from_str(&serde_json::to_string(&big).expect("save")).expect("read");
+        assert_eq!((back.snow_size, back.rain_size), (SIZE_MAX, SIZE_MAX));
+    }
+}
+
+/// The wind of the Wind sliders at their strongest (m/s, a gale).
+const WIND_MAX: f32 = 18.0;'''
+
+# --- the Aurora Weather window (ui/environment.rs)
+
+[[patch]]
+id = "weather-size-label"
+why = "the label column is as wide as its longest label, Drop size included"
+paths = ["crates/aurora-viewer/src/ui/environment.rs"]
+op = "literal"
+fn = "weather_label_width"
+find = '''aurora_i18n::tr!("ui-weather-flake-size"),
+        aurora_i18n::tr!("ui-weather-snow-settles"),'''
+replace = '''aurora_i18n::tr!("ui-weather-flake-size"),
+        aurora_i18n::tr!("ui-weather-drop-size"), // aurora-local-patch: weather-size-label
+        aurora_i18n::tr!("ui-weather-snow-settles"),'''
+
+[[patch]]
+id = "weather-size-drop-slider"
+why = "Drop size where Flake size is, while rain falls"
+paths = ["crates/aurora-viewer/src/ui/environment.rs"]
+op = "literal"
+fn = "weather_body"
+find = '''// the flakes' size
+        if snowing {'''
+replace = '''// aurora-local-patch: weather-size-drop-slider
+        // the drops' size, in the flakes' place while rain falls
+        if !snowing {
+            ui.horizontal(|ui| {
+                row_label(
+                    ui,
+                    p,
+                    aurora_i18n::tr!("ui-weather-drop-size"),
+                    aurora_i18n::tr!("ui-weather-drop-size-tip"),
+                );
+                ui.add(egui::Slider::new(&mut w.rain_size, 0.0..=crate::weather::SIZE_MAX).show_value(false));
+            });
+        }
+        // the flakes' size
+        if snowing {'''
+
+[[patch]]
+id = "weather-size-flake-slider"
+why = "Flake size goes on to three times the middle size; its old positions keep their place"
+paths = ["crates/aurora-viewer/src/ui/environment.rs"]
+op = "literal"
+fn = "weather_body"
+find = "ui.add(egui::Slider::new(&mut w.snow_size, 0.0..=1.0).show_value(false));"
+replace = "ui.add(egui::Slider::new(&mut w.snow_size, 0.0..=crate::weather::SIZE_MAX).show_value(false)); // aurora-local-patch: weather-size-flake-slider"
+
+# --- the renderer (types.rs, renderer.rs)
+
+[[patch]]
+id = "weather-size-render-field"
+why = "the drops' scale beside the flakes'"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''/// What falls is snow, with the flakes' size scale (0.5 to 2; 0: rain):
+    /// flakes instead of drops, nothing wets.
+    pub snow: f32,'''
+replace = '''/// What falls is snow, with the flakes' size scale (0.5 to 3; 0: rain):
+    /// flakes instead of drops, nothing wets.
+    pub snow: f32,
+    // aurora-local-patch: weather-size-render-field
+    /// The raindrops' size scale (0.5 to 3; 1: upstream's drops), read
+    /// while rain falls: the streaks' and splashes' width and length.
+    pub rain_drop: f32,'''
+
+[[patch]]
+id = "weather-size-render-default"
+why = "upstream's drops by default"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''snow: 0.0,
+            snow_detail: 0,'''
+replace = '''snow: 0.0,
+            rain_drop: 1.0, // aurora-local-patch: weather-size-render-default
+            snow_detail: 0,'''
+
+[[patch]]
+id = "weather-size-fall"
+why = "what falls and its size in one value: the flakes' scale, or the drops' negated"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "fn rain_drops(rain: f32, quality: u32) -> u32 {"
+replace = '''// aurora-local-patch: weather-size-fall
+/// `Frame::rain_look.w` (local patch set, 105-weather-size): what falls and
+/// how big. Snow: the flakes' scale, 0.5 to 3 (upstream's 0.5 to 2; its
+/// readers test `> 0.25`). Rain: the drops' scale negated, -0.5 to -3
+/// (upstream's 0, which no reader told apart from another value under
+/// 0.25; env.wgsl `rain_drop_scale`). A drops' scale that is not a number
+/// is 1.
+fn fall_size(snow: f32, rain_drop: f32) -> f32 {
+    if snow > 0.0 {
+        snow.clamp(0.5, 3.0)
+    } else if rain_drop.is_finite() {
+        -rain_drop.clamp(0.5, 3.0)
+    } else {
+        -1.0
+    }
+}
+
+fn rain_drops(rain: f32, quality: u32) -> u32 {'''
+
+[[patch]]
+id = "weather-size-pack"
+why = "the frame carries the flakes' scale up to 3, and the drops' in rain"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''if f.rain_look.snow > 0.0 {
+                f.rain_look.snow.clamp(0.5, 2.0)
+            } else {
+                0.0
+            },'''
+replace = '''// aurora-local-patch: weather-size-pack
+            fall_size(f.rain_look.snow, f.rain_look.rain_drop),'''
+
+[[patch]]
+id = "weather-size-fall-test"
+why = "the packing's ends, and rain never read as snow"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''    #[test]
+    fn deep_snow_has_enough_levels_for_its_reach() {'''
+replace = '''// aurora-local-patch: weather-size-fall-test
+    #[test]
+    fn the_frame_carries_what_falls_and_its_size() {
+        // snow: the flakes' scale, now up to 3
+        assert_eq!(fall_size(1.0, 1.0), 1.0);
+        assert_eq!(fall_size(3.0, 1.0), 3.0);
+        assert_eq!(fall_size(9.0, 1.0), 3.0);
+        assert_eq!(fall_size(0.1, 1.0), 0.5);
+        // rain: the drops' scale negated, never read as snow (env.wgsl
+        // `snowing`: w > 0.25), 1 by default
+        assert_eq!(RainLook::default().rain_drop, 1.0);
+        assert_eq!(fall_size(0.0, 1.0), -1.0);
+        assert_eq!(fall_size(0.0, 3.0), -3.0);
+        assert_eq!(fall_size(0.0, 9.0), -3.0);
+        assert_eq!(fall_size(0.0, 0.1), -0.5);
+        assert_eq!(fall_size(0.0, f32::NAN), -1.0);
+        for drop in [0.5f32, 1.0, 2.0, 3.0] {
+            assert!(fall_size(0.0, drop) < 0.25, "{drop}");
+        }
+    }
+
+    #[test]
+    fn deep_snow_has_enough_levels_for_its_reach() {'''
+
+# --- the shaders (common.wgsl, env.wgsl)
+
+[[patch]]
+id = "weather-size-comment"
+why = "the Frame field's comment says what w now holds"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "z quality (0 low, 1 medium, 2 high), w snow (0/1)"
+replace = "z quality (0 low, 1 medium, 2 high), w what falls: snow > 0 the flakes' scale (0.5..3), rain < 0 the drops' scale negated (-0.5..-3) // aurora-local-patch: weather-size-comment"
+
+[[patch]]
+id = "weather-size-shader-fn"
+why = "the drops' scale read back from rain_look.w; 1 in snow and at the default"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''fn snowing() -> bool {
+    return frame.rain_look.w > 0.25;
+}'''
+replace = '''fn snowing() -> bool {
+    return frame.rain_look.w > 0.25;
+}
+
+// aurora-local-patch: weather-size-shader-fn
+// The raindrops' size scale (Drop size, local patch set 105-weather-size):
+// rain_look.w holds it negated while it rains (renderer.rs `fall_size`), 1
+// for upstream's drops; 1 in snow, whose flakes' scale is w itself.
+fn rain_drop_scale() -> f32 {
+    return select(1.0, -frame.rain_look.w, frame.rain_look.w < -0.25);
+}'''
+
+[[patch]]
+id = "weather-size-drops"
+why = "Drop size: the streak drawn longer by the drops' scale; the fall stays the drop's own"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = "let length_m = select(speed * RAIN_EXPOSURE, diameter * 0.001 + length(velocity) * 0.012, snow);"
+replace = '''// aurora-local-patch: weather-size-drops
+    // Drop size: the streak drawn wider (below) and longer by the drops'
+    // scale, 1 in snow; its speed, slant and drift stay the drop's own
+    let drop_k = select(rain_drop_scale(), 1.0, snow);
+    let length_m = select(speed * RAIN_EXPOSURE * drop_k, diameter * 0.001 + length(velocity) * 0.012, snow);'''
+
+[[patch]]
+id = "weather-size-drop-width"
+why = "Drop size: the streak's real width, before the RAIN_MIN_PX floor"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''let real = diameter * 0.001;
+    let width = max(real, RAIN_MIN_PX / max(px_per_m, 1e-3)) * 0.5;'''
+replace = '''let real = diameter * 0.001 * drop_k; // aurora-local-patch: weather-size-drop-width
+    let width = max(real, RAIN_MIN_PX / max(px_per_m, 1e-3)) * 0.5;'''
+
+[[patch]]
+id = "weather-size-splash"
+why = "Drop size: bigger drops throw bigger droplets, as Flake size sizes the flakes that land"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''let real = (0.6 + rain_rand(ds + 3u) * 0.6) * 0.001;
+    let width = max(real, RAIN_MIN_PX / max(px_per_m, 1e-3)) * 0.5;
+    let coverage = clamp(real / (width * 2.0), 0.0, 1.0);
+    let length_m = max(speed * RAIN_EXPOSURE * 0.6, 0.004);'''
+replace = '''// aurora-local-patch: weather-size-splash
+    // Drop size: the droplets' width and length (how high and far they fly
+    // stays the same)
+    let drop_k = rain_drop_scale();
+    let real = (0.6 + rain_rand(ds + 3u) * 0.6) * 0.001 * drop_k;
+    let width = max(real, RAIN_MIN_PX / max(px_per_m, 1e-3)) * 0.5;
+    let coverage = clamp(real / (width * 2.0), 0.0, 1.0);
+    let length_m = max(speed * RAIN_EXPOSURE * 0.6, 0.004) * drop_k;'''
+
+# --- the text (every catalogue: the parity test wants each key in each)
+
+[[patch]]
+id = "weather-size-text-en"
+why = "the Drop size label and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-weather-flake-size-tip = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: weather-size-text-en
+ui-weather-drop-size = Drop size
+ui-weather-drop-size-tip = How big the raindrops are: fine drizzle on the left, big heavy drops on the right; they still vary around it'''
+
+[[patch]]
+id = "weather-size-text-fr"
+why = "goes with weather-size-text-en (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-weather-flake-size-tip = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: weather-size-text-fr
+ui-weather-drop-size = Taille des gouttes
+ui-weather-drop-size-tip = La taille des gouttes de pluie : fine bruine à gauche, grosses gouttes lourdes à droite ; elles varient toujours autour'''
+
+[[patch]]
+id = "weather-size-text-ja"
+why = "goes with weather-size-text-en (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-weather-flake-size-tip = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: weather-size-text-ja
+ui-weather-drop-size = 雨粒の大きさ
+ui-weather-drop-size-tip = 雨粒の大きさ：左ほど細かい霧雨、右ほど大きく重い雨粒。大きさはその周りでばらつきます'''

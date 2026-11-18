@@ -1,0 +1,417 @@
+# Two more switches for the media filter, in Preferences > Media, beside
+# "Trust my worn items" (behind the filter's cog, greyed while the filter is
+# off, and in effect only while it is on):
+#
+# - "Don't report blocked" (media.filter_quiet, off by default): the filter
+#   no longer posts its "... was blocked by the media filter" lines in the
+#   chat, neither for a site the list or this session refused nor for a
+#   refused scheme (javascript:, file:...). The viewer log still records
+#   each refusal. The lines that confirm an answer the resident just gave
+#   to the question ("... added to the list") are kept: they are not
+#   reports of a block;
+# - "Don't ask" (media.filter_no_ask, off by default): where the filter
+#   would ask (no rule in the list, no answer this session, not a trusted
+#   worn item), it refuses instead, for prim media, parcel media and parcel
+#   music alike. Nothing is kept: no rule, no session answer. The URLs it
+#   refused are only remembered so that each is told once (following
+#   "Don't report blocked"); that memory is emptied whenever the switch
+#   changes, so with it off again an unknown site is asked about as before
+#   (once its media is wanted again: a refused media is no longer wanted,
+#   like after any refusal). Turned on, the questions already waiting are
+#   dropped: their media is refused at its next check, and the question
+#   (a banner since upstream #3063) never shows while it is on. Allow rules, block rules and "Trust
+#   my worn items" work as they do today.
+#
+# Both are local additions: the Legacy Viewer has neither (MediaEnableFilter
+# and its alerts only, llviewerparcelmedia.cpp). They only ever refuse more
+# or tell less, never let more through.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ---------------------------------------------------------------- settings
+
+[[patch]]
+id = "media-filter-switches-settings"
+why = "the two switches in settings.json; MediaSettings is serde(default), so older files read them as off"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "pub filter_trust_own_worn: bool,"
+replace = '''pub filter_trust_own_worn: bool,
+    // aurora-local-patch: media-filter-switches-settings
+    /// Local addition (local patch set): the filter's refusals are not told
+    /// in the chat, only written to the log. Off by default.
+    pub filter_quiet: bool,
+    /// Local addition (local patch set): a site with no answer is refused
+    /// instead of asked about, and nothing is added to the list or kept for
+    /// the session, so it is asked about again once this is off. Allow
+    /// rules and trusted worn items still load. Off by default.
+    pub filter_no_ask: bool,'''
+
+[[patch]]
+id = "media-filter-switches-defaults"
+why = "goes with media-filter-switches-settings: both off by default, the filter behaves as upstream's"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "filter_trust_own_worn: true,"
+replace = '''filter_trust_own_worn: true,
+            filter_quiet: false, // aurora-local-patch: media-filter-switches-defaults
+            filter_no_ask: false,'''
+
+# ------------------------------------------------------------- the filter
+
+[[patch]]
+id = "media-filter-switches-fields"
+why = "the filter keeps the switches in effect and the URLs Don't ask refused (each told once)"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+find = "just_denied: HashSet<String>,"
+replace = '''just_denied: HashSet<String>,
+    // aurora-local-patch: media-filter-switches-fields
+    /// "Don't report blocked" in effect (filter_quiet, a local addition).
+    quiet: bool,
+    /// "Don't ask" in effect (filter_no_ask, a local addition).
+    no_ask: bool,
+    /// URLs "Don't ask" refused, told once each; emptied whenever the
+    /// switch changes. Never an answer: nothing here outlives the switch.
+    silenced: HashSet<String>,'''
+
+[[patch]]
+id = "media-filter-switches-follow"
+why = "the switches follow the settings; Don't ask turned on drops the questions waiting, and either way forgets what it refused"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+find = "pub fn rules(&self) -> &[Rule] {"
+replace = '''// aurora-local-patch: media-filter-switches-follow
+    /// The filter's two local switches (Preferences › Media), each in effect
+    /// only while the filter is on. "Don't ask" turned on drops the
+    /// questions waiting: their media is refused at its next check. Turned
+    /// on or off, the sites it refused are forgotten, so that with it off
+    /// they are asked about again.
+    pub fn follow_settings(&mut self, s: &crate::media::MediaSettings) {
+        self.quiet = s.filter && s.filter_quiet;
+        let no_ask = s.filter && s.filter_no_ask;
+        if no_ask == self.no_ask {
+            return;
+        }
+        self.no_ask = no_ask;
+        self.silenced.clear();
+        if no_ask && !self.questions.is_empty() {
+            log::info!("media filter: {} waiting questions dropped, Don't ask is on", self.questions.len());
+            self.questions.clear();
+        }
+    }
+
+    pub fn rules(&self) -> &[Rule] {'''
+
+[[patch]]
+id = "media-filter-switches-tell"
+why = "one place tells a refusal in the chat, and stays silent with Don't report blocked"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+find = "fn decide(&mut self, url: &str, source: Source, ask: bool, notify: bool) -> Verdict {"
+replace = '''// aurora-local-patch: media-filter-switches-tell
+    /// The chat line of a refusal, unless "Don't report blocked" is on
+    /// (filter_quiet): the log line is written by the caller either way.
+    fn tell_blocked(&mut self, source: Source, what: String) {
+        if self.quiet {
+            return;
+        }
+        self.messages.push(match source {
+            Source::Music => aurora_i18n::tr!("media-filter-music-blocked", domain = what),
+            _ => aurora_i18n::tr!("media-filter-media-blocked", domain = what),
+        });
+    }
+
+    fn decide(&mut self, url: &str, source: Source, ask: bool, notify: bool) -> Verdict {'''
+
+[[patch]]
+id = "media-filter-switches-quiet-scheme"
+why = "a refused scheme (javascript:, file:...) is told through tell_blocked"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+fn = "refuse_scheme"
+find = '''
+let what = format!("{scheme}:");
+self.messages.push(match source {
+    Source::Music => aurora_i18n::tr!("media-filter-music-blocked", domain = what),
+    _ => aurora_i18n::tr!("media-filter-media-blocked", domain = what),
+});
+'''
+replace = '''self.tell_blocked(source, format!("{scheme}:")); // aurora-local-patch: media-filter-switches-quiet-scheme'''
+
+[[patch]]
+id = "media-filter-switches-quiet-rule"
+why = "a site the list or this session refused is told through tell_blocked"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+fn = "decide"
+find = '''
+self.messages.push(match source {
+    Source::Music => aurora_i18n::tr!("media-filter-music-blocked", domain = host),
+    _ => aurora_i18n::tr!("media-filter-media-blocked", domain = host),
+});
+'''
+replace = '''self.tell_blocked(source, host); // aurora-local-patch: media-filter-switches-quiet-rule'''
+
+[[patch]]
+id = "media-filter-switches-no-ask"
+why = "Don't ask: where the question would be asked, the site is refused, told once per URL, and nothing is kept"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+fn = "decide"
+find = "None if !ask => Verdict::Allow,"
+replace = '''None if !ask => Verdict::Allow,
+            // aurora-local-patch: media-filter-switches-no-ask
+            // "Don't ask": refused without a question, kept in no list and
+            // as no answer of the session; told once per URL
+            None if self.no_ask => {
+                if self.silenced.insert(url.to_string()) {
+                    log::info!("media filter: {host} blocked without asking");
+                    self.tell_blocked(source, host);
+                }
+                Verdict::Deny
+            }'''
+
+# ------------------------------------------------------ where it is checked
+
+[[patch]]
+id = "media-filter-switches-apply"
+why = "prim and parcel media: the filter follows the switches before its checks of the frame"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "insert_fn_start"
+fn = "apply_filter"
+impl = "MediaManager"
+expect_sig = 'fn apply_filter\(&mut self, world: &mut World, f: &MediaFrame\)'
+body = '''
+world.media_filter.follow_settings(f.settings);
+'''
+
+[[patch]]
+id = "media-filter-switches-music"
+why = "parcel music: the filter follows the switches before filterAudioUrl's check (Radio::target, app/parcel_music.rs)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_audio"
+find = "let (want, verdict) = self.parcel_music.target("
+replace = '''self.world.media_filter.follow_settings(&self.settings.media); // aurora-local-patch: media-filter-switches-music
+        let (want, verdict) = self.parcel_music.target('''
+
+[[patch]]
+id = "media-filter-switches-question"
+why = "the question banner (upstream #3063 made the dialog a banner): switching Don't ask on drops a question already shown or queued, before it is drawn"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "media_filter_question"
+find = "let first_use = !self.settings.media.filter_explained;"
+replace = '''self.world.media_filter.follow_settings(&self.settings.media); // aurora-local-patch: media-filter-switches-question
+        let first_use = !self.settings.media.filter_explained;'''
+
+# --------------------------------------------------------- the preferences
+
+[[patch]]
+id = "media-filter-switches-page"
+why = "the two switches beside Trust my worn items, greyed with it while the filter is off"
+paths = ["crates/aurora-viewer/src/ui/options/pages/media.rs"]
+op = "literal"
+find = '''
+&field!(media.filter_trust_own_worn),
+);
+'''
+replace = '''&field!(media.filter_trust_own_worn),
+            );
+            // aurora-local-patch: media-filter-switches-page
+            cx.toggle(
+                tr!("ui-options-media-filter-quiet"),
+                tr!("ui-options-media-filter-quiet-help"),
+                &field!(media.filter_quiet),
+            );
+            cx.toggle(
+                tr!("ui-options-media-filter-no-ask"),
+                tr!("ui-options-media-filter-no-ask-help"),
+                &field!(media.filter_no_ask),
+            );'''
+
+[[patch]]
+id = "media-filter-switches-text-en"
+why = "the labels and help of the two switches (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: media-filter-switches-text-en
+ui-options-media-filter-quiet = Don't report blocked
+ui-options-media-filter-quiet-help = Media and music the filter blocks are not reported in the chat; the viewer's log still records them
+ui-options-media-filter-no-ask = Don't ask
+ui-options-media-filter-no-ask-help = A site not in the list is blocked without the question, and nothing is added to the list: once this is off, it is asked about again. Allowed sites and trusted worn items still load'''
+
+[[patch]]
+id = "media-filter-switches-text-fr"
+why = "goes with media-filter-switches-text-en (French); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: media-filter-switches-text-fr
+ui-options-media-filter-quiet = Ne pas signaler les blocages
+ui-options-media-filter-quiet-help = Les médias et la musique que le filtre bloque ne sont pas signalés dans le chat ; le journal de la visionneuse les note toujours
+ui-options-media-filter-no-ask = Ne pas demander
+ui-options-media-filter-no-ask-help = Un site absent de la liste est bloqué sans question, et rien n'est ajouté à la liste : une fois cette option désactivée, la question est de nouveau posée. Les sites autorisés et les objets portés de confiance se chargent toujours'''
+
+[[patch]]
+id = "media-filter-switches-text-ja"
+why = "goes with media-filter-switches-text-en (Japanese); the parity test wants every key in every catalogue"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: media-filter-switches-text-ja
+ui-options-media-filter-quiet = ブロックを通知しない
+ui-options-media-filter-quiet-help = フィルターがブロックしたメディアや音楽をチャットに表示しません。ビューアのログには引き続き記録されます。
+ui-options-media-filter-no-ask = 確認しない
+ui-options-media-filter-no-ask-help = リストにないサイトは確認なしでブロックし、リストには何も追加しません。オフに戻すと、再び確認します。許可したサイトと信頼する装着アイテムは引き続き読み込みます。'''
+
+# ------------------------------------------------------------------- tests
+
+[[patch]]
+id = "media-filter-switches-test"
+why = "Don't report blocked silences every refusal line; Don't ask refuses unknown sites without a rule or a session answer, tells each once, leaves allow rules, block rules and trusted worn items alone, and asks again once off"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+find = '''
+#[test]
+fn questions_nothing_asks_for_go_away() {
+'''
+replace = '''// aurora-local-patch: media-filter-switches-test
+    fn switches(quiet: bool, no_ask: bool) -> crate::media::MediaSettings {
+        crate::media::MediaSettings {
+            filter_quiet: quiet,
+            filter_no_ask: no_ask,
+            ..crate::media::MediaSettings::default()
+        }
+    }
+
+    #[test]
+    fn dont_report_blocked_tells_no_refusal() {
+        let mut f = MediaFilter::default();
+        f.follow_settings(&switches(true, false));
+        f.apply(Edit::Set("b.example".into(), Action::Deny));
+        assert_eq!(f.check("http://b.example/", Source::ParcelMedia), Verdict::Deny);
+        assert_eq!(f.check_trusted("http://b.example/", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://b.example/live", Source::Music), Verdict::Deny);
+        assert_eq!(f.check("javascript:alert(1)", Source::PrimMedia), Verdict::Deny);
+        assert!(f.refuse_scheme("file:///x", Source::Music));
+        assert!(f.messages.is_empty());
+        // unknown sites are still asked about
+        assert_eq!(f.check("http://a.example/", Source::PrimMedia), Verdict::Ask);
+        assert!(f.question().is_some());
+        // the filter off: the switch is greyed and does nothing
+        f.follow_settings(&crate::media::MediaSettings {
+            filter: false,
+            ..switches(true, false)
+        });
+        assert!(f.refuse_scheme("file:///x", Source::PrimMedia));
+        assert_eq!(f.messages.len(), 1);
+    }
+
+    #[test]
+    fn dont_ask_refuses_unknown_sites_and_keeps_nothing() {
+        let mut f = MediaFilter::default();
+        // a question waiting when the switch is turned on goes
+        assert_eq!(f.check("http://w.example/", Source::ParcelMedia), Verdict::Ask);
+        f.follow_settings(&switches(false, true));
+        assert!(f.question().is_none());
+        assert_eq!(f.check("http://w.example/", Source::ParcelMedia), Verdict::Deny);
+        assert_eq!(f.check("http://a.example/1", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://a.example/1", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://r.example/live", Source::Music), Verdict::Deny);
+        assert!(f.question().is_none());
+        assert!(f.rules.is_empty() && f.session.is_empty(), "nothing kept");
+        assert_eq!(f.messages.len(), 3, "told once per URL");
+        // allow rules, block rules and trusted worn items as before
+        f.apply(Edit::Set("ok.example".into(), Action::Allow));
+        f.apply(Edit::Set("no.example".into(), Action::Deny));
+        assert_eq!(f.check("http://ok.example/", Source::ParcelMedia), Verdict::Allow);
+        assert_eq!(f.check("http://ok.example/live", Source::Music), Verdict::Allow);
+        assert_eq!(f.check_trusted("http://worn.example/", Source::PrimMedia), Verdict::Allow);
+        assert_eq!(f.check_trusted("http://no.example/", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://no.example/", Source::ParcelMedia), Verdict::Deny);
+        assert_eq!(f.messages.len(), 5, "a block rule is told as before");
+        // with Don't report blocked too, nothing is told
+        f.follow_settings(&switches(true, true));
+        assert_eq!(f.check("http://q.example/", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://no.example/", Source::ParcelMedia), Verdict::Deny);
+        assert_eq!(f.messages.len(), 5);
+        // turned off: the same sites are asked about again
+        f.follow_settings(&switches(false, false));
+        assert_eq!(f.check("http://a.example/1", Source::PrimMedia), Verdict::Ask);
+        assert_eq!(f.check("http://w.example/", Source::ParcelMedia), Verdict::Ask);
+        assert_eq!(f.check("http://r.example/live", Source::Music), Verdict::Ask);
+        assert_eq!(f.question().map(|q| q.domain.as_str()), Some("a.example"));
+        // on again: told again once, the waiting questions go
+        f.follow_settings(&switches(false, true));
+        assert!(f.question().is_none());
+        assert_eq!(f.check("http://a.example/1", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.check("http://a.example/1", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(f.messages.len(), 6);
+        // the filter off makes the switch do nothing: with the filter on
+        // again the site is refused without a question once more
+        f.follow_settings(&crate::media::MediaSettings {
+            filter: false,
+            ..switches(false, true)
+        });
+        assert_eq!(f.check("http://z.example/", Source::PrimMedia), Verdict::Ask);
+        f.follow_settings(&switches(false, true));
+        assert!(f.question().is_none());
+        assert_eq!(f.check("http://z.example/", Source::PrimMedia), Verdict::Deny);
+    }
+
+    #[test]
+    fn questions_nothing_asks_for_go_away() {'''
+
+[[patch]]
+id = "media-filter-switches-test-apply"
+why = "the media update follows the switches: with Don't ask and Don't report blocked, an unknown parcel media is refused with no question, no chat line and no rule"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+find = '''
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+'''
+replace = '''mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // aurora-local-patch: media-filter-switches-test-apply
+    #[test]
+    fn dont_ask_refuses_media_with_no_question_nor_rule() {
+        let mut w = World::new(Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        let mut m = MediaManager::default();
+        let mut parcel = MediaImpl::new(MediaKey::Parcel, "https://media.example.invalid/".into(), "text/html".into());
+        parcel.wanted = true;
+        m.impls.push(parcel);
+        let view = CullView::new(Mat4::IDENTITY, Vec3::ZERO, 720.0, 1.0);
+        let settings = MediaSettings {
+            filter_quiet: true,
+            filter_no_ask: true,
+            ..MediaSettings::default()
+        };
+        let f = MediaFrame {
+            view: &view,
+            camera: Vec3::ZERO,
+            settings: &settings,
+            autoplay: true,
+            channel_volume: 1.0,
+            agent_speed: 0.0,
+            window_focused: true,
+            gaming_mode: false,
+            net: None,
+            cache_dir: std::path::Path::new(""),
+            language: "en",
+        };
+        m.apply_filter(&mut w, &f);
+        assert!(!m.impls[0].wanted && !m.impls[0].filter_hold);
+        assert!(w.media_filter.question().is_none());
+        assert!(w.media_filter.messages.is_empty());
+        assert!(w.media_filter.rules().is_empty());
+    }'''

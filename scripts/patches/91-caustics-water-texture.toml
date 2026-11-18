@@ -1,0 +1,684 @@
+# Underwater caustics can follow the environment's own water: Preferences ›
+# Graphics › Reflections and water › Underwater caustics, behind its cog,
+# "Use water texture" (off by default) and "Scale" (0.25..4, default 1).
+#
+# Upstream's caustics forward-project a fixed analytic surface (six regular
+# micro-waves, periodic over 16 m) into one light map that every receiver
+# samples with fract(position / 16): the same pattern everywhere, repeating
+# every 16 m. With "Use water texture" on, the light map is built from the
+# normal map the water surface draws (the EEP water's texture, both wave
+# directions and scroll speeds, its normal scale: env.wgsl water_pixel, a
+# port of the Legacy Viewer's waterF.glsl), in two GPU passes with no CPU
+# work and no readback (files/caustics-water-texture/, module doc):
+#   1. the surface's slope over one 25 m tile (the big wave's own period; the
+#      little waves rounded to whole repeats so the tile is seamless) into a
+#      periodic slope map; a fragment pass, the bindless pages being
+#      fragment-only;
+#   2. upstream's forward projection (flux-conserving area term, bounded
+#      fold), the refraction from that map, the lens Jacobian from its finite
+#      differences. 400 texels over 25 m: upstream's 16 per metre.
+# The receivers look it up through the surface's own slow x warp, so the
+# pattern sits under the ripples that make it and neighbouring tiles shift
+# against each other (warp periods 78.5 m and 314 m): no visible grid.
+# Scale divides the lookup position in both modes. Caustics are an Aurora
+# effect; the Legacy Viewer has none.
+#
+# Off with Scale 1, nothing changes: water_caustics.wgsl and its pipeline are
+# untouched, the shared water uniform keeps its first 64 bytes (the
+# extension follows, initialised to the analytic values at creation) and the
+# receivers take their original lines. While the environment's normal map is
+# not loaded (slot 0) the analytic pattern stands in.
+#
+# Options: the cog of a row that is itself behind a cog is new; cx.rs gets a
+# stack of open blocks (each paints its own background) and a revealed row
+# behind two cogs opens both.
+#
+# Demo: AURORA_DEMO=1 AURORA_DEMO_WATER=caustics (underwater lagoon, waves
+# held still) with AURORA_DEMO_CAUSTICS=texture[,scale=<x>] (docs/TESTING.md).
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------ render crate
+
+[[patch]]
+id = "caustics-water-texture-module"
+why = "the texture's light map: slope and projection passes, the uniform extension, the fallback rule, tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/water_caustic_texture.rs"]
+source = "files/caustics-water-texture/water_caustic_texture.rs"
+
+[[patch]]
+id = "caustics-water-texture-shader"
+why = "the slope and projection shaders"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/water_caustics_texture.wgsl"]
+source = "files/caustics-water-texture/water_caustics_texture.wgsl"
+
+[[patch]]
+id = "caustics-water-texture-mod"
+why = "a child module of water_effects: it extends WaterGpu and reads its private fields"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "use glam::Vec2;"
+replace = """use glam::Vec2;
+
+// aurora-local-patch: caustics-water-texture-mod
+#[path = "water_caustic_texture.rs"]
+mod caustic_texture;
+pub use caustic_texture::{SCALE_RANGE as CAUSTIC_SCALE_RANGE, caustic_scale};"""
+
+[[patch]]
+id = "caustics-water-texture-fields"
+why = "the two settings beside the caustics switch"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """    pub interactions: bool,
+    pub caustics: bool,
+    pub splashes: bool,"""
+replace = """pub interactions: bool,
+    pub caustics: bool,
+    // aurora-local-patch: caustics-water-texture-fields
+    /// The caustics follow the environment's water normal map
+    /// (water_caustic_texture.rs).
+    pub caustics_texture: bool,
+    /// Size of the caustic pattern, [`CAUSTIC_SCALE_RANGE`].
+    pub caustics_scale: f32,
+    pub splashes: bool,"""
+
+[[patch]]
+id = "caustics-water-texture-defaults"
+why = "off, scale 1: what upstream draws"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "default"
+find = """            caustics: true,
+            splashes: true,"""
+replace = """caustics: true,
+            caustics_texture: false, // aurora-local-patch: caustics-water-texture-defaults
+            caustics_scale: 1.0,
+            splashes: true,"""
+
+[[patch]]
+id = "caustics-water-texture-uniform"
+why = "the shared water uniform carries the caustics' extension after its 64 bytes, analytic from the start"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = """            "water effects",
+            bytemuck::bytes_of(&Uniform::zeroed()),"""
+replace = """"water effects",
+            &caustic_texture::initial_uniform(), // aurora-local-patch: caustics-water-texture-uniform"""
+
+[[patch]]
+id = "caustics-water-texture-gpu-field"
+why = "WaterGpu keeps the texture passes and the light map's kind"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """    quality: u8,
+    pub particles: u32,
+}"""
+replace = """quality: u8,
+    pub particles: u32,
+    caustic: caustic_texture::Caustics, // aurora-local-patch: caustics-water-texture-gpu-field
+}"""
+
+[[patch]]
+id = "caustics-water-texture-gpu-init"
+why = "a new WaterGpu starts from the analytic light map"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = """            quality: 0,
+            particles: 0,
+        }"""
+replace = """quality: 0,
+            particles: 0,
+            caustic: Default::default(), // aurora-local-patch: caustics-water-texture-gpu-init
+        }"""
+
+[[patch]]
+id = "caustics-water-texture-encode"
+why = "the texture's passes draw the light map when they run; the analytic pass otherwise"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "insert_fn_start"
+fn = "encode"
+impl = "WaterGpu"
+expect_sig = 'pub fn encode\(&self, encoder: &mut wgpu::CommandEncoder\)'
+body = '''
+let analytic_caustics = !self.encode_textured_caustics(encoder);
+'''
+
+[[patch]]
+id = "caustics-water-texture-encode-analytic"
+why = "goes with caustics-water-texture-encode"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "encode"
+find = "if self.flags & 32 != 0 {"
+replace = """if analytic_caustics && self.flags & 32 != 0 {
+            // aurora-local-patch: caustics-water-texture-encode-analytic"""
+
+[[patch]]
+id = "caustics-water-texture-prepare"
+why = "each frame, after the water's own prepare: which pattern, from which normal map (a new light map rebinds the frame groups)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """) {
+            self.rebuild_bind_groups_checked("TAA history after a water effects change");
+        }
+        stats.particles += self.water_effects.particles;"""
+replace = """) {
+            self.rebuild_bind_groups_checked("TAA history after a water effects change");
+        }
+        // aurora-local-patch: caustics-water-texture-prepare
+        if self.water_effects.prepare_caustics(
+            &self.device,
+            &self.queue,
+            water_settings,
+            &f.water,
+            &scene.textures,
+            &self.tex_layout,
+        ) {
+            self.rebuild_bind_groups_checked("water caustics light map");
+        }
+        stats.particles += self.water_effects.particles;"""
+
+[[patch]]
+id = "caustics-water-texture-controls"
+why = "the receivers read the extension: scale, tile, filter, kind"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "struct WaterFxControls { area: vec4<f32>, previous: vec4<f32>, clock: vec4<f32>, counts: vec4<u32> };"
+replace = """// caustic: x pattern scale, y tile (m), z filter offset (uv), w 1 = the
+// water texture's light map (water_caustic_texture.rs)
+// aurora-local-patch: caustics-water-texture-controls
+struct WaterFxControls { area: vec4<f32>, previous: vec4<f32>, clock: vec4<f32>, counts: vec4<u32>, caustic: vec4<f32> };"""
+
+[[patch]]
+id = "caustics-water-texture-focus-fn"
+why = "the lookup of a scaled or texture light map"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "fn water_caustics(pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {"
+replace = """// The light map at a receiver's refracted position, scaled, and for the
+// water texture's map through the surface's own x warp (env.wgsl
+// water_pixel): the pattern under the ripples that make it, its tiles
+// shifted against each other. Local patch set, water_caustic_texture.rs.
+// aurora-local-patch: caustics-water-texture-focus-fn
+fn water_caustic_focus(project:vec2<f32>)->vec3<f32> {
+    let q=project/water_fx.caustic.x;
+    var v=q;
+    if(water_fx.caustic.w>0.5){v.x+=(cos(q.x*0.08)+sin(q.y*0.02))*6.0;}
+    let uv=fract(v/water_fx.caustic.y);
+    let f=vec2<f32>(water_fx.caustic.z);
+    var focus=textureSampleLevel(water_light,lin_clamp,uv,0.0).rgb;
+    if(water_fx.counts.w>0u){
+        focus=(textureSampleLevel(water_light,lin_clamp,fract(uv+f),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv-f),0.0).rgb
+            +textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(f.x,-f.y)),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(-f.x,f.y)),0.0).rgb)*0.25;
+    }
+    return focus;
+}
+fn water_caustics(pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {"""
+
+[[patch]]
+id = "caustics-water-texture-lookup"
+why = "a scaled or texture map goes through water_caustic_focus; off with scale 1 keeps the original lines"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "water_caustic_light" # water_caustics before upstream #3864, which split the shadow out
+find = """    let uv=fract(project/16.0);
+    var focus=textureSampleLevel(water_light,lin_clamp,uv,0.0).rgb;
+    if(water_fx.counts.w>0u){
+        focus=(textureSampleLevel(water_light,lin_clamp,fract(uv+WATER_CAUSTIC_FILTER),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv-WATER_CAUSTIC_FILTER),0.0).rgb
+            +textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(WATER_CAUSTIC_FILTER.x,-WATER_CAUSTIC_FILTER.y)),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(-WATER_CAUSTIC_FILTER.x,WATER_CAUSTIC_FILTER.y)),0.0).rgb)*0.25;
+    }"""
+replace = """// aurora-local-patch: caustics-water-texture-lookup
+    var focus:vec3<f32>;
+    if(water_fx.caustic.w>0.5 || water_fx.caustic.x!=1.0){
+        focus=water_caustic_focus(project);
+    } else {
+    let uv=fract(project/16.0);
+    focus=textureSampleLevel(water_light,lin_clamp,uv,0.0).rgb;
+    if(water_fx.counts.w>0u){
+        focus=(textureSampleLevel(water_light,lin_clamp,fract(uv+WATER_CAUSTIC_FILTER),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv-WATER_CAUSTIC_FILTER),0.0).rgb
+            +textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(WATER_CAUSTIC_FILTER.x,-WATER_CAUSTIC_FILTER.y)),0.0).rgb+textureSampleLevel(water_light,lin_clamp,fract(uv+vec2<f32>(-WATER_CAUSTIC_FILTER.x,WATER_CAUSTIC_FILTER.y)),0.0).rgb)*0.25;
+    }
+    }"""
+
+# ------------------------------------------------------------ settings
+
+[[patch]]
+id = "caustics-water-texture-settings-fields"
+why = "the two saved choices beside the caustics switch (missing in older files: their defaults)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''
+    pub interactions: bool,
+    pub caustics: bool,
+    pub splashes: bool,
+    pub bubbles: bool,
+}'''
+replace = '''pub interactions: bool,
+    pub caustics: bool,
+    // aurora-local-patch: caustics-water-texture-settings-fields
+    /// The caustics follow the environment's water normal map.
+    pub caustics_texture: bool,
+    /// Size of the caustic pattern (0.25..4).
+    pub caustics_scale: f32,
+    pub splashes: bool,
+    pub bubbles: bool,
+}'''
+
+[[patch]]
+id = "caustics-water-texture-settings-defaults"
+why = "off, scale 1: what upstream draws"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''
+            caustics: true,
+            splashes: true,'''
+replace = '''caustics: true,
+            caustics_texture: false, // aurora-local-patch: caustics-water-texture-settings-defaults
+            caustics_scale: 1.0,
+            splashes: true,'''
+
+[[patch]]
+id = "caustics-water-texture-settings-render"
+why = "to the renderer, the scale within its range"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "caustics: self.caustics,"
+replace = '''caustics: self.caustics,
+            caustics_texture: self.caustics_texture, // aurora-local-patch: caustics-water-texture-settings-render
+            caustics_scale: aurora_render::water_effects::caustic_scale(self.caustics_scale),'''
+
+[[patch]]
+id = "caustics-water-texture-settings-sanitize"
+why = "a hand-edited scale is brought back within the slider's range (not a number: 1)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "insert_fn_start"
+fn = "sanitized"
+expect_sig = 'pub\(crate\) fn sanitized\(mut self\) -> Settings'
+body = '''
+self.water_effects.caustics_scale = aurora_render::water_effects::caustic_scale(self.water_effects.caustics_scale);
+'''
+
+[[patch]]
+id = "caustics-water-texture-settings-test"
+why = "older files load the defaults, the choices round-trip, the scale is bounded"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "fn water_choices_round_trip_and_quality_does_not_reset_effects() {"
+replace = '''fn caustics_texture_and_scale_load_round_trip_and_stay_in_range() {
+        // aurora-local-patch: caustics-water-texture-settings-test
+        let old: super::WaterEffectsSettings = serde_json::from_str(r#"{"caustics":true}"#).unwrap();
+        assert!(!old.caustics_texture);
+        assert_eq!(old.caustics_scale, 1.0);
+        let chosen = super::WaterEffectsSettings {
+            caustics_texture: true,
+            caustics_scale: 2.5,
+            ..Default::default()
+        };
+        let loaded: super::WaterEffectsSettings = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(loaded, chosen);
+        assert!(loaded.render().caustics_texture);
+        assert_eq!(loaded.render().caustics_scale, 2.5);
+        for (saved, kept) in [(0.0, 0.25), (9.0, 4.0), (f32::NAN, 1.0), (0.5, 0.5)] {
+            let mut s = super::Settings::default();
+            s.water_effects.caustics_scale = saved;
+            assert_eq!(s.water_effects.render().caustics_scale, kept);
+            assert_eq!(s.sanitized().water_effects.caustics_scale, kept);
+        }
+        // off and 1 by default: upstream's caustics
+        let d = super::WaterEffectsSettings::default().render();
+        assert!(!d.caustics_texture);
+        assert_eq!(d.caustics_scale, 1.0);
+    }
+    #[test]
+    fn water_choices_round_trip_and_quality_does_not_reset_effects() {'''
+
+# ------------------------------------------------------------ preferences
+
+[[patch]]
+id = "caustics-water-texture-rows"
+why = "Use water texture and Scale behind the caustics switch's cog"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = '''cx.toggle(tr!("water-effects-caustics"), "", &field!(water_effects.caustics));'''
+replace = '''cx.toggle(tr!("water-effects-caustics"), "", &field!(water_effects.caustics));
+            // aurora-local-patch: caustics-water-texture-rows
+            // where the caustics' light comes from, and its size
+            let caustics_off = off || !cx.s.water_effects.caustics;
+            cx.subs(caustics_off, |cx| {
+                cx.toggle(
+                    tr!("water-effects-caustics-texture"),
+                    tr!("water-effects-caustics-texture-help"),
+                    &field!(water_effects.caustics_texture),
+                );
+                cx.row(
+                    tr!("water-effects-caustics-scale"),
+                    tr!("water-effects-caustics-scale-help"),
+                    &field!(water_effects.caustics_scale),
+                    |ui, s| {
+                        ui.add(
+                            egui::Slider::new(
+                                &mut s.water_effects.caustics_scale,
+                                aurora_render::water_effects::CAUSTIC_SCALE_RANGE,
+                            )
+                            .logarithmic(true)
+                            .custom_parser(aurora_i18n::parse_number)
+                            .fixed_decimals(2)
+                            .suffix("×")
+                            .trailing_fill(true),
+                        )
+                        .changed()
+                    },
+                );
+            });'''
+
+[[patch]]
+id = "caustics-water-texture-cx-fields"
+why = "a cog behind a cog: the blocks around the open one, and the rows a search reveals"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+find = "block: Option<(f32, egui::layers::ShapeIdx)>,"
+replace = '''block: Option<(f32, egui::layers::ShapeIdx)>,
+    // aurora-local-patch: caustics-water-texture-cx-fields
+    /// The open blocks around `block` (a cog behind an open cog), each
+    /// painted when its own rows end.
+    outer_blocks: Vec<(f32, egui::layers::ShapeIdx)>,
+    /// Rows a search asked for, met so far in a count pass.
+    revealed: usize,'''
+
+[[patch]]
+id = "caustics-water-texture-cx-init"
+why = "goes with caustics-water-texture-cx-fields"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+find = "block: None,"
+replace = '''block: None,
+            outer_blocks: Vec::new(), // aurora-local-patch: caustics-water-texture-cx-init
+            revealed: 0,'''
+
+[[patch]]
+id = "caustics-water-texture-cx-open"
+why = "an open cog inside an open cog keeps the outer block to paint later"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+find = "self.block = Some((top, shape));"
+replace = '''// aurora-local-patch: caustics-water-texture-cx-open
+            if let Some(outer) = self.block.replace((top, shape)) {
+                self.outer_blocks.push(outer);
+            }'''
+
+[[patch]]
+id = "caustics-water-texture-cx-close"
+why = "the end of an inner block makes the outer one current again"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+fn = "end_block"
+find = "let Some((top, shape)) = self.block.take() else { return };"
+replace = '''let Some((top, shape)) = self.block.take() else { return };
+        self.block = self.outer_blocks.pop(); // aurora-local-patch: caustics-water-texture-cx-close'''
+
+[[patch]]
+id = "caustics-water-texture-cx-reveal"
+why = "count the rows a search reveals"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+find = "self.st.open_subs.insert(parent.id);"
+replace = '''self.st.open_subs.insert(parent.id);
+                    self.revealed += 1; // aurora-local-patch: caustics-water-texture-cx-reveal'''
+
+[[patch]]
+id = "caustics-water-texture-cx-reveal-outer"
+why = "a row revealed behind a cog that is itself behind a cog opens both"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+fn = "subs"
+find = '''
+                let rows = self.rows_seen;
+                body(self);
+                self.st.subs.insert(id, (self.rows_seen - rows, off));'''
+replace = '''let rows = self.rows_seen;
+                let revealed = self.revealed; // aurora-local-patch: caustics-water-texture-cx-reveal-outer
+                body(self);
+                self.st.subs.insert(id, (self.rows_seen - rows, off));
+                if self.revealed > revealed
+                    && let Some(outer) = &before
+                {
+                    self.st.open_subs.insert(outer.id);
+                }'''
+
+[[patch]]
+id = "caustics-water-texture-cog-test"
+why = "the caustics' cog, behind the water effects' cog, shows its two rows"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = "fn the_frame_rate_limits_show_under_their_switches() {"
+replace = '''fn the_caustics_cog_behind_the_water_cog_shows_its_rows() {
+    // aurora-local-patch: caustics-water-texture-cog-test
+    let mut frames = Frames::new();
+    let (mut s, mut st, mut r) = (Settings::default(), OptionsUi::default(), OptionsResult::default());
+    s.water_effects.enabled = true;
+    let (texture, scale) = (
+        aurora_i18n::tr!("water-effects-caustics-texture"),
+        aurora_i18n::tr!("water-effects-caustics-scale"),
+    );
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 3, Vec::new());
+    }
+    // the cog right of a row's label: its number of rows
+    let cog = |texts: &[crate::ui::widgets::elide_tests::Text], label: &str| {
+        let row = texts.iter().find(|t| t.source == label).expect("the row").rect;
+        texts
+            .iter()
+            .find(|t| t.source.parse::<u32>().is_ok() && (t.rect.center().y - row.center().y).abs() < 6.0 && t.rect.left() > row.right())
+            .map(|t| (t.source.clone(), t.rect))
+    };
+    let caustics = aurora_i18n::tr!("water-effects-caustics");
+    assert!(
+        !texts.iter().any(|t| t.source == caustics),
+        "behind the water effects' cog at first"
+    );
+    let (_, outer) = cog(&texts, aurora_i18n::tr!("water-effects-enabled")).expect("the water effects' cog");
+    for events in click(outer.center() - egui::vec2(6.0, 0.0)) {
+        page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 3, events);
+    }
+    for _ in 0..2 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 3, Vec::new());
+    }
+    assert!(!texts.iter().any(|t| t.source == texture), "behind the caustics' own cog");
+    let (count, inner) = cog(&texts, caustics).expect("the caustics' cog");
+    assert_eq!(count, "2");
+    for events in click(inner.center() - egui::vec2(6.0, 0.0)) {
+        page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 3, events);
+    }
+    for _ in 0..2 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 3, Vec::new());
+    }
+    let row = |label: &str| texts.iter().find(|t| t.source == label).map(|t| t.rect);
+    let (caustics, splashes) = (
+        row(caustics).expect("caustics"),
+        row(aurora_i18n::tr!("water-effects-splashes")).expect("splashes"),
+    );
+    for label in [texture, scale] {
+        let r = row(label).expect("shown once its cog is open");
+        assert!(
+            r.top() > caustics.bottom() && r.bottom() < splashes.top(),
+            "{label} between caustics and splashes"
+        );
+        assert!(r.left() > caustics.left(), "{label} indented under its switch");
+    }
+}
+
+#[test]
+fn the_frame_rate_limits_show_under_their_switches() {'''
+
+# ------------------------------------------------------------ texts
+
+[[patch]]
+id = "caustics-water-texture-text-en"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: caustics-water-texture-text-en
+water-effects-caustics-texture = Use water texture
+water-effects-caustics-texture-help = Makes the caustics from the environment's water normal map and its waves, so they follow each region's water instead of one fixed pattern. Until the map has loaded, the fixed pattern is shown.
+water-effects-caustics-scale = Scale
+water-effects-caustics-scale-help = Size of the caustic pattern: below 1 smaller and finer, above 1 larger and softer.'''
+
+[[patch]]
+id = "caustics-water-texture-text-fr"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: caustics-water-texture-text-fr
+water-effects-caustics-texture = Utiliser la texture de l'eau
+water-effects-caustics-texture-help = Crée les caustiques à partir de la carte de normales de l'eau de l'environnement et de ses vagues : elles suivent l'eau de chaque région au lieu d'un motif fixe. Tant que la carte n'est pas chargée, le motif fixe est affiché.
+water-effects-caustics-scale = Échelle
+water-effects-caustics-scale-help = Taille du motif des caustiques : sous 1, plus petit et plus fin ; au-dessus de 1, plus grand et plus doux.'''
+
+[[patch]]
+id = "caustics-water-texture-text-ja"
+why = "the two rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^water-effects-caustics = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: caustics-water-texture-text-ja
+water-effects-caustics-texture = 水のテクスチャを使用
+water-effects-caustics-texture-help = 環境の水のノーマルマップと波からコースティクスを作ります。固定の模様ではなく、リージョンごとの水に合わせて変わります。マップの読み込みが終わるまでは固定の模様を表示します。
+water-effects-caustics-scale = スケール
+water-effects-caustics-scale-help = コースティクスの模様の大きさです。１より小さいと細かく、１より大きいと大きく柔らかくなります。'''
+
+# ------------------------------------------------------------ demo
+
+[[patch]]
+id = "caustics-water-texture-demo-module"
+why = "AURORA_DEMO_CAUSTICS: the options, the camera, the stand-in water normal map"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/demo_caustics.rs"]
+source = "files/caustics-water-texture/demo_caustics.rs"
+
+[[patch]]
+id = "caustics-water-texture-demo-mod"
+why = "declare the scenario beside the others, in rustfmt's order (after upstream's beams)"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = '''
+#[path = "demo_beams.rs"]
+pub mod beams;'''
+replace = '''#[path = "demo_beams.rs"]
+pub mod beams;
+// aurora-local-patch: caustics-water-texture-demo-mod
+#[path = "demo_caustics.rs"]
+pub mod caustics;'''
+
+[[patch]]
+id = "caustics-water-texture-demo-texture"
+why = "the stand-in water normal map, when the scenario asks for it"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "insert_fn_start"
+fn = "local_texture"
+expect_sig = 'pub fn local_texture\(id: &Uuid\) -> Option<\(Vec<u8>, u32, u32\)>'
+body = '''
+if let Some(texture) = caustics::texture(id) {
+    return Some(texture);
+}
+'''
+
+[[patch]]
+id = "caustics-water-texture-demo-mips"
+why = "the stand-in has its mip chain, like a downloaded normal map"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "insert_fn_start"
+fn = "local_texture_mips"
+expect_sig = 'pub fn local_texture_mips\(id: &Uuid\) -> bool'
+body = '''
+if caustics::is_texture(id) {
+    return true;
+}
+'''
+
+[[patch]]
+id = "caustics-water-texture-demo-time"
+why = "AURORA_DEMO_WATER=caustics holds the waves still, like the optics- views"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+fn = "inspection_time"
+find = '''if mode().is_some_and(|mode| mode.contains("optics-")) {'''
+replace = '''if mode().is_some_and(|mode| mode.contains("optics-") || mode.contains("caustics")) {
+        // aurora-local-patch: caustics-water-texture-demo-time'''
+
+[[patch]]
+id = "caustics-water-texture-demo-still"
+why = "no wakes in the caustics view: the same image every run"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = '''settings.water_effects.interactions = !mode.contains("no-wake") && !mode.contains("waterline") && !mode.contains("optics-");'''
+replace = '''settings.water_effects.interactions =
+            !mode.contains("no-wake") && !mode.contains("waterline") && !mode.contains("optics-") && !mode.contains("caustics"); // aurora-local-patch: caustics-water-texture-demo-still'''
+
+[[patch]]
+id = "caustics-water-texture-demo-configure"
+why = "AURORA_DEMO_CAUSTICS's options with the water demo's own"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = '''
+        if mode.contains("parts-") {
+            settings.water_effects.shore_foam = false;'''
+replace = '''crate::demo::caustics::configure(settings); // aurora-local-patch: caustics-water-texture-demo-configure
+        if mode.contains("parts-") {
+            settings.water_effects.shore_foam = false;'''
+
+[[patch]]
+id = "caustics-water-texture-demo-view"
+why = "the caustics view: under the surface, over the lagoon's sand"
+paths = ["crates/aurora-viewer/src/demo_water.rs"]
+op = "literal"
+find = '''let (eye, target) = if mode.contains("exclusion") {'''
+replace = '''let (eye, target) = if mode.contains("caustics") {
+            crate::demo::caustics::VIEW // aurora-local-patch: caustics-water-texture-demo-view
+        } else if mode.contains("exclusion") {'''
+
+# ------------------------------------------------------------ docs
+
+[[patch]]
+id = "caustics-water-texture-testing-table"
+why = "docs/TESTING.md: the scenario in the water table"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_DEMO_WATER_SHADERS=1` \|[^\n]*$'
+replace = '''\g<0>
+| `AURORA_DEMO_WATER=caustics` + `AURORA_DEMO_CAUSTICS=texture[,scale=<x>]` | Caustics from the water normal map, their scale (local patch set) <!-- // aurora-local-patch: caustics-water-texture-testing-table --> |'''
+
+[[patch]]
+id = "caustics-water-texture-testing-details"
+why = "docs/TESTING.md: what the scenario shows"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^With `AURORA_DEMO_WATER_SHADERS=1`, an offline viewer loads'
+replace = '''Caustics from the water texture (local patch set): `AURORA_DEMO_WATER=caustics`
+looks at the lagoon's sand from just under the surface, the waves held
+still and no wakes, so two runs give the same image. `AURORA_DEMO_CAUSTICS`
+takes comma separated words: `texture` turns "Use water texture" on and
+gives the environment's default water normal map a stand-in (a tileable
+map of irregular ripples; the offline demo cannot download the real one),
+which the surface draws too; `map` gives the stand-in alone, with the
+fixed pattern; `no-map` with `texture` shows the fallback while a map is
+missing (the fixed pattern); `scale=<x>` sets Scale (0.25 to 4). Without
+the variable, or with `scale=1` and no `texture`, the caustics are
+upstream's, pixel for pixel. With the texture, the pattern is irregular,
+follows the surface's ripples and their scroll, and shows no 16 m grid;
+Scale 2 doubles its cells. Check also `medium:underwater`.
+<!-- // aurora-local-patch: caustics-water-texture-testing-details -->
+
+\g<0>'''

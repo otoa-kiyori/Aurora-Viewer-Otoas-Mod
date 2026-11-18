@@ -1,0 +1,401 @@
+# A tripwire for the media filter: it stays on, for every kind of media.
+#
+# The rule kept here: nothing from the world loads from a site the
+# resident has not answered for, whether it is a media on a face (in the
+# world, on a worn item, on a HUD), the parcel media or the parcel music.
+# Media off by default and the filter off would be a usability nightmare
+# for some; a site loading unasked is a security one, and this patch set
+# prefers the first.
+#
+# There is nothing to change today: upstream already filters all four
+# (media/update.rs apply_filter, app/parcel_music.rs Radio::target), with
+# the filter on by default. So this file changes no behaviour:
+#
+# - the "guard" patches below only insert a marker comment next to the
+#   code that expresses each part of the rule. Each is located by a
+#   pattern that matches that code, and nothing else, as it is today
+#   (comments and formatting do not count: `(?:\s|//[^\n]*)*` in the
+#   patterns is "spaces, line breaks or comments"). The day upstream changes one
+#   of them, its pattern no longer matches: the patch reports DRIFT and
+#   nothing is written, so no build is made until someone looks. A DRIFT
+#   here does not mean the rule is broken: it means "read the new code";
+#   update the pattern if the rule still holds, otherwise enable the ready
+#   patches at the end of this file (and write what they do not cover);
+# - a marker counts as "already applied", so on a tree these patches were
+#   already applied to, a later change is only seen by the guard at the
+#   end of the next section (a "fail" guard: exit 3, nothing written).
+#   Apply to a fresh copy of the sources after each upstream merge, as
+#   usual;
+# - the "force" patches at the end are disabled (enabled = false): they
+#   would keep the filter on whatever the setting says. They are written
+#   against today's code and were never compiled: build and test them when
+#   enabling them.
+#
+# Some anchors include the code of other local patches (84's switches, 77's
+# engine settings, 78's URL log switch): those are optional where the
+# pattern allows it, and a
+# DRIFT caused by disabling such a patch is expected.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ---------------------------------------------------------------- defaults
+
+[[patch]]
+id = "media-filter-guard-default-on"
+why = "(a) the filter is on by default: `filter: true` in MediaSettings' Default (MediaEnableFilter, on as in the Legacy Viewer)"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "regex"
+dotall = true
+pattern = '''(?x) ^(?= impl\s+Default\s+for\s+MediaSettings(?:\s|//[^\n]*)*\{ (?:(?!\n\}).)*? \n[ \t]*filter:(?:\s|//[^\n]*)*true, )'''
+replace = '''// aurora-local-patch: media-filter-guard-default-on\n'''
+
+[[patch]]
+id = "media-filter-guard-default-switches"
+why = "(g) the defaults of the switches that let more media through, as they are today, so a change either way is read: other avatars' media off, scripted parcel media off, HUD autoplay on, first-click interaction on with the kinds of media-filter-guard-first-click, JavaScript in the built-in browsers on (BrowserJavascriptEnabled, as in the Legacy Viewer), trust of our worn items on, 84's Don't report blocked and Don't ask off"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "regex"
+dotall = true
+pattern = '''(?x) ^(?= impl\s+Default\s+for\s+MediaSettings(?:\s|//[^\n]*)*\{ )
+    (?= (?:(?!\n\}).)*? \n[ \t]*show_on_others:(?:\s|//[^\n]*)*false, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*allow_scripted:(?:\s|//[^\n]*)*false, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*autoplay_huds:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*first_click_interact:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*first_click:(?:\s|//[^\n]*)*first_click::FirstClick::default\(\), )
+    (?= (?:(?!\n\}).)*? \n[ \t]*javascript:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*filter_trust_own_worn:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*filter_quiet:(?:\s|//[^\n]*)*false, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*filter_no_ask:(?:\s|//[^\n]*)*false, )'''
+replace = '''// aurora-local-patch: media-filter-guard-default-switches\n'''
+
+[[patch]]
+id = "media-filter-guard-default-autoplay"
+why = "(g) parcel music and parcel media do not play by themselves by default (AudioSettings: music_autoplay, media_autoplay false)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "regex"
+dotall = true
+pattern = '''(?x) ^(?= impl\s+Default\s+for\s+AudioSettings(?:\s|//[^\n]*)*\{ )
+    (?= (?:(?!\n\}).)*? \n[ \t]*music_autoplay:(?:\s|//[^\n]*)*false, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*media_autoplay:(?:\s|//[^\n]*)*false, )'''
+replace = '''// aurora-local-patch: media-filter-guard-default-autoplay\n'''
+
+[[patch]]
+id = "media-filter-guard-fields"
+why = "(i) the fields of MediaSettings, in order (84's, 77's and 78's own fields allowed anywhere): a DRIFT here only means a field was added, removed or renamed; read it, it may be a new way around the filter. Read so far: first_click (the kinds of object whose media takes the first click, pinned by media-filter-guard-first-click) and javascript (BrowserJavascriptEnabled, on, pinned by media-filter-guard-default-switches)"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "regex"
+pattern = '''(?x) ^(?= pub\s+struct\s+MediaSettings(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+enabled:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+prim_media:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+show_on_others:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+max_instances:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+allow_scripted:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+first_click_interact:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+first_click:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+autoplay_huds:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+javascript:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+filter:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+filter_trust_own_worn:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+filter_explained:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+plugin_dir:[^\n]*(?:\s|//[^\n]*)*
+    (?: pub\s+(?:filter_quiet|filter_no_ask|web_engine|trust_host|web_engine_chromium_sites|url_log):[^\n]* (?:\s|//[^\n]*)* )*
+    pub\s+pack_consent:[^\n]*(?:\s|//[^\n]*)*
+    \} )'''
+replace = '''// aurora-local-patch: media-filter-guard-fields\n'''
+
+[[patch]]
+id = "media-filter-guard-first-click"
+why = "(g) which media takes the first click without a focus click (MediaFirstClickInteract): by default worn HUDs, own, friends', group and the parcel owner's objects, only on faces that ask for it (PRIM_MEDIA_FIRST_CLICK_INTERACT), never anyone's object nor every face; the master switch and the face's flag gate the kinds. Narrower than before (the first click went to any object's face that asked). A click only reaches a page already loaded through the filter"
+paths = ["crates/aurora-viewer/src/media/first_click.rs"]
+op = "regex"
+dotall = true
+pattern = '''(?x) ^(?= impl\s+Default\s+for\s+FirstClick(?:\s|//[^\n]*)*\{ )
+    (?= (?:(?!\n\}).)*? \n[ \t]*hud:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*own:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*friend:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*group:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*land:(?:\s|//[^\n]*)*true, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*any:(?:\s|//[^\n]*)*false, )
+    (?= (?:(?!\n\}).)*? \n[ \t]*all_faces:(?:\s|//[^\n]*)*false, )
+    (?= .*? \n[ \t]*pub\s+fn\s+allowed\(enabled:\s*bool,\s*kinds:\s*&FirstClick,\s*face_asks:\s*bool,\s*c:\s*&Clicked\)\s*->\s*bool\s*\{(?:\s|//[^\n]*)*
+        if\s+!enabled\s*\|\|\s*\(!face_asks\s*&&\s*!kinds\.all_faces\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*return\s+false;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+        if\s+kinds\.any\s*\|\|\s*\(kinds\.hud\s*&&\s*c\.hud\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*return\s+true;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+        let\s+Some\(\(owner,\s*group\)\)\s*=\s*c\.owner\.filter\(\|\(o,\s*g\)\|\s*!o\.is_nil\(\)\s*\|\|\s*!g\.is_nil\(\)\)\s*else(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*return\s+false;(?:\s|//[^\n]*)*\}; )'''
+replace = '''// aurora-local-patch: media-filter-guard-first-click\n'''
+
+# ------------------------------------------- media on faces and the parcel
+
+[[patch]]
+id = "media-filter-guard-scheme"
+why = "(e) every wanted media maps to its source (parcel, prim) and a refused scheme (javascript:, file:...) is refused before the filter-off skip, so with the filter off too"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+fn = "apply_filter"
+pattern = '''(?x) ^([ \t]*)(?= if\s+!m\.wanted(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*continue;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+    let\s+source(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*match\s+m\.key(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        MediaKey::Parcel(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Source::ParcelMedia,(?:\s|//[^\n]*)*
+        MediaKey::Prim(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*\.\.(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Source::PrimMedia,(?:\s|//[^\n]*)*
+    \};(?:\s|//[^\n]*)*
+    if\s+world\.media_filter\.refuse_scheme\(&m\.url,(?:\s|//[^\n]*)*source\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*m\.wanted(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*false;(?:\s|//[^\n]*)*continue;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+    if\s+!f\.settings\.filter(?:\s|//[^\n]*)*\{ )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-scheme\n\1'''
+
+[[patch]]
+id = "media-filter-guard-prim-hud"
+why = "(b, c) with the filter on, every wanted media (faces, HUDs, parcel) is checked: trusted worn items through check_trusted, the rest through check; Ask holds it, Deny drops it, and nothing follows in the loop"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+fn = "apply_filter"
+pattern = '''(?x) ^([ \t]*)(?= if\s+!f\.settings\.filter(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*continue;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+    let\s+verdict(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*if\s+trusted_by_filter\(objects,(?:\s|//[^\n]*)*m\.key,(?:\s|//[^\n]*)*f\.settings\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        world\.media_filter\.check_trusted\(&m\.url,(?:\s|//[^\n]*)*source\)(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*else(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        world\.media_filter\.check\(&m\.url,(?:\s|//[^\n]*)*source\)(?:\s|//[^\n]*)*
+    \};(?:\s|//[^\n]*)*
+    match\s+verdict(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        Verdict::Allow(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*\{\}(?:\s|//[^\n]*)*
+        Verdict::Ask(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*m\.filter_hold(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*true,(?:\s|//[^\n]*)*
+        Verdict::Deny(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*(?:[^\n]*\n(?:\s|//[^\n]*)*)*?m\.wanted(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*false;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*\Z )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-prim-hud\n\1'''
+
+[[patch]]
+id = "media-filter-guard-parcel"
+why = "(c, h) the trust of worn items covers only media on our own avatar: the parcel media is never trusted, so it is always asked about"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+fn = "trusted_by_filter"
+pattern = '''(?x) ^([ \t]*)(?= settings\.filter_trust_own_worn(?:\s|//[^\n]*)*&&(?:\s|//[^\n]*)*match\s+key(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+    MediaKey::Prim(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*object,(?:\s|//[^\n]*)*\.\.(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*objects\.get\(&object\)\.is_some_and\(\|om\|(?:\s|//[^\n]*)*om\.on_own_avatar\),(?:\s|//[^\n]*)*
+    MediaKey::Parcel(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*false,(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*\Z )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-parcel\n\1'''
+
+[[patch]]
+id = "media-filter-guard-order"
+why = "(b, c) the filter runs every frame before the plugins are driven, so a new or changed URL (a script, a neighbour's navigation) is checked before it loads"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+pattern = '''(?x) ^([ \t]*)(?= self\.apply_filter\(world,(?:\s|//[^\n]*)*f\);(?:\s|//[^\n]*)*
+    self\.compute_interest\(world,(?:\s|//[^\n]*)*scene,(?:\s|//[^\n]*)*f\);(?:\s|//[^\n]*)*
+    self\.assign_priorities\(f\);(?:\s|//[^\n]*)*
+    let\s+navs(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*self\.drive_plugins\(f,(?:\s|//[^\n]*)*now\); )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-order\n\1'''
+
+[[patch]]
+id = "media-filter-guard-hold"
+why = "(b, c) a media the filter holds (Ask) or dropped (Deny) gets no plugin: Priority::Unloaded"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+fn = "assign_priorities"
+pattern = '''(?x) ^([ \t]*)(?= let\s+mut\s+p(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*if\s+!m\.wanted(?:\s|//[^\n]*)*\|\|(?:\s|//[^\n]*)*m\.filter_hold(?:\s|//[^\n]*)*\|\|[^{]*\{(?:\s|//[^\n]*)*Priority::Unloaded(?:\s|//[^\n]*)*\} )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-hold\n\1'''
+
+[[patch]]
+id = "media-filter-guard-unloaded"
+why = "(b, c) an unloaded media is skipped first thing, before the type probe (a request to the site) and the plugin"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "regex"
+fn = "drive_plugins"
+pattern = '''(?x) ^([ \t]*)(?= for\s+m\s+in\s+&mut\s+self\.impls(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+    if\s+m\.priority(?:\s|//[^\n]*)*==(?:\s|//[^\n]*)*Priority::Unloaded(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        if\s+m\.plugin\.take\(\)\.is_some\(\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*(?:[^\n]*\n(?:\s|//[^\n]*)*)*?\}(?:\s|//[^\n]*)*
+        continue;(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*
+    if\s+m\.mime\.is_empty\(\) )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-unloaded\n\1'''
+
+# -------------------------------------------------------------- the music
+
+[[patch]]
+id = "media-filter-guard-music"
+why = "(d) with a filter given, the parcel music's station is checked (filterAudioUrl) and only an allowed one is played"
+paths = ["crates/aurora-viewer/src/app/parcel_music.rs"]
+op = "regex"
+fn = "target"
+pattern = '''(?x) ^([ \t]*)(?= let\s+verdict(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*if\s+let\s+Some\(filter\)(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*filter\.filter\(\|_\|(?:\s|//[^\n]*)*!url\.is_empty\(\)\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        filter\.check\(url,(?:\s|//[^\n]*)*Source::Music\)(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*else(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*Verdict::Allow(?:\s|//[^\n]*)*\};(?:\s|//[^\n]*)*
+    \(if\s+verdict(?:\s|//[^\n]*)*==(?:\s|//[^\n]*)*Verdict::Allow(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*url(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*else(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*""(?:\s|//[^\n]*)*\},(?:\s|//[^\n]*)*verdict\)(?:\s|//[^\n]*)*\Z )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-music\n\1'''
+
+[[patch]]
+id = "media-filter-guard-music-caller"
+why = "(d) the music is given the filter whenever the filter is on, and plays what target returns"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "regex"
+fn = "update_audio"
+pattern = '''(?x) ^([ \t]*)(?= let\s+\(want,(?:\s|//[^\n]*)*verdict\)(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*self\.parcel_music\.target\((?:\s|//[^\n]*)*
+        in_world,(?:\s|//[^\n]*)*
+        self\.settings\.audio\.enabled\[4\],(?:\s|//[^\n]*)*
+        self\.settings\.media\.filter\.then_some\(&mut\s+self\.world\.media_filter\),(?:\s|//[^\n]*)*
+    \);(?:\s|//[^\n]*)*
+    let\s+want(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*want\.to_owned\(\); )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-music-caller\n\1'''
+
+# ------------------------------------------------------------- the filter
+
+[[patch]]
+id = "media-filter-guard-refused-list"
+why = "(e) the schemes never loaded from the world, as today; a longer list trips too (read it)"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+pattern = '''(?x) ^(?= const\s+REFUSED:(?:\s|//[^\n]*)*\[&str;(?:\s|//[^\n]*)*10\](?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*\[(?:\s|//[^\n]*)*
+    "javascript",(?:\s|//[^\n]*)*"vbscript",(?:\s|//[^\n]*)*"file",(?:\s|//[^\n]*)*"blob",(?:\s|//[^\n]*)*"filesystem",(?:\s|//[^\n]*)*"view-source",(?:\s|//[^\n]*)*
+    "chrome",(?:\s|//[^\n]*)*"chrome-extension",(?:\s|//[^\n]*)*"chrome-devtools",(?:\s|//[^\n]*)*"devtools",?(?:\s|//[^\n]*)*\]; )'''
+replace = '''// aurora-local-patch: media-filter-guard-refused-list\n'''
+
+[[patch]]
+id = "media-filter-guard-hostless"
+why = "(k) a URL without a host is asked about under its scheme (data:, mailto:); only about:blank and an empty URL load without a question"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+fn = "target"
+pattern = '''(?x) ^([ \t]*)(?= \(None,(?:\s|//[^\n]*)*Some\(scheme\)\)(?:\s|//[^\n]*)*if\s+scheme(?:\s|//[^\n]*)*!=(?:\s|//[^\n]*)*"about"(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Target::Site\(scheme\),(?:\s|//[^\n]*)*
+    _(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Target::Blank, )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-hostless\n\1'''
+
+[[patch]]
+id = "media-filter-guard-ask"
+why = "(f) check asks: it calls decide with ask = true"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+fn = "check"
+pattern = '''(?x) ^([ \t]*)(?= let\s+verdict(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*self\.decide\(url,(?:\s|//[^\n]*)*source,(?:\s|//[^\n]*)*true,(?:\s|//[^\n]*)*notify\); )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-ask\n\1'''
+
+[[patch]]
+id = "media-filter-guard-trusted"
+why = "(h) check_trusted is decide without the question, nothing more: the list and this session's refusals still apply"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+fn = "check_trusted"
+pattern = '''(?x) ^([ \t]*)(?= self\.decide\(url,(?:\s|//[^\n]*)*source,(?:\s|//[^\n]*)*false,(?:\s|//[^\n]*)*true\)(?:\s|//[^\n]*)*\Z )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-trusted\n\1'''
+
+[[patch]]
+id = "media-filter-guard-decide-order"
+why = "(e, h, f) decide: a refused scheme is denied first, then the list and the session (a refusal wins over the trust of worn items), and only then a site with no answer loads unasked, and only when ask is false"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+fn = "decide"
+pattern = '''(?x) ^([ \t]*)(?= let\s+host(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*match\s+target\(url\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        Target::Site\(host\)(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*host,(?:\s|//[^\n]*)*
+        Target::Blank(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*return\s+Verdict::Allow,(?:\s|//[^\n]*)*
+        Target::Refused\(_\)(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*if\s+notify(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*self\.refuse_scheme\(url,(?:\s|//[^\n]*)*source\);(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*return\s+Verdict::Deny;(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+    \};(?:\s|//[^\n]*)*
+    match\s+rule_for\(&self\.rules,(?:\s|//[^\n]*)*url,(?:\s|//[^\n]*)*&host\)\.or_else\(\|\|(?:\s|//[^\n]*)*self\.session\.get\(url\)\.copied\(\)\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        Some\(Action::Allow\)(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Verdict::Allow,(?:\s|//[^\n]*)*
+        Some\(Action::Deny\)(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*\{[\s\S]*?Verdict::Deny(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+        None\s+if\s+!ask(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*Verdict::Allow, )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-decide-order\n\1'''
+
+[[patch]]
+id = "media-filter-guard-no-rule"
+why = "(f) the last arm of decide, for a site with no answer: the question is queued and the verdict is Ask, never Allow"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+fn = "decide"
+pattern = '''(?x) ^([ \t]*)(?= None(?:\s|//[^\n]*)*=>(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        let\s+now(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*Instant::now\(\);[\s\S]*?
+        self\.questions\.push_back\(Question(?:\s|//[^\n]*)*\{[\s\S]*?\}\);(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+        Verdict::Ask(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*\Z )'''
+replace = '''\1// aurora-local-patch: media-filter-guard-no-rule\n\1'''
+
+[[patch]]
+id = "media-filter-guard-rule-scope"
+why = "(j) a rule matches its exact URL, else the longest domain rule covering the host at a dot; no parent domain, no wildcard"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "regex"
+pattern = '''(?x) ^(?= fn\s+rule_for\(rules:(?:\s|//[^\n]*)*&\[Rule\],(?:\s|//[^\n]*)*url:(?:\s|//[^\n]*)*&str,(?:\s|//[^\n]*)*host:(?:\s|//[^\n]*)*&str\)(?:\s|//[^\n]*)*->(?:\s|//[^\n]*)*Option<Action>(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        if\s+let\s+Some\(r\)(?:\s|//[^\n]*)*=(?:\s|//[^\n]*)*rules\.iter\(\)\.find\(\|r\|(?:\s|//[^\n]*)*r\.is_url\(\)(?:\s|//[^\n]*)*&&(?:\s|//[^\n]*)*r\.pattern(?:\s|//[^\n]*)*==(?:\s|//[^\n]*)*url\)(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*return\s+Some\(r\.action\);(?:\s|//[^\n]*)*\}(?:\s|//[^\n]*)*
+        rules(?:\s|//[^\n]*)*\.iter\(\)(?:\s|//[^\n]*)*
+            \.filter\(\|r\|(?:\s|//[^\n]*)*!r\.is_url\(\)(?:\s|//[^\n]*)*&&(?:\s|//[^\n]*)*covers\(&r\.pattern,(?:\s|//[^\n]*)*host\)\)(?:\s|//[^\n]*)*
+            \.max_by_key\(\|r\|(?:\s|//[^\n]*)*r\.pattern\.len\(\)\)(?:\s|//[^\n]*)*
+            \.map\(\|r\|(?:\s|//[^\n]*)*r\.action\)(?:\s|//[^\n]*)*
+    \}(?:\s|//[^\n]*)*
+    fn\s+covers\(pattern:(?:\s|//[^\n]*)*&str,(?:\s|//[^\n]*)*host:(?:\s|//[^\n]*)*&str\)(?:\s|//[^\n]*)*->(?:\s|//[^\n]*)*bool(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*
+        host(?:\s|//[^\n]*)*==(?:\s|//[^\n]*)*pattern(?:\s|//[^\n]*)*\|\|(?:\s|//[^\n]*)*host\.strip_suffix\(pattern\)\.is_some_and\(\|sub\|(?:\s|//[^\n]*)*sub\.ends_with\('\.'\)\)(?:\s|//[^\n]*)*
+    \} )'''
+replace = '''// aurora-local-patch: media-filter-guard-rule-scope\n'''
+
+# A guard for trees these patches were already applied to (a marker makes
+# a patch ALREADY): a new arm letting a site with no answer through.
+[[guard]]
+id = "media-filter-guard-no-rule-allow"
+why = "a site with no answer must be asked about (or denied by Don't ask); only check_trusted's `None if !ask` may allow it"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+pattern = '''None\b[^\n]*?=>\s*Verdict::Allow'''
+allow = ['''None if !ask => Verdict::Allow''']
+level = "fail"
+
+# ------------------------------------- ready, disabled: force the filter on
+#
+# Untested: never compiled. If upstream ever turns the filter off by
+# default, or makes it skippable for one kind of media, enable these three
+# (and the ones a DRIFT above shows are needed), then build, run the tests
+# and check every kind of media in demo mode (AURORA_DEMO_MEDIA_FILTER).
+#
+# Not written, because it depends on what upstream will change:
+# - the Preferences switch (ui/options/pages/media.rs) still shows
+#   media.filter and greys the filter's sub-switches with it; hide it or
+#   say "always on" once the setting no longer counts;
+# - the first question's "turn off" answer (app.rs media_filter_question,
+#   Answer::TurnOff) still writes media.filter = false: with these patches
+#   it only allows that site once;
+# - 84's Don't report blocked and Don't ask follow `s.filter &&` in
+#   follow_settings (media/filter.rs): with the setting off they stop
+#   working although the filter runs;
+# - the music's scheme refusal with the filter off: covered here, since
+#   the music always gets the filter.
+
+[[patch]]
+id = "media-filter-guard-force-media"
+why = "ready, untested: faces, HUDs and the parcel media are checked whatever media.filter says"
+enabled = false
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "apply_filter"
+find = '''
+if !f.settings.filter {
+    continue;
+}
+'''
+replace = '''// aurora-local-patch: media-filter-guard-force-media (checked whatever media.filter says)'''
+
+[[patch]]
+id = "media-filter-guard-force-music"
+why = "ready, untested: the parcel music always gets the filter, whatever media.filter says"
+enabled = false
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_audio"
+find = "self.settings.media.filter.then_some(&mut self.world.media_filter),"
+replace = '''Some(&mut self.world.media_filter), // aurora-local-patch: media-filter-guard-force-music'''
+
+[[patch]]
+id = "media-filter-guard-force-question"
+why = "ready, untested: the filter's question shows whatever media.filter says, or held media would wait forever"
+enabled = false
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "media_filter_question"
+find = '''
+if !self.settings.media.filter {
+    return;
+}
+'''
+replace = '''// aurora-local-patch: media-filter-guard-force-question (asked whatever media.filter says)'''
