@@ -1,0 +1,11 @@
+# Clippy patches: deliberately empty.
+#
+# The Clippy audit (scripts/patches/clippy_audit.py) found no correctness,
+# suspicious, perf or style finding on the Linux build, and the
+# unwrap/expect/panic sites of the external-data crates are invariants,
+# compile-time constants or build scripts, not reachable from network or file
+# input. A patch would be churn on code that is not defective.
+#
+# No blanket #![allow(...)] (it hides warnings, it does not fix them) and no
+# `cargo clippy --fix` at install time (unreviewed rewrites of upstream code).
+# When a later audit shows a real defect, add a [[patch]] here (see README.md).

@@ -1,0 +1,613 @@
+# Director: a keyframe added right after deleting the first or the last one
+# goes back where the deleted one was.
+#
+# Upstream's "Add keyframe" (Director::add_key) inserts at the playhead when
+# the playhead is past 0 and not on a keyframe, else appends DEFAULT_GAP
+# (3 s) after the last keyframe. Director::remove then leaves two dead ends:
+#  - the first keyframe deleted: the track starts again from the next one
+#    (Track::tidy), every keyframe moves earlier by the span that was removed
+#    and the playhead goes to 0, on the new first keyframe. "Add keyframe"
+#    appends at the end, and no keyframe can ever be added before the first
+#    (the playhead never goes below 0, a keyframe never passes a neighbour);
+#  - the last keyframe deleted: the playhead is brought back to the new end,
+#    on the keyframe before, so "Add keyframe" appends 3 s after it, whatever
+#    span the deleted one had.
+# The Legacy Viewer has no camera path tool to compare with.
+#
+# This build:
+#  - last keyframe deleted (the track still has keyframes): the playhead
+#    keeps its time, past the end, so the next "Add keyframe" inserts there
+#    and the deleted span comes back. Every other deletion keeps upstream's
+#    clamp. A playhead past the end is a state upstream already has (a click
+#    after the end of the ruler); its readers: the view (Editing: none, a
+#    scrub samples the last keyframe), play() (restarts from 0 when at or
+#    past the end), tick (only while playing, after play()), the recorder
+#    (goes through play()), the world's playhead dot (drawn only up to the
+#    end), the clock (prints the time). The ruler is the one that needed a
+#    change: it shows the duration plus 6 s, and a deleted span longer than
+#    that put the playhead beyond it, drawn pinned to the right edge; it now
+#    also reaches the playhead (only past the usual width, so a click there
+#    cannot make it grow).
+#  - first keyframe deleted: Director::remove remembers the span that was
+#    removed together with the track exactly as the deletion left it
+#    (`Readd`). The next "Add keyframe" puts the new keyframe at 0 and moves
+#    the others later by that span (Track::prepend), so [0,3,6,9] -> delete
+#    the first -> [0,3,6] -> Add -> [new 0, 3, 6, 9]. It does so only while
+#    the playhead is at 0, nothing is selected and the track is equal to the
+#    one remembered: a later change of the track cannot leave it stale. It is
+#    also forgotten by any add or removal, a selection, a scrub, a play, an
+#    undo or redo, a load, a clear, a time set on the ruler, and a change made
+#    in the Path section (its only controls that edit the track with nothing
+#    selected), so that a change undone by hand does not count as none. The
+#    new keyframe gets the lock, the selection and the playhead as any other
+#    "Add keyframe"; a full track, or one the shift would take past MAX_TIME,
+#    falls back to upstream's append. Undo treats it as any other change.
+#    A selection deleted together goes through the same removal, the last
+#    keyframe first: when it takes the first keyframe, the span remembered
+#    is the whole one before the first keyframe kept, and the next "Add
+#    keyframe" puts one keyframe back at the start with that span.
+#
+# Tests: director.rs (the first keyframe back at the start, of four and of
+# two, locked and unlocked, and after a selection of the first two deleted
+# together; forgotten after a select, a scrub, a load, an undo and redo, an edit
+# and a second add; the last keyframe back at its time with its span; the
+# middle one as upstream; the limits), and upstream's
+# removing_a_keyframe_keeps_the_selection_on_the_same_one adjusted.
+# Apply or skip the whole file, not one patch of it.
+
+# --- the track (camera/track.rs)
+
+[[patch]]
+id = "director-readd-prepend"
+why = "a keyframe at the start, the others moved later by a span, within the track's limits"
+paths = ["crates/aurora-viewer/src/camera/track.rs"]
+op = "literal"
+find = '''pub fn remove(&mut self, index: usize) {
+        if index < self.keys.len() {'''
+replace = '''// aurora-local-patch: director-readd-prepend
+    /// A keyframe at the start (local patch set, 106-director-readd): the
+    /// others go `gap` seconds later. Its index (0), or `None` when the track
+    /// is empty or full, the gap is under `MIN_GAP`, or the last keyframe
+    /// would go past `MAX_TIME`.
+    pub fn prepend(&mut self, pose: Pose, gap: f32) -> Option<usize> {
+        if self.keys.is_empty() || self.is_full() || !gap.is_finite() || gap < MIN_GAP || self.duration() + gap > MAX_TIME {
+            return None;
+        }
+        for key in &mut self.keys {
+            key.time += gap;
+        }
+        self.keys.insert(
+            0,
+            Keyframe {
+                time: 0.0,
+                pose,
+                rest: false,
+                aim: KeyAim::Lock,
+                shot: KeyShot::default(),
+                extra: KeyExtra::default(),
+            },
+        );
+        self.tidy();
+        Some(0)
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        if index < self.keys.len() {'''
+
+# --- the Director (director.rs)
+
+[[patch]]
+id = "director-readd-type"
+why = "what the deletion of the first keyframe leaves for the next Add: the span, and the track to compare with"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+find = '''#[derive(Debug, Clone, PartialEq)]
+pub struct Director {'''
+replace = '''// aurora-local-patch: director-readd-type
+/// The first keyframe just deleted (local patch set, 106-director-readd):
+/// the span it took to the next one, and the track as the deletion left it.
+/// "Add keyframe" puts a keyframe back at the start only while the track is
+/// still exactly this one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readd {
+    gap: f32,
+    track: Track,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Director {'''
+
+[[patch]]
+id = "director-readd-field"
+why = "the Director keeps it until the next Add or anything else"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+find = '''/// The fades and the title cards, saved with the track (director_titles.rs).
+    pub finish: crate::director_titles::Finish,
+}'''
+replace = '''/// The fades and the title cards, saved with the track (director_titles.rs).
+    pub finish: crate::director_titles::Finish,
+    // aurora-local-patch: director-readd-field
+    /// The first keyframe just deleted, for the "Add keyframe" that follows
+    /// (`Readd`); `None` once anything else happened.
+    pub readd: Option<Readd>,
+}'''
+
+[[patch]]
+id = "director-readd-default"
+why = "nothing remembered at first"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+find = '''finish: Default::default(),
+        }'''
+replace = '''finish: Default::default(),
+            readd: None, // aurora-local-patch: director-readd-default
+        }'''
+
+[[patch]]
+id = "director-readd-add"
+why = "the Add right after the first keyframe's deletion puts it back at the start; any other Add is upstream's"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "add_key"
+find = '''let on_key = self.track.nearest(self.time, track::MIN_GAP).is_some();
+        let index = if !self.track.is_empty() && !on_key && self.time > 0.0 && self.time <= track::MAX_TIME {
+            self.track.insert(self.time, pose)
+        } else {
+            self.track.append(pose)
+        }?;'''
+replace = '''// aurora-local-patch: director-readd-add
+        // right after the first keyframe was deleted, nothing changed since:
+        // the new one at the start, the others as much later as they were
+        let readd = self
+            .readd
+            .take()
+            .filter(|r| self.time == 0.0 && self.selected.is_none() && r.track == self.track);
+        let prepended = readd.and_then(|r| self.track.prepend(pose, r.gap));
+        let on_key = self.track.nearest(self.time, track::MIN_GAP).is_some();
+        let index = match prepended {
+            Some(index) => index,
+            None if !self.track.is_empty() && !on_key && self.time > 0.0 && self.time <= track::MAX_TIME => {
+                self.track.insert(self.time, pose)?
+            }
+            None => self.track.append(pose)?,
+        };'''
+
+[[patch]]
+id = "director-readd-remove"
+why = "the first keyframe deleted is remembered for the next Add; the last one deleted leaves the playhead at its time"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "remove"
+find = '''let before = self.track.keys().get(1).map_or(0.0, |k| k.time);
+        self.track.remove(index);
+        if index == 0 {
+            self.time = (self.time - before).max(0.0);
+        }
+        self.selected = match self.selected {
+            Some(s) if s == index => None,
+            Some(s) if s > index => Some(s - 1),
+            other => other,
+        };
+        self.group.retain(|other| *other != index);
+        for other in &mut self.group {
+            if *other > index {
+                *other -= 1;
+            }
+        }
+        self.time = self.time.min(self.track.duration());'''
+replace = '''let before = self.track.keys().get(1).map_or(0.0, |k| k.time);
+        // aurora-local-patch: director-readd-remove
+        let last = index + 1 == self.track.len();
+        self.track.remove(index);
+        if index == 0 {
+            self.time = (self.time - before).max(0.0);
+        }
+        self.selected = match self.selected {
+            Some(s) if s == index => None,
+            Some(s) if s > index => Some(s - 1),
+            other => other,
+        };
+        self.group.retain(|other| *other != index);
+        for other in &mut self.group {
+            if *other > index {
+                *other -= 1;
+            }
+        }
+        // the first keyframe gone: the next "Add keyframe" may put one back
+        // where it was (`add_key`)
+        self.readd = (index == 0 && !self.track.is_empty()).then(|| Readd {
+            gap: before,
+            track: self.track.clone(),
+        });
+        // the last one gone: the playhead stays at its time, past the end,
+        // so that "Add keyframe" puts the next one there (upstream brought it
+        // back to the new end)
+        if !last || self.track.is_empty() {
+            self.time = self.time.min(self.track.duration());
+        }'''
+
+[[patch]]
+id = "director-readd-clear"
+why = "a cleared track forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "clear"
+find = '''self.track.clear();
+        self.selected = None;'''
+replace = '''self.track.clear();
+        self.selected = None;
+        self.readd = None; // aurora-local-patch: director-readd-clear'''
+
+[[patch]]
+id = "director-readd-select"
+why = "a selection forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "select"
+find = '''self.selected = Some(index);
+            self.group.clear();
+            self.time = key.time;'''
+replace = '''self.selected = Some(index);
+            self.group.clear();
+            self.time = key.time;
+            self.readd = None; // aurora-local-patch: director-readd-select'''
+
+[[patch]]
+id = "director-readd-play"
+why = "a playback forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "play"
+find = "let wait = self.start_delay.clamp(*START_DELAY_RANGE.start(), *START_DELAY_RANGE.end());"
+replace = '''self.readd = None; // aurora-local-patch: director-readd-play
+        let wait = self.start_delay.clamp(*START_DELAY_RANGE.start(), *START_DELAY_RANGE.end());'''
+
+[[patch]]
+id = "director-readd-scrub"
+why = "a scrub forgets the deleted keyframe, even one that ends back at 0"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "scrub"
+find = "self.mode = Mode::Scrubbing;"
+replace = '''self.mode = Mode::Scrubbing;
+        self.readd = None; // aurora-local-patch: director-readd-scrub'''
+
+[[patch]]
+id = "director-readd-load"
+why = "a loaded track forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "load"
+find = '''self.track = track;
+        self.selected = None;'''
+replace = '''self.track = track;
+        self.selected = None;
+        self.readd = None; // aurora-local-patch: director-readd-load'''
+
+[[patch]]
+id = "director-readd-history"
+why = "an undo or a redo forgets the deleted keyframe, even when it brings back the same track"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "restore"
+find = "d.selected = self.selected.filter(|index| *index < d.track.len());"
+replace = '''d.selected = self.selected.filter(|index| *index < d.track.len());
+        d.readd = None; // aurora-local-patch: director-readd-history'''
+
+[[patch]]
+id = "director-readd-upstream-test"
+why = "upstream's test expected the playhead at the new end after the last keyframe's deletion"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+fn = "removing_a_keyframe_keeps_the_selection_on_the_same_one"
+find = '''d.remove(1);
+        assert_eq!(d.selected, None);
+        assert_eq!(d.time, 0.0);'''
+replace = '''d.remove(1);
+        assert_eq!(d.selected, None);
+        // aurora-local-patch: director-readd-upstream-test
+        // this build keeps the playhead where the last keyframe was, on
+        // purpose: "Add keyframe" puts the next one back there (upstream: 0.0)
+        assert_eq!(d.time, 3.0);'''
+
+[[patch]]
+id = "director-readd-tests"
+why = "the keyframe put back after a deletion, and when it is not"
+paths = ["crates/aurora-viewer/src/director.rs"]
+op = "literal"
+find = '''for joint in Joint::ALL {
+            assert!(joint.bone().starts_with('m'));
+        }
+    }
+}'''
+replace = '''for joint in Joint::ALL {
+            assert!(joint.bone().starts_with('m'));
+        }
+    }
+
+    // aurora-local-patch: director-readd-tests
+    fn four() -> Director {
+        let mut d = three();
+        d.add_key(at(30.0));
+        d
+    }
+
+    /// Four keyframes, the first deleted.
+    fn first_deleted() -> Director {
+        let mut d = four();
+        d.select(0);
+        d.remove(0);
+        d
+    }
+
+    #[test]
+    fn a_first_keyframe_deleted_comes_back_first() {
+        let mut d = first_deleted();
+        assert_eq!(times(&d), [0.0, 3.0, 6.0]);
+        assert_eq!((d.selected, d.time), (None, 0.0));
+        d.lock.on = true;
+        assert_eq!(d.add_key(at(99.0)), Some(0));
+        assert_eq!(times(&d), [0.0, 3.0, 6.0, 9.0]);
+        assert_eq!(d.track.keys()[0].pose, at(99.0));
+        assert_eq!(d.track.keys()[1].pose, at(10.0));
+        // locked on the lock's target, selected and under the playhead, as
+        // any new keyframe; the others keep their own aim (laid unlocked)
+        assert_eq!(d.track.keys()[0].aim, KeyAim::On(d.lock.aim()));
+        assert_eq!(d.track.keys()[1].aim, KeyAim::Free);
+        assert_eq!((d.selected, d.time), (Some(0), 0.0));
+        assert!(d.readd.is_none());
+        // the next one goes after the last, as upstream
+        assert_eq!(d.add_key(at(50.0)), Some(4));
+        assert_eq!(d.track.duration(), 12.0);
+        // of two keyframes: the one left goes back to its time
+        let mut d = Director::default();
+        d.add_key(at(0.0));
+        d.add_key(at(10.0));
+        d.select(0);
+        d.remove(0);
+        assert_eq!(d.add_key(at(99.0)), Some(0));
+        assert_eq!(times(&d), [0.0, 3.0]);
+        assert_eq!(d.track.keys()[1].pose, at(10.0));
+        // unlocked: free, as any new keyframe
+        assert_eq!(d.track.keys()[0].aim, KeyAim::Free);
+        // the first two deleted together: one keyframe back at the start,
+        // the others at their times
+        let mut d = four();
+        d.select(0);
+        d.toggle(1);
+        d.remove_selection();
+        assert_eq!(times(&d), [0.0, 3.0]);
+        assert_eq!(d.add_key(at(99.0)), Some(0));
+        assert_eq!(times(&d), [0.0, 6.0, 9.0]);
+    }
+
+    #[test]
+    fn the_first_keyframe_comes_back_only_right_after_its_deletion() {
+        // upstream's Add: after the last keyframe, the start unchanged
+        let appended = |mut d: Director| {
+            assert_eq!(d.add_key(at(99.0)), Some(3));
+            assert_eq!(d.track.keys()[0].pose, at(10.0));
+            assert_eq!(d.track.keys()[3].pose, at(99.0));
+        };
+        // a selection, even one given back
+        let mut d = first_deleted();
+        d.select(1);
+        d.selected = None;
+        d.time = 0.0;
+        appended(d);
+        // a scrub that ends at the start
+        let mut d = first_deleted();
+        d.scrub(2.0);
+        d.scrub(0.0);
+        d.end_scrub();
+        appended(d);
+        // the same track loaded
+        let mut d = first_deleted();
+        let track = d.track.clone();
+        d.load(track);
+        appended(d);
+        // an undo and a redo
+        let mut d = four();
+        let mut history = History::default();
+        history.observe(&d, true);
+        d.select(0);
+        d.remove(0);
+        history.observe(&d, true);
+        assert!(history.undo(&mut d) && history.redo(&mut d));
+        assert_eq!((d.selected, d.time), (None, 0.0));
+        appended(d);
+        // a span changed
+        let mut d = first_deleted();
+        d.track.set_span(1, 5.0);
+        assert_eq!(d.add_key(at(99.0)), Some(3));
+        assert_eq!(d.track.keys()[0].pose, at(10.0));
+        // a playhead moved away
+        let mut d = first_deleted();
+        d.time = 1.0;
+        assert_eq!(d.add_key(at(99.0)), Some(1));
+        assert_eq!(times(&d), [0.0, 1.0, 3.0, 6.0]);
+        // another keyframe deleted first
+        let mut d = first_deleted();
+        d.select(2);
+        d.remove(2);
+        d.select(0);
+        d.selected = None;
+        appended_two(d);
+        // a fresh track, a loaded one: the playhead at 0 appends
+        let mut d = Director::default();
+        d.add_key(at(0.0));
+        d.selected = None;
+        assert_eq!(d.add_key(at(10.0)), Some(1));
+        let mut d = Director::default();
+        d.load(four().track);
+        assert_eq!(d.add_key(at(99.0)), Some(4));
+        assert_eq!(d.track.keys()[0].pose, at(0.0));
+    }
+
+    fn appended_two(mut d: Director) {
+        assert_eq!(d.add_key(at(99.0)), Some(2));
+        assert_eq!(d.track.keys()[0].pose, at(10.0));
+    }
+
+    #[test]
+    fn the_first_keyframe_put_back_is_undone_like_any_add() {
+        let mut d = four();
+        let mut history = History::default();
+        history.observe(&d, true);
+        d.select(0);
+        history.observe(&d, true);
+        d.remove(0);
+        history.observe(&d, true);
+        d.add_key(at(99.0));
+        history.observe(&d, true);
+        assert_eq!(times(&d), [0.0, 3.0, 6.0, 9.0]);
+        assert!(history.undo(&mut d));
+        assert_eq!(times(&d), [0.0, 3.0, 6.0]);
+        assert_eq!(d.track.keys()[0].pose, at(10.0));
+        assert_eq!((d.selected, d.time), (None, 0.0));
+        assert!(history.redo(&mut d));
+        assert_eq!(d.track.keys()[0].pose, at(99.0));
+    }
+
+    #[test]
+    fn the_first_keyframe_goes_back_within_the_tracks_limits() {
+        // past MAX_TIME: upstream's Add
+        let mut d = four();
+        d.track.set_span(3, f32::MAX);
+        assert!((d.track.duration() - track::MAX_TIME).abs() < 0.01);
+        assert_eq!(d.track.prepend(at(99.0), 1.0), None);
+        assert_eq!(d.track.len(), 4);
+        // a full track, a gap too small, an empty track
+        let mut full = Track::default();
+        for i in 0..track::MAX_KEYS {
+            full.append(at(i as f32));
+        }
+        assert_eq!(full.prepend(at(99.0), 3.0), None);
+        let mut d = four();
+        assert_eq!(d.track.prepend(at(99.0), 0.0), None);
+        assert_eq!(Track::default().prepend(at(99.0), 3.0), None);
+        // the last keyframe deleted from a track of one: nothing to put back
+        let mut d = Director::default();
+        d.add_key(at(0.0));
+        d.remove(0);
+        assert!(d.readd.is_none());
+        assert_eq!(d.time, 0.0);
+    }
+
+    #[test]
+    fn a_last_keyframe_deleted_comes_back_where_it_was() {
+        let mut d = four();
+        d.track.set_span(3, 8.0);
+        assert_eq!(times(&d), [0.0, 3.0, 6.0, 14.0]);
+        d.select(3);
+        d.remove(3);
+        assert_eq!(times(&d), [0.0, 3.0, 6.0]);
+        // the playhead past the end, where the keyframe was
+        assert_eq!((d.selected, d.time), (None, 14.0));
+        assert_eq!(d.add_key(at(99.0)), Some(3));
+        assert_eq!(times(&d), [0.0, 3.0, 6.0, 14.0]);
+        assert_eq!(d.track.span_time(3), Some(8.0));
+        assert_eq!((d.selected, d.time), (Some(3), 14.0));
+        // played from there: from the start, as upstream past the end
+        let mut d = four();
+        d.select(3);
+        d.remove(3);
+        assert!(d.play());
+        assert_eq!(d.time, 0.0);
+    }
+
+    #[test]
+    fn a_middle_keyframe_deleted_comes_back_as_upstream() {
+        let mut d = four();
+        d.select(1);
+        d.remove(1);
+        assert_eq!(times(&d), [0.0, 6.0, 9.0]);
+        assert_eq!((d.selected, d.time), (None, 3.0));
+        assert!(d.readd.is_none());
+        assert_eq!(d.add_key(at(99.0)), Some(1));
+        assert_eq!(times(&d), [0.0, 3.0, 6.0, 9.0]);
+        assert_eq!(d.track.keys()[1].pose, at(99.0));
+    }
+}'''
+
+# --- the window and the timeline (ui/director.rs)
+
+[[patch]]
+id = "director-readd-path"
+why = "a change of the track in the Path section forgets the deleted keyframe, even one undone by hand"
+paths = ["crates/aurora-viewer/src/ui/director.rs"]
+op = "literal"
+fn = "window"
+find = '''widgets::collapsing(ui, p, "director_path", aurora_i18n::tr!("director-path"), true, |ui| {
+                        path_section(ui, p, d);
+                    });'''
+replace = '''// aurora-local-patch: director-readd-path
+                    let untouched = d.readd.is_some().then(|| d.track.clone());
+                    widgets::collapsing(ui, p, "director_path", aurora_i18n::tr!("director-path"), true, |ui| {
+                        path_section(ui, p, d);
+                    });
+                    if untouched.is_some_and(|track| track != d.track) {
+                        d.readd = None;
+                    }'''
+
+[[patch]]
+id = "director-readd-ruler-span"
+why = "the ruler reaches a playhead left past its usual width by the last keyframe's deletion"
+paths = ["crates/aurora-viewer/src/ui/director.rs"]
+op = "literal"
+fn = "ruler"
+find = "let full = held.unwrap_or_else(|| ruler_span(end));"
+replace = '''// aurora-local-patch: director-readd-ruler-span
+    // (only past the usual width: a click there cannot make it grow)
+    let full = held.unwrap_or_else(|| ruler_span(end).max(d.time));'''
+
+[[patch]]
+id = "director-readd-ruler-zoom"
+why = "the ruler's zoom buttons see the same whole span as the ruler"
+paths = ["crates/aurora-viewer/src/ui/director.rs"]
+op = "literal"
+find = "super::director_ruler::zoom_buttons(ui, p, ruler_span(d.track.duration()), d.time);"
+replace = '''// aurora-local-patch: director-readd-ruler-zoom
+                                super::director_ruler::zoom_buttons(ui, p, ruler_span(d.track.duration()).max(d.time), d.time);'''
+
+[[patch]]
+id = "director-readd-ruler-time"
+why = "a time set on the ruler (the camera restricted) forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/ui/director.rs"]
+op = "literal"
+fn = "ruler"
+find = "Some(pointer) if background.is_pointer_button_down_on() => d.time = time_at(pointer.x),"
+replace = '''Some(pointer) if background.is_pointer_button_down_on() => {
+            d.time = time_at(pointer.x);
+            d.readd = None; // aurora-local-patch: director-readd-ruler-time
+        }'''
+
+# --- the selection of several keyframes (director/group.rs)
+
+[[patch]]
+id = "director-readd-toggle"
+why = "a Ctrl + click selection forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director/group.rs"]
+op = "literal"
+find = '''pub fn toggle(&mut self, index: usize) {'''
+replace = '''pub fn toggle(&mut self, index: usize) {
+        self.readd = None; // aurora-local-patch: director-readd-toggle'''
+
+[[patch]]
+id = "director-readd-extend"
+why = "a Shift + click selection forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director/group.rs"]
+op = "literal"
+find = '''pub fn extend_to(&mut self, index: usize) {'''
+replace = '''pub fn extend_to(&mut self, index: usize) {
+        self.readd = None; // aurora-local-patch: director-readd-extend'''
+
+[[patch]]
+id = "director-readd-focus"
+why = "a keyframe shown from the selection forgets the deleted keyframe"
+paths = ["crates/aurora-viewer/src/director/group.rs"]
+op = "literal"
+find = '''pub fn focus(&mut self, index: usize) {'''
+replace = '''pub fn focus(&mut self, index: usize) {
+        self.readd = None; // aurora-local-patch: director-readd-focus'''

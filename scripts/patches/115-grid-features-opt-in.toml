@@ -1,0 +1,145 @@
+# Two upstream features that talk to the grid on their own are off by
+# default here; each stays switchable in Preferences exactly where and how
+# upstream offers it. Only the defaults change (the `Default` impls, which
+# the settings' `#[serde(default)]` also uses): a settings file that never
+# had the key loads with the feature off, and "reset to default" gives off.
+# A settings file that already stores the key keeps its value.
+#
+# - The direct-message history from the grid (`chat_service_history`,
+#   Preferences › Chat, the LL viewer 26.5's ChatServiceEnabled, on
+#   upstream). On, at each login the viewer asks the region's Chat Service
+#   (world/chat_service/, aurora-net's session_chat_service.rs,
+#   world/direct_history.rs) for the history of the private conversations
+#   kept on the grid's side and merges it into the transcripts. Read at login
+#   only, as upstream: turning it on takes effect at the next login. The demo
+#   scenario AURORA_DEMO_CHATLOG=service needs the switch on now.
+# - Game Controls input sent to the region (`game_control.send_to_server`,
+#   Preferences › Game Controls, "Send GameControl Data to server", the LL
+#   viewer's SendDataToServer, on upstream). On, while a controller is in use
+#   and the region takes it, the viewer sends GameControlData messages (the
+#   controller's axes and buttons) for scripts to read. Off, nothing is sent;
+#   the controller still moves the avatar and the camera locally.
+#
+# Nothing else switches either on: no migration, first-run step or other
+# default path writes them (checked against upstream at this catch-up).
+#
+# Tests: settings.rs grid_features_opt_in_tests (both defaults, an empty
+# settings file, after sanitized); game_control/tests.rs
+# sending_is_off_by_default. Upstream's Game Controls engine tests were
+# written for sending on: they now take the settings with sending on
+# (`sending()`), their expectations unchanged.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------- the grid's message history
+
+[[patch]]
+id = "grid-features-opt-in-chat-service-doc"
+why = "the setting's documentation says it is off here"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''/// The Chat Service's history of the private conversations, fetched
+    /// from the region and shown with the transcripts (the LL viewer's
+    /// ChatServiceEnabled, on). Read at login only.'''
+replace = '''/// The Chat Service's history of the private conversations, fetched
+    /// from the region and shown with the transcripts (the LL viewer's
+    /// ChatServiceEnabled, on there; off by default in this build, local
+    /// patch set). Read at login only.
+    // aurora-local-patch: grid-features-opt-in-chat-service-doc'''
+
+[[patch]]
+id = "grid-features-opt-in-chat-service"
+why = "the direct-message history is not fetched from the grid unless the user turns it on (a settings file without the key included)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "chat_service_history: true,"
+replace = "chat_service_history: false, // aurora-local-patch: grid-features-opt-in-chat-service"
+
+[[patch]]
+id = "grid-features-opt-in-settings-test"
+why = "both defaults off, for a settings file without the keys too, and after sanitized (at the end of the file: clippy's items_after_test_module)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "regex"
+pattern = '\n\Z'
+replace = '''
+
+// aurora-local-patch: grid-features-opt-in-settings-test
+#[cfg(test)]
+mod grid_features_opt_in_tests {
+    use super::Settings;
+
+    #[test]
+    fn the_grid_history_and_game_controls_sending_are_off_by_default() {
+        let fresh = Settings::default();
+        assert!(!fresh.chat_service_history && !fresh.game_control.send_to_server);
+        let loaded: Settings = serde_json::from_str("{}").expect("a settings file without the keys");
+        assert!(!loaded.chat_service_history && !loaded.game_control.send_to_server);
+        let sanitized = loaded.sanitized();
+        assert!(!sanitized.chat_service_history && !sanitized.game_control.send_to_server);
+        // a file that has them keeps them: the switches still work
+        let on: Settings = serde_json::from_str(r#"{"chat_service_history": true, "game_control": {"send_to_server": true}}"#)
+            .expect("a settings file with both on");
+        let on = on.sanitized();
+        assert!(on.chat_service_history && on.game_control.send_to_server);
+    }
+}
+'''
+
+# ------------------------------------------------------ Game Controls sending
+
+[[patch]]
+id = "grid-features-opt-in-game-control-doc"
+why = "the setting's documentation says it is off here"
+paths = ["crates/aurora-viewer/src/game_control/mod.rs"]
+op = "literal"
+find = '''/// "Send GameControl Data to server" (SendDataToServer).
+    pub send_to_server: bool,'''
+replace = '''/// "Send GameControl Data to server" (SendDataToServer; on in the LL
+    /// viewer, off by default in this build, local patch set).
+    // aurora-local-patch: grid-features-opt-in-game-control-doc
+    pub send_to_server: bool,'''
+
+[[patch]]
+id = "grid-features-opt-in-game-control"
+why = "Game Controls input is not sent to the region unless the user turns it on (a settings file without the key included)"
+paths = ["crates/aurora-viewer/src/game_control/mod.rs"]
+op = "literal"
+find = "send_to_server: true,"
+replace = "send_to_server: false, // aurora-local-patch: grid-features-opt-in-game-control"
+
+[[patch]]
+id = "grid-features-opt-in-game-control-tests"
+why = "upstream's engine tests were written for sending on by default: they take the settings with sending on, expectations unchanged"
+paths = ["crates/aurora-viewer/src/game_control/tests.rs"]
+op = "regex"
+pattern = '^(\s*)let (mut )?s = Settings::default\(\);$'
+expect = 20
+replace = '\1let \2s = sending(); // aurora-local-patch: grid-features-opt-in-game-control-tests'
+
+[[patch]]
+id = "grid-features-opt-in-game-control-test"
+why = "the settings with sending on for upstream's tests, and the new default: nothing is due to be sent"
+paths = ["crates/aurora-viewer/src/game_control/tests.rs"]
+op = "literal"
+find = "fn frame(now: Instant, mode: Mode, flags: u32) -> Frame {"
+replace = '''// aurora-local-patch: grid-features-opt-in-game-control-test
+/// The settings with sending on: upstream's default, which its tests were
+/// written for (off by default in this build, local patch set).
+fn sending() -> Settings {
+    Settings {
+        send_to_server: true,
+        ..Settings::default()
+    }
+}
+
+#[test]
+fn sending_is_off_by_default() {
+    let s = Settings::default();
+    assert!(!s.send_to_server);
+    let loaded: Settings = serde_json::from_str("{}").expect("settings without the key");
+    assert!(!loaded.send_to_server);
+    let mut e = Engine::default();
+    assert!(!e.compute(&s, &frame(Instant::now(), Mode::Avatar, 0)), "nothing is due to be sent");
+}
+
+fn frame(now: Instant, mode: Mode, flags: u32) -> Frame {'''

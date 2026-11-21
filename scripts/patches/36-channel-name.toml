@@ -1,0 +1,83 @@
+# The local build's own viewer channel: "Aurora Viewer (Otoa's Mod)".
+#
+# Linden Lab's Third-Party Viewer Policy 1.b asks every different version of
+# a third-party viewer for a unique viewer identifier, never the one of
+# another viewer. This private build is not the Aurora team's release, so it
+# says so: if it causes a problem, the grid sees it is the owner's build.
+# Policy 5.b: the name holds none of "Second", "Life", "SL", "Linden".
+#
+# One constant, `aurora_net::login::CHANNEL`, and what reads it follows:
+# - the login's `channel` (login.rs build_params);
+# - the currency helper's `viewerChannel` (currency.rs base_params);
+# - the version string of the viewer statistics (app/viewer_stats.rs:
+#   "<channel> <version>"). The statistics packet is otherwise unchanged,
+#   and `telemetry-viewerstats` keeps its own state.
+#
+# Deliberately NOT changed: the credential store's service names (saved
+# logins would be lost), the config / cache / data folders, the window
+# title, the binary and desktop entry names, the updater, and the strings
+# that carry their own "Aurora Viewer" (user agents, About, login screen).
+#
+# The channel travels in XML bodies only (XML-RPC login and currency calls,
+# LLSD XML statistics): aurora_llsd::xml::escape writes the apostrophe as
+# &apos;, and the parentheses, plain character data in XML, as they are.
+# channel-name-test proves the round trip. No URL, query, form or HTTP
+# header carries the channel.
+#
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "channel-name"
+why = "the local build's own channel name (Third-Party Viewer Policy 1.b)"
+paths = ["crates/aurora-net/src/login.rs"]
+op = "literal"
+find = 'pub const CHANNEL: &str = "Aurora Viewer";'
+replace = '''pub const CHANNEL: &str = "Aurora Viewer (Otoa's Mod)"; // aurora-local-patch: channel-name'''
+
+[[patch]]
+id = "channel-name-test"
+why = "the name keeps to the policy, and its apostrophe survives the XML-RPC and LLSD XML encoders"
+paths = ["crates/aurora-net/src/login.rs"]
+op = "regex"
+pattern = '^(mod tests \{\n    use super::\*;\n)'
+replace = '''\1
+    // aurora-local-patch: channel-name-test
+    /// The local build's channel: its own name (Third-Party Viewer Policy
+    /// 1.b), with no Linden Lab mark in it (5.b), and its apostrophe escaped
+    /// by every encoder it goes through, then read back as sent.
+    #[test]
+    fn the_local_channel_is_its_own_and_survives_the_encoders() {
+        assert_eq!(CHANNEL.as_bytes(), b"Aurora Viewer (Otoa's Mod)");
+        assert!(CHANNEL.is_ascii());
+        assert!(CHANNEL.starts_with("Aurora Viewer "));
+        let lower = CHANNEL.to_ascii_lowercase();
+        for word in ["second", "life", "sl", "linden"] {
+            assert!(!lower.contains(word), "{word} in {CHANNEL}");
+        }
+        // XML-RPC: the login and the currency helper
+        let mut m = Map::new();
+        m.insert("channel".into(), CHANNEL.into());
+        let doc = xmlrpc::build_call("login_to_simulator", &Llsd::Map(m));
+        assert!(doc.contains("<string>Aurora Viewer (Otoa&apos;s Mod)</string>"), "{doc}");
+        let back = doc
+            .replace("methodCall", "methodResponse")
+            .replace("<methodName>login_to_simulator</methodName>", "");
+        let v = xmlrpc::parse_response(back.as_bytes()).expect("XML-RPC reads back");
+        assert_eq!(v["channel"].as_str(), CHANNEL);
+        // LLSD XML: the viewer statistics' version string
+        let version = Llsd::String(format!("{CHANNEL} 0.9.7.0"));
+        let xml = aurora_llsd::to_xml_string(&version);
+        assert!(xml.contains("(Otoa&apos;s Mod)"), "{xml}");
+        let read = aurora_llsd::from_xml(xml.as_bytes()).expect("LLSD XML reads back");
+        assert_eq!(read.as_str(), format!("{CHANNEL} 0.9.7.0"));
+    }
+'''
+
+[[patch]]
+id = "channel-name-currency-test"
+why = "upstream's currency test names the channel: it now expects the local one"
+paths = ["crates/aurora-net/src/currency.rs"]
+op = "literal"
+fn = "quote_request_follows_the_viewer_fields"
+find = 'assert_eq!(p["viewerChannel"].as_str(), "Aurora Viewer");'
+replace = '''assert_eq!(p["viewerChannel"].as_str(), "Aurora Viewer (Otoa's Mod)"); // aurora-local-patch: channel-name-currency-test'''

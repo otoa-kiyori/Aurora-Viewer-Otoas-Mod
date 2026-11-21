@@ -1,0 +1,752 @@
+# Hide every rezzed object of a chosen owner, and two small fixes of the
+# blocking of objects.
+#
+# Cause: blocking a resident hides their avatar, attachments, particles,
+# sounds and chat, but their rezzed objects stay drawn; derender and the
+# asset blacklist hide one object (or one avatar) by its id. Nothing hides
+# an object by its owner. The Legacy Viewer has no such rule either: this is
+# an Aurora-only feature of the local patch set.
+#
+# What it does:
+#  - the rule (world/hide_owner.rs): a permanent entry of the asset
+#    blacklist of a new kind, "Owner's objects", keyed by the owner id
+#    XOR-masked with a fixed value (never the owner id itself, so a rule
+#    cannot collide with a derendered resident or with that owner's sound
+#    categories, which share the list's keys). "Owner" is the object's owner
+#    id: a resident, or the group for a group-owned (deeded) object, whose
+#    owner id is the group's. Saved in the account's blacklist file with
+#    asset_type 1000, a value no asset type uses (the Legacy Viewer reads it
+#    as AT_NONE and acts on nothing).
+#  - every rezzed root (not an avatar, not worn: attachments follow their
+#    wearer's avatar rules) whose owner has a rule is taken out of the world
+#    through the derender machinery, with its linked prims; its updates are
+#    dropped while the rule lasts and it comes back at once when the rule is
+#    removed in the Asset blacklist window (the row shows the owner's name
+#    when known, and the owner's id).
+#  - knowing the owner: hidden as the update arrives when the update names
+#    its owner (an object with a sound or particles) or the region already
+#    told it; otherwise the owner comes from properties already held (hover,
+#    selection, menus, Area Search) or is asked for.
+#  - the request load: only while at least one rule exists (no rule: the
+#    per-frame check returns at once, nothing is asked, nothing is kept).
+#    The request is RequestObjectPropertiesFamily (flags 0, reliable, to the
+#    object's region), the one a hover sends
+#    (LLSelectMgr::requestObjectPropertiesFamily, llselectmgr.cpp), which
+#    selects nothing. At most 4 in flight, at most 5 sent per second (the
+#    Monitor's name lookups' rate), nearest objects first, each root asked
+#    once per region visit; an unanswered one frees its place after 10 s and
+#    is not asked again in that visit. The answers are kept per region and
+#    dropped when the region leaves, or when the last rule goes. Adding a
+#    rule walks the objects already present; while a rule exists the
+#    present roots are walked twice a second (a new object whose owner is
+#    learnt later goes within half a second of the answer).
+#  - never hidden: the user's own objects, the linkset the user sits on
+#    (and if a seat was hidden before the user's own update came, at an
+#    arrival, it comes back), whatever the user has selected (the build and
+#    edit tools work on the selection). A rule cannot be made for the user.
+#  - on the user's own parcel the rule applies like anywhere else: an object
+#    someone else owns there (a floor, a wall) is hidden when the user asked
+#    to hide that owner's objects. The parcel's owner sees it hidden too:
+#    the user asked for exactly that, and the blacklist window undoes it.
+#  - the menu: "Hide all objects of <owner>" (or "of the group <group>") in
+#    the object menu's Disturbance submenu, after the derender entries,
+#    once the object's properties came (the menu asks for them). No
+#    confirmation: the blacklist window undoes it.
+#  - fix 1, stricter than the Legacy Viewer: blocking an object also stops
+#    its own particles (the emitting prim or its linkset's root on the block
+#    list); the Legacy Viewer's particle check reads the owner only.
+#  - fix 2: "Block owner" on a group-owned object whose group name is not
+#    known yet no longer does nothing silently: the user is told it could
+#    not be done and to try again (blocking needs the real name for the
+#    list; a placeholder would need a rename the block list does not have).
+#  - log (INFO): a rule added or removed, and once a minute the number of
+#    owner lookups sent and answered; no ids, no names. No asset id anywhere.
+#
+# Differences from the Legacy Viewer: the owner rule and its lookups do not
+# exist there; blocking an object stops its particles (stricter).
+#
+# Tests: world/hide_owner.rs (the rule, the own and spared objects, the
+# limits, once per visit, the cache dropped with the region or the last
+# rule, the log counts); derender.rs hide_owner_tests (a root and its prims
+# hidden and restored, own and worn objects kept, a spared root, an owner
+# learnt from the region, the seat released, saved and loaded as its own
+# kind, no collision with the owner's sound entry); app/hide_owner.rs (the
+# menu's owner: resident, group, never ourselves); blocking.rs (an object's
+# particles; an unknown group refused with a message).
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------- the modules
+
+[[patch]]
+id = "hide-owner-objects-world"
+why = "the pure rule, the lookups' limits and cache, the walk over the present roots"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/world/hide_owner.rs"]
+source = "files/hide-owner-objects/hide_owner.rs"
+
+[[patch]]
+id = "hide-owner-objects-world-mod"
+why = "declare the world module"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''
+pub mod home;'''
+replace = '''
+pub mod hide_owner; // aurora-local-patch: hide-owner-objects-world-mod
+pub mod home;'''
+
+[[patch]]
+id = "hide-owner-objects-app"
+why = "the menu entry, what stays (selection, seat), the lookups sent and their log"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/app/hide_owner.rs"]
+source = "files/hide-owner-objects/app_hide_owner.rs"
+
+[[patch]]
+id = "hide-owner-objects-app-mod"
+why = "declare the app module"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''mod folders;
+mod hover_pick;'''
+replace = '''mod folders;
+mod hide_owner; // aurora-local-patch: hide-owner-objects-app-mod
+mod hover_pick;'''
+
+# ------------------------------------------------- the derender list's side
+
+[[patch]]
+id = "hide-owner-objects-at-owner"
+why = "the saved asset type of an owner rule: one no asset type uses"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = "const AT_PERSON: i32 = 45;"
+replace = '''const AT_PERSON: i32 = 45;
+// aurora-local-patch: hide-owner-objects-at-owner
+/// An owner rule (local patch set, world/hide_owner.rs): no LLAssetType has
+/// this value, the Legacy Viewer reads it as AT_NONE and acts on nothing.
+const AT_OWNER: i32 = 1000;'''
+
+[[patch]]
+id = "hide-owner-objects-kind"
+why = "the new entry kind"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = '''/// An animation asset, never played on any avatar (AT_ANIMATION).
+    Animation,
+}'''
+replace = '''/// An animation asset, never played on any avatar (AT_ANIMATION).
+    Animation,
+    /// Every rezzed object of an owner (a resident, or the group of a
+    /// group-owned object), keyed by `hide_owner::rule_key(owner)`.
+    // aurora-local-patch: hide-owner-objects-kind
+    Owner,
+}'''
+
+[[patch]]
+id = "hide-owner-objects-kind-type"
+why = "an owner rule is saved under its own asset type"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = "Kind::Animation => AT_ANIMATION,"
+replace = '''Kind::Animation => AT_ANIMATION,
+            Kind::Owner => AT_OWNER, // aurora-local-patch: hide-owner-objects-kind-type'''
+
+[[patch]]
+id = "hide-owner-objects-kind-load"
+why = "and loaded back as one"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = "AT_ANIMATION => Kind::Animation,"
+replace = '''AT_ANIMATION => Kind::Animation,
+                AT_OWNER => Kind::Owner, // aurora-local-patch: hide-owner-objects-kind-load'''
+
+[[patch]]
+id = "hide-owner-objects-state"
+why = "the rule's state lives beside the list it reads"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = '''/// Bumped on every change of the list (the window's rows).
+    pub generation: u64,
+}'''
+replace = '''/// Bumped on every change of the list (the window's rows).
+    pub generation: u64,
+    /// The owner rules' cache, limits and spared roots (world/hide_owner.rs).
+    // aurora-local-patch: hide-owner-objects-state
+    pub owner_rule: super::hide_owner::OwnerRule,
+}'''
+
+[[patch]]
+id = "hide-owner-objects-filter"
+why = "a rezzed root of a ruled owner is dropped as it arrives, and stays out while hidden"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = '''.map(|h| h.by)
+        } else {
+            None
+        };
+        let Some(by) = by else {'''
+replace = '''.map(|h| h.by)
+        } else {
+            // aurora-local-patch: hide-owner-objects-filter
+            // (a rezzed root of an owner with a rule, world/hide_owner.rs)
+            self.owner_rule_by(region, u)
+        };
+        let Some(by) = by else {'''
+
+[[patch]]
+id = "hide-owner-objects-region"
+why = "the owners the region told us go with it"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = "pub fn forget_region(&mut self, region: RegionHandle) {"
+replace = '''pub fn forget_region(&mut self, region: RegionHandle) {
+        self.owner_rule.forget_region(region); // aurora-local-patch: hide-owner-objects-region'''
+
+[[patch]]
+id = "hide-owner-objects-derender"
+why = "the list's side of the rule (it reads the private entries and hidden map), with its tests"
+paths = ["crates/aurora-viewer/src/world/derender.rs"]
+op = "literal"
+find = '''/// What the tests of `friends_only.rs` share with these.'''
+replace = '''// aurora-local-patch: hide-owner-objects-derender
+/// The owner rules (world/hide_owner.rs, local patch set): entries of
+/// `Kind::Owner`, keyed by `hide_owner::rule_key(owner)`.
+impl Derender {
+    /// At least one owner rule (counted again only when the list changed).
+    pub fn any_owner_rule(&mut self) -> bool {
+        let generation = self.generation;
+        self.owner_rule.any(generation, self.entries.values().map(|e| e.kind))
+    }
+
+    pub fn has_owner_rule(&self, owner: &Uuid) -> bool {
+        self.is_owner_rule_key(&super::hide_owner::rule_key(*owner))
+    }
+
+    fn is_owner_rule_key(&self, key: &Uuid) -> bool {
+        self.entries.get(key).is_some_and(|e| e.kind == Kind::Owner)
+    }
+
+    /// `filter_avatar`'s owner branch: a rezzed root already hidden by a
+    /// rule stays out; a new one goes when its owner is known (named by the
+    /// update, or told by the region) and has a rule. Our own objects and
+    /// the spared roots (sat on, selected) never.
+    fn owner_rule_by(&mut self, region: RegionHandle, u: &ObjectUpdate) -> Option<Uuid> {
+        if u.parent_id != 0 || u.is_avatar() || !self.any_owner_rule() {
+            return None;
+        }
+        let key = ObjKey {
+            region,
+            local_id: u.local_id,
+        };
+        if let Some(h) = self.hidden.get(&key)
+            && self.is_owner_rule_key(&h.by)
+        {
+            return Some(h.by);
+        }
+        let owner = Some(u.owner_id)
+            .filter(|o| !o.is_nil())
+            .or_else(|| self.owner_rule.owner_of(region, u.full_id));
+        let spared = self.owner_rule.spared(&key);
+        match super::hide_owner::decide(owner, self.owner_rule.me, spared, |o| self.has_owner_rule(&o)) {
+            super::hide_owner::Decision::Hide(by) => Some(by),
+            _ => None,
+        }
+    }
+
+    /// The root at `key` and its prims, hidden by an owner rule, come back
+    /// (the agent sits on it).
+    pub fn release_owner_root(&mut self, key: &ObjKey) -> Restore {
+        let mut restore = Restore::default();
+        let Some(by) = self.hidden.get(key).map(|h| h.by).filter(|by| self.is_owner_rule_key(by)) else {
+            return restore;
+        };
+        let keys: Vec<ObjKey> = self
+            .hidden
+            .iter()
+            .filter(|&(k, h)| {
+                h.by == by && k.region == key.region && (k == key || h.update.as_ref().is_some_and(|u| u.parent_id == key.local_id))
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys {
+            if let Some(h) = self.hidden.remove(&k) {
+                if let Some(u) = h.update {
+                    restore.updates.push((k.region, u));
+                }
+                restore.requests.entry(k.region).or_default().push(k.local_id);
+            }
+        }
+        for (region, ids) in &restore.requests {
+            self.requests.push((*region, ids.clone()));
+        }
+        restore
+    }
+}
+
+#[cfg(test)]
+mod hide_owner_tests {
+    use super::*;
+    use crate::world::hide_owner::rule_key;
+
+    const ME: Uuid = Uuid::from_u128(1);
+    const OWNER: Uuid = Uuid::from_u128(2);
+    const OTHER: Uuid = Uuid::from_u128(3);
+
+    fn update(local_id: u32, full_id: u128, parent_id: u32, owner_id: Uuid) -> ObjectUpdate {
+        use glam::{Quat, Vec3};
+        ObjectUpdate {
+            local_id,
+            full_id: Uuid::from_u128(full_id),
+            parent_id,
+            pcode: aurora_prim::params::LL_PCODE_VOLUME,
+            state: 0,
+            crc: 0,
+            material: 3,
+            click_action: 0,
+            scale: Vec3::ONE,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::ZERO,
+            acceleration: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            update_flags: 0,
+            owner_id,
+            volume: Default::default(),
+            texture_entry: None,
+            extra: Default::default(),
+            name_values: String::new(),
+            text: String::new(),
+            text_color: [0; 4],
+            media_url: String::new(),
+            tree_species: None,
+            texture_anim: None,
+            foot_plane: None,
+            particles: Default::default(),
+            sound: Default::default(),
+        }
+    }
+
+    fn rule(permanent: bool) -> Entry {
+        Entry {
+            name: "Owner".into(),
+            region: String::new(),
+            kind: Kind::Owner,
+            date: 1_700_000_000,
+            permanent,
+        }
+    }
+
+    fn ruled() -> Derender {
+        let mut list = Derender::default();
+        list.owner_rule.me = ME;
+        list.add(rule_key(OWNER), rule(false));
+        list
+    }
+
+    #[test]
+    fn hide_owner_rule_hides_a_root_and_its_prims_and_brings_them_back() {
+        let mut list = ruled();
+        let by = rule_key(OWNER);
+        let root = list.filter(1, &update(10, 100, 0, OWNER)).expect("hidden");
+        assert!(root.newly && root.by == by);
+        assert_eq!(list.filter(1, &update(11, 101, 10, Uuid::nil())).map(|d| d.by), Some(by));
+        // its later updates name no owner: it stays out
+        assert_eq!(list.filter(1, &update(10, 100, 0, Uuid::nil())).map(|d| d.newly), Some(false));
+        assert!(list.filter(1, &update(20, 200, 0, OTHER)).is_none(), "another owner");
+        assert!(list.filter(1, &update(30, 300, 0, ME)).is_none(), "our own");
+        assert!(list.filter(1, &update(40, 400, 5, OWNER)).is_none(), "worn");
+        assert!(list.filter(1, &update(50, 500, 0, Uuid::nil())).is_none(), "owner unknown");
+        assert!(!list.contains(&OWNER) && !list.contains(&by));
+        let restore = list.remove(&[by]);
+        assert_eq!(restore.updates.len(), 2);
+        assert_eq!(list.hidden_count(), 0);
+        assert!(list.filter(1, &update(10, 100, 0, OWNER)).is_none(), "the rule is gone");
+    }
+
+    #[test]
+    fn hide_owner_rule_spares_and_learns() {
+        let mut list = ruled();
+        list.owner_rule
+            .set_spared([ObjKey { region: 1, local_id: 10 }].into_iter().collect());
+        assert!(list.filter(1, &update(10, 100, 0, OWNER)).is_none(), "sat on or selected");
+        list.owner_rule.learn(1, Uuid::from_u128(600), OWNER);
+        assert!(list.filter(1, &update(60, 600, 0, Uuid::nil())).is_some(), "the region told us");
+        assert!(list.filter(2, &update(61, 600, 0, Uuid::nil())).is_none(), "per region");
+    }
+
+    #[test]
+    fn hide_owner_rule_gives_back_the_seat() {
+        let mut list = ruled();
+        list.filter(1, &update(10, 100, 0, OWNER));
+        list.filter(1, &update(11, 101, 10, Uuid::nil()));
+        list.filter(1, &update(20, 200, 0, OWNER));
+        let restore = list.release_owner_root(&ObjKey { region: 1, local_id: 10 });
+        assert_eq!(restore.updates.len(), 2, "the seat and its prim");
+        assert_eq!(list.hidden_count(), 1, "the other object stays out");
+        assert!(list.release_owner_root(&ObjKey { region: 1, local_id: 99 }).updates.is_empty());
+    }
+
+    #[test]
+    fn hide_owner_rule_is_saved_as_its_own_kind_beside_the_owner_sounds() {
+        let dir = std::env::temp_dir().join(format!("aurora-owner-rule-{}", Uuid::new_v4()));
+        let path = dir.join(FILE);
+        let mut list = Derender::load(path.clone());
+        list.add_sound(
+            OWNER,
+            Entry {
+                kind: Kind::Sound(1),
+                ..rule(true)
+            },
+        );
+        list.add(rule_key(OWNER), rule(true));
+        assert!(crate::saves::wait_for(&path, std::time::Duration::from_secs(10)));
+        let saved = aurora_llsd::from_xml(&std::fs::read(&path).expect("saved")).expect("llsd");
+        assert_eq!(saved.get(&mask(rule_key(OWNER)).to_string()).get("asset_type").as_i32(), AT_OWNER);
+        let mut list = Derender::load(path);
+        assert!(list.has_owner_rule(&OWNER) && list.any_owner_rule());
+        assert_eq!(list.owner_sound_flags(OWNER), 1, "the sound entry is untouched");
+        assert!(!list.contains(&OWNER), "the resident is not derendered");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// What the tests of `friends_only.rs` share with these.'''
+
+# --------------------------------------------------- the blacklist window
+
+[[patch]]
+id = "hide-owner-objects-blacklist-kind"
+why = "the window names the new kind"
+paths = ["crates/aurora-viewer/src/ui/blacklist.rs"]
+op = "literal"
+find = '''Kind::Animation => aurora_i18n::tr!("inventory-kind-animation"),'''
+replace = '''Kind::Animation => aurora_i18n::tr!("inventory-kind-animation"),
+        Kind::Owner => aurora_i18n::tr!("blacklist-kind-owner"), // aurora-local-patch: hide-owner-objects-blacklist-kind'''
+
+[[patch]]
+id = "hide-owner-objects-blacklist-name"
+why = "a rule made before the owner's name came says so"
+paths = ["crates/aurora-viewer/src/ui/blacklist.rs"]
+op = "literal"
+find = '''fn name_of(e: &Entry) -> &str {
+    if e.name.is_empty() {'''
+replace = '''fn name_of(e: &Entry) -> &str {
+    // aurora-local-patch: hide-owner-objects-blacklist-name
+    if e.name.is_empty() && e.kind == Kind::Owner {
+        aurora_i18n::tr!("blacklist-unknown-owner")
+    } else if e.name.is_empty() {'''
+
+[[patch]]
+id = "hide-owner-objects-blacklist-shown"
+why = "an owner rule's id is a resident's or a group's, written like a resident's"
+paths = ["crates/aurora-viewer/src/ui/blacklist.rs"]
+op = "literal"
+find = "Kind::Object | Kind::Resident | Kind::Sound(_) => true,"
+replace = "Kind::Object | Kind::Resident | Kind::Sound(_) | Kind::Owner => true, // aurora-local-patch: hide-owner-objects-blacklist-shown"
+
+[[patch]]
+id = "hide-owner-objects-blacklist-uuid"
+why = "the row writes (and the filter finds) the owner's id, not the rule's masked key"
+paths = ["crates/aurora-viewer/src/ui/blacklist.rs"]
+op = "literal"
+find = '''if id_shown(e, id, ids) { id.id.to_string() } else { String::new() }'''
+replace = '''// aurora-local-patch: hide-owner-objects-blacklist-uuid
+    if e.kind == Kind::Owner {
+        return crate::world::hide_owner::owner_of_key(id.id).to_string();
+    }
+    if id_shown(e, id, ids) { id.id.to_string() } else { String::new() }'''
+
+[[patch]]
+id = "hide-owner-objects-removed-log"
+why = "a log line when rules are removed in the window (no ids)"
+paths = ["crates/aurora-viewer/src/app/derender.rs"]
+op = "literal"
+find = '''Some(ui::blacklist::BlacklistAction::Remove(rows)) => self.world.remove_blacklist_rows(&rows),'''
+replace = '''Some(ui::blacklist::BlacklistAction::Remove(rows)) => {
+                self.hide_owner_rows_removed(&rows); // aurora-local-patch: hide-owner-objects-removed-log
+                self.world.remove_blacklist_rows(&rows)
+            }'''
+
+# ------------------------------------------------------- the app's wiring
+
+[[patch]]
+id = "hide-owner-objects-tick"
+why = "per frame, beside the derender requests; returns at once without a rule"
+paths = ["crates/aurora-viewer/src/app/derender.rs"]
+op = "literal"
+find = "pub(super) fn send_derender_requests(&mut self) {"
+replace = '''pub(super) fn send_derender_requests(&mut self) {
+        self.hide_owner_tick(); // aurora-local-patch: hide-owner-objects-tick'''
+
+[[patch]]
+id = "hide-owner-objects-properties"
+why = "the owners the region answers (ours and everyone's) are kept for the visit"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.scene.particles.on_properties(&props);"
+replace = '''self.scene.particles.on_properties(&props);
+                self.hide_owner_properties(&props); // aurora-local-patch: hide-owner-objects-properties'''
+
+# --------------------------------------------------------------- the menu
+
+[[patch]]
+id = "hide-owner-objects-action"
+why = "the menu's action"
+paths = ["crates/aurora-viewer/src/ui/context.rs"]
+op = "literal"
+find = '''/// Block the resident or group owning a remote object, never toggle it.
+    BlockObjectOwner {
+        owner: Uuid,
+        group_owned: bool,
+    },'''
+replace = '''/// Block the resident or group owning a remote object, never toggle it.
+    BlockObjectOwner {
+        owner: Uuid,
+        group_owned: bool,
+    },
+    /// Hide every rezzed object of this owner (world/hide_owner.rs).
+    // aurora-local-patch: hide-owner-objects-action
+    HideOwnerObjects {
+        owner: Uuid,
+        group_owned: bool,
+    },'''
+
+[[patch]]
+id = "hide-owner-objects-facts"
+why = "the menu's object knows its owner once its properties came"
+paths = ["crates/aurora-viewer/src/ui/context.rs"]
+op = "literal"
+find = '''/// The skeleton of an animated object (LLAvatarEnableResetSkeleton).
+    pub animesh: Option<Uuid>,
+}'''
+replace = '''/// The skeleton of an animated object (LLAvatarEnableResetSkeleton).
+    pub animesh: Option<Uuid>,
+    /// "Hide all objects of this owner": (owner, group owned, name; empty
+    /// while not known). None for our own objects, before the properties.
+    // aurora-local-patch: hide-owner-objects-facts
+    pub hide_owner: Option<(Uuid, bool, String)>,
+}'''
+
+[[patch]]
+id = "hide-owner-objects-customize"
+why = "the action's name for the menu customization"
+paths = ["crates/aurora-viewer/src/ui/context/customize.rs"]
+op = "literal"
+find = '''CtxAction::BlockObjectOwner { .. } => "BlockObjectOwner",'''
+replace = '''CtxAction::BlockObjectOwner { .. } => "BlockObjectOwner",
+        CtxAction::HideOwnerObjects { .. } => "HideOwnerObjects", // aurora-local-patch: hide-owner-objects-customize'''
+
+[[patch]]
+id = "hide-owner-objects-menu"
+why = "the entry, after the derender entries of the object menu"
+paths = ["crates/aurora-viewer/src/ui/context/entries.rs"]
+op = "literal"
+find = '''derender_items(ui, id, aurora_i18n::tr!("ui-context-derender"), true);
+        particles_submenu(ui, f);'''
+replace = '''derender_items(ui, id, aurora_i18n::tr!("ui-context-derender"), true);
+        // aurora-local-patch: hide-owner-objects-menu
+        // An Aurora entry (the Legacy Viewer has no owner rule): every
+        // rezzed object of this owner, or of the group of a deeded object,
+        // listed in the asset blacklist, where it is undone.
+        if let Some((owner, group_owned, name)) = &o.hide_owner {
+            let label = match (*group_owned, name.is_empty()) {
+                (false, false) => aurora_i18n::tr!("ui-context-hide-owner-objects", name = name.as_str()),
+                (false, true) => aurora_i18n::tr!("ui-context-hide-owner-objects-unknown").to_owned(),
+                (true, false) => aurora_i18n::tr!("ui-context-hide-group-objects", name = name.as_str()),
+                (true, true) => aurora_i18n::tr!("ui-context-hide-group-objects-unknown").to_owned(),
+            };
+            ui.item(
+                "user-x",
+                &label,
+                CtxAction::HideOwnerObjects {
+                    owner: *owner,
+                    group_owned: *group_owned,
+                },
+            );
+        }
+        particles_submenu(ui, f);'''
+
+[[patch]]
+id = "hide-owner-objects-menu-facts"
+why = "the entry's owner, from the properties the menu asked for"
+paths = ["crates/aurora-viewer/src/app/context_menu.rs"]
+op = "literal"
+find = "f.name = props.map(|p| p.name.clone()).unwrap_or_default();"
+replace = '''f.name = props.map(|p| p.name.clone()).unwrap_or_default();
+        f.hide_owner = self.hide_owner_menu_facts(props); // aurora-local-patch: hide-owner-objects-menu-facts'''
+
+[[patch]]
+id = "hide-owner-objects-menu-action"
+why = "the entry makes the rule"
+paths = ["crates/aurora-viewer/src/app/context_menu.rs"]
+op = "literal"
+find = '''CtxAction::BlockObjectOwner { owner, group_owned } => {
+                if let Err(error) = self.world.block_object_owner(owner, group_owned) {
+                    self.world.system_message(error);
+                }
+            }'''
+replace = '''CtxAction::BlockObjectOwner { owner, group_owned } => {
+                if let Err(error) = self.world.block_object_owner(owner, group_owned) {
+                    self.world.system_message(error);
+                }
+            }
+            // aurora-local-patch: hide-owner-objects-menu-action
+            CtxAction::HideOwnerObjects { owner, group_owned } => self.hide_owner_objects(owner, group_owned),'''
+
+# ------------------------------------------------ fix 1: an object's particles
+
+[[patch]]
+id = "hide-owner-objects-object-particles"
+why = "blocking an object also stops its own particles (stricter than the Legacy Viewer, which checks the owner only)"
+paths = ["crates/aurora-viewer/src/world/blocking.rs"]
+op = "literal"
+find = '''pub fn particles_blocked(&self, owner: &Uuid) -> bool {
+        !owner.is_nil() && self.mutes.is_muted(owner, "", flag::PARTICLES)
+    }'''
+replace = '''pub fn particles_blocked(&self, owner: &Uuid) -> bool {
+        !owner.is_nil() && self.mutes.is_muted(owner, "", flag::PARTICLES)
+    }
+
+    // aurora-local-patch: hide-owner-objects-object-particles
+    /// Particles of a blocked object: the emitting prim or its linkset's
+    /// root is on the block list. Stricter than the Legacy Viewer, whose
+    /// particle check (LLViewerPartSourceScript) reads the owner only.
+    pub fn object_particles_blocked(&self, emitter: &Uuid, root: &Uuid) -> bool {
+        [emitter, root]
+            .into_iter()
+            .any(|id| !id.is_nil() && self.mutes.is_muted(id, "", flag::PARTICLES))
+    }'''
+
+[[patch]]
+id = "hide-owner-objects-object-particles-use"
+why = "the particle simulation asks for the emitter and its root too"
+paths = ["crates/aurora-viewer/src/scene/particles.rs"]
+op = "literal"
+find = "|| world.particles_blocked(&s.owner)"
+replace = '''|| world.particles_blocked(&s.owner)
+                || world.object_particles_blocked(&s.emitter, &s.object) // aurora-local-patch: hide-owner-objects-object-particles-use'''
+
+# ------------------------------------- fix 2: a group whose name is unknown
+
+[[patch]]
+id = "hide-owner-objects-group-unknown"
+why = "Block owner on a group-owned object whose group name is not known yet tells the user instead of doing nothing"
+paths = ["crates/aurora-viewer/src/world/blocking.rs"]
+op = "literal"
+find = '''pub fn block_object_owner(&mut self, owner: Uuid, group_owned: bool) -> Result<(), String> {
+        if let Some((name, kind)) = self.object_owner_block(owner, group_owned) {
+            self.block(owner, &name, kind)?;
+        }
+        Ok(())
+    }'''
+replace = '''pub fn block_object_owner(&mut self, owner: Uuid, group_owned: bool) -> Result<(), String> {
+        if let Some((name, kind)) = self.object_owner_block(owner, group_owned) {
+            self.block(owner, &name, kind)?;
+        } else if group_owned && !owner.is_nil() && owner != self.agent_id && !self.mutes.get(&owner).is_some_and(|entry| entry.flags == 0)
+        {
+            // aurora-local-patch: hide-owner-objects-group-unknown
+            // the block list needs the group's real name: say it was not
+            // done rather than nothing (a resident's name still loading
+            // stays silent, as upstream)
+            return Err(aurora_i18n::tr!("hide-owner-block-group-unknown").to_owned());
+        }
+        Ok(())
+    }'''
+
+[[patch]]
+id = "hide-owner-objects-group-unknown-test"
+why = "upstream's test called it for a group with no name known and expected Ok; it now gets the refusal, nothing blocked as before"
+paths = ["crates/aurora-viewer/src/world/blocking.rs"]
+op = "literal"
+find = '''w.block_object_owner(owner, group).unwrap();
+            assert!(w.mutes.get(&owner).is_none());'''
+replace = '''// aurora-local-patch: hide-owner-objects-group-unknown-test
+            // (an unknown group's name is now refused with a message)
+            assert_eq!(w.block_object_owner(owner, group).is_err(), group && owner == staff);
+            assert!(w.mutes.get(&owner).is_none());'''
+
+[[patch]]
+id = "hide-owner-objects-blocking-tests"
+why = "an object's particles; an unknown group refused, a known one blocked"
+paths = ["crates/aurora-viewer/src/world/blocking.rs"]
+op = "literal"
+find = '''#[test]
+    fn mute_particle_flag_remains_independent_of_other_mute_flags() {'''
+replace = '''// aurora-local-patch: hide-owner-objects-blocking-tests
+    #[test]
+    fn hide_owner_fix_a_blocked_object_s_particles_stop_and_an_unknown_group_is_refused() {
+        let mut w = World::new(Arc::new(AvatarLibrary::load()));
+        w.agent_id = Uuid::from_u128(99);
+        w.mutes.reset(w.agent_id);
+        let (prim, root, other) = (Uuid::from_u128(5), Uuid::from_u128(6), Uuid::from_u128(7));
+        assert!(!w.object_particles_blocked(&prim, &root));
+        w.block(root, "Fountain", MuteType::Object).expect("blocked");
+        assert!(w.object_particles_blocked(&prim, &root), "the linkset's root");
+        assert!(w.object_particles_blocked(&root, &Uuid::nil()), "the root itself");
+        assert!(!w.object_particles_blocked(&other, &other));
+        let group = Uuid::from_u128(8);
+        assert!(w.block_object_owner(group, true).is_err(), "no silent no-op");
+        assert!(w.mutes.get(&group).is_none());
+        w.land.group_names.insert(group, "Demo Group".into());
+        w.take_social_commands();
+        assert!(w.block_object_owner(group, true).is_ok());
+        assert!(w.mutes.get(&group).is_some());
+        // already blocked: nothing to say
+        assert!(w.block_object_owner(group, true).is_ok());
+        assert!(w.block_object_owner(w.agent_id, true).is_ok(), "ourselves: silent, as upstream");
+    }
+
+    #[test]
+    fn mute_particle_flag_remains_independent_of_other_mute_flags() {'''
+
+# ------------------------------------------------------------ the texts
+
+[[patch]]
+id = "hide-owner-objects-en"
+why = "the menu entry, the window's kind and the refusal, English"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "ui-context-derender-temporarily = Derender temporarily"
+replace = '''ui-context-derender-temporarily = Derender temporarily
+# // aurora-local-patch: hide-owner-objects-en
+ui-context-hide-owner-objects = Hide all objects of { $name }
+ui-context-hide-owner-objects-unknown = Hide all objects of this owner
+ui-context-hide-group-objects = Hide all objects of the group { $name }
+ui-context-hide-group-objects-unknown = Hide all objects of this object's group
+blacklist-kind-owner = Owner's objects
+blacklist-unknown-owner = Unknown owner
+hide-owner-block-group-unknown = The group's name is not known yet, so it was not blocked. Try again in a moment.'''
+
+[[patch]]
+id = "hide-owner-objects-fr"
+why = "the menu entry, the window's kind and the refusal, French"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "ui-context-derender-temporarily = Faire disparaître temporairement"
+replace = '''ui-context-derender-temporarily = Faire disparaître temporairement
+# // aurora-local-patch: hide-owner-objects-fr
+ui-context-hide-owner-objects = Masquer tous les objets de { $name }
+ui-context-hide-owner-objects-unknown = Masquer tous les objets de ce propriétaire
+ui-context-hide-group-objects = Masquer tous les objets du groupe { $name }
+ui-context-hide-group-objects-unknown = Masquer tous les objets du groupe de cet objet
+blacklist-kind-owner = Objets d’un propriétaire
+blacklist-unknown-owner = Propriétaire inconnu
+hide-owner-block-group-unknown = Le nom du groupe n’est pas encore connu : il n’a pas été bloqué. Réessayez dans un instant.'''
+
+[[patch]]
+id = "hide-owner-objects-ja"
+why = "the menu entry, the window's kind and the refusal, Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "ui-context-derender-temporarily = 一時的に描画しない"
+replace = '''ui-context-derender-temporarily = 一時的に描画しない
+# // aurora-local-patch: hide-owner-objects-ja
+ui-context-hide-owner-objects = { $name } のオブジェクトをすべて非表示
+ui-context-hide-owner-objects-unknown = この所有者のオブジェクトをすべて非表示
+ui-context-hide-group-objects = グループ「{ $name }」のオブジェクトをすべて非表示
+ui-context-hide-group-objects-unknown = このオブジェクトのグループのオブジェクトをすべて非表示
+blacklist-kind-owner = 所有者のオブジェクト
+blacklist-unknown-owner = 不明な所有者
+hide-owner-block-group-unknown = グループ名がまだわからないため、ブロックできませんでした。少し待ってからもう一度お試しください。'''

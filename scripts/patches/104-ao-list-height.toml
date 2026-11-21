@@ -1,0 +1,213 @@
+# The animation list of the AO window grows with the window.
+#
+# AO / Avatar Animations › Animations: upstream (ui/ao/editor.rs show) gives
+# the state rail and the details column at most 386 points of height
+# (`available_height().clamp(230.0, 386.0)`), and the animation list inside
+# the details (Editor::list_area) at most 216. A taller window only added
+# empty room under the controls, a wider one (fewer wrapped lines) too.
+#
+# Now the two columns take the window's whole height (230 at least, as
+# before: a smaller window still grows to it or scrolls). In the details
+# column the controls keep their natural size and the list takes the rest:
+# the details viewport less what everything but the list took at the frame
+# before (`rest`: the column's content height less the list's frame, kept as
+# a temp value of the egui context, one AO window), less the list frame's
+# margins (2 × 6) and one spare point, so the sum never calls for a scroll
+# bar. The list is exactly that tall, empty or full (`auto_shrink` off in
+# height, `min_scrolled_height` = `max_height`): its height then does not
+# feed back into what is measured, and the value settles at the next frame.
+# A change of `rest` (a resize rewrapping the controls, another state or
+# container, the swimming status line) asks for one repaint, so the list
+# does not stay a frame behind. Before the first measure the list has
+# upstream's 216. The floor is 120 (four rows of 28 and their spacing):
+# under it the details column scrolls, as upstream's does when the content
+# cannot fit. A width change works the same way: the controls rewrap, `rest`
+# changes, the list gets the height freed. No upper bound.
+#
+# One list per view: a state shows its main list (steps, then the parallel
+# tracks, in the same scroll area), a group or a track its members
+# (Editor::members). All go through list_area, so every view gets the whole
+# spare height and nothing has to be shared. The state rail follows the same
+# column height (its scroll area keeps `height - 24`).
+#
+# Not touched: the other fixed lists of ui/ao/ are not this list. The
+# combination dialog (combinations.rs, 150) and the migration dialog
+# (migration.rs, 180) are windows of their own; the design prototype's
+# movement section (prototype.rs, 210) shows only with the design workbench
+# open; the import warnings (ao.rs, 85) are a collapsed note above the set.
+# The AO window has one interface style (no `*_style` setting, no legacy
+# panel), so there is no second layout to follow. No setting, no text, the
+# controls do the same.
+#
+# Like the Legacy Viewer: in its resizable AO floater the animation list
+# follows all four edges and the controls under it the bottom one
+# (panel_ao.xml, scroll_list follows="all"), so the list alone grows.
+#
+# Tests: ui/ao/editor.rs list_height_tests (taller, wider, the floor, a
+# value that is not a number). Apply or skip the whole file, not one patch
+# of it.
+
+[[patch]]
+id = "ao-list-height-columns"
+why = "the rail and the details column take the window's whole height, 230 at least as before"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+fn = "show"
+find = "let height = ui.available_height().clamp(230.0, 386.0);"
+replace = '''// aurora-local-patch: ao-list-height-columns
+    // no upper bound: the room goes to the animation list (Editor::list_area)
+    let height = ui.available_height().max(230.0);'''
+
+[[patch]]
+id = "ao-list-height-share"
+why = "the list's height from the frame before's measure; the measure of what the rest of the details took"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+fn = "show"
+find = '''.show(ui, |ui| {
+                    if state.state.swimming() {
+                        super::swimming_status(ui, p, set, state.state);
+                    }
+                    let empty = StateConfig::default();
+                    let config = set.states.get(&state.state).unwrap_or(&empty);
+                    let mut editor = Editor {
+                        p,
+                        inv,
+                        set,
+                        runtime,
+                        state,
+                        out,
+                    };
+                    editor.details(ui, config);'''
+replace = '''.show(ui, |ui| {
+                    // aurora-local-patch: ao-list-height-share
+                    // The list takes the viewport less what the rest of the
+                    // details took at the frame before (measured below).
+                    let rest_id = egui::Id::unique("ao_list_rest");
+                    let viewport = ui.available_height();
+                    let list_height = ui
+                        .ctx()
+                        .data(|d| d.get_temp::<f32>(rest_id))
+                        .map_or(LIST_FIRST, |rest| list_room(viewport, rest));
+                    if state.state.swimming() {
+                        super::swimming_status(ui, p, set, state.state);
+                    }
+                    let empty = StateConfig::default();
+                    let config = set.states.get(&state.state).unwrap_or(&empty);
+                    let mut editor = Editor {
+                        p,
+                        inv,
+                        set,
+                        runtime,
+                        state,
+                        out,
+                        list_height,
+                        list_frame: 0.0,
+                    };
+                    editor.details(ui, config);
+                    if editor.list_frame > 0.0 {
+                        // The list is exactly as tall as asked, so this does
+                        // not depend on it; a change (controls rewrapped,
+                        // another state) settles with one more frame.
+                        let rest = ui.min_rect().height() - editor.list_frame;
+                        let changed = ui.ctx().data_mut(|d| {
+                            let old = d.get_temp::<f32>(rest_id);
+                            d.insert_temp(rest_id, rest);
+                            old.is_none_or(|old| (old - rest).abs() > 0.5)
+                        });
+                        if changed {
+                            ui.ctx().request_repaint();
+                        }
+                    }'''
+
+[[patch]]
+id = "ao-list-height-room"
+why = "the list's height from the viewport and the rest, its floor and its first value (pure, tested)"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+find = "fn select_state(state: &mut AoUi, item: State) {"
+replace = '''// aurora-local-patch: ao-list-height-room
+/// The animation list's least height (four rows), and its height before the
+/// first measure of the details (upstream's fixed one).
+const LIST_FLOOR: f32 = 120.0;
+const LIST_FIRST: f32 = 216.0;
+
+/// The list's height: the details viewport less what the rest of the details
+/// took and the list frame's margins (2 × 6), one point spare so the column
+/// never needs a scroll bar for a rounding; never below the floor.
+fn list_room(viewport: f32, rest: f32) -> f32 {
+    let room = (viewport - rest - 12.0 - 1.0).floor();
+    if room.is_finite() { room.max(LIST_FLOOR) } else { LIST_FIRST }
+}
+
+fn select_state(state: &mut AoUi, item: State) {'''
+
+[[patch]]
+id = "ao-list-height-fields"
+why = "the list's height for this frame, and its frame's height as drawn for the measure"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+find = '''state: &'a mut AoUi,
+    out: &'a mut Vec<Action>,
+}'''
+replace = '''state: &'a mut AoUi,
+    out: &'a mut Vec<Action>,
+    // aurora-local-patch: ao-list-height-fields
+    /// The animation list's height this frame (`list_room`), and the height
+    /// of its frame as list_area drew it (0 until it is drawn).
+    list_height: f32,
+    list_frame: f32,
+}'''
+
+[[patch]]
+id = "ao-list-height-list"
+why = "the list exactly as tall as the room left, instead of at most 216"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+fn = "list_area"
+find = '''.max_height(216.0)
+                    .show(ui, |ui| body(self, ui));
+            })
+            .response;'''
+replace = '''// aurora-local-patch: ao-list-height-list
+                    // as tall empty as full, so that the rest is measured apart
+                    .min_scrolled_height(self.list_height)
+                    .max_height(self.list_height)
+                    .auto_shrink([true, false])
+                    .show(ui, |ui| body(self, ui));
+            })
+            .response;
+        self.list_frame = response.rect.height();'''
+
+[[patch]]
+id = "ao-list-height-test"
+why = "taller and wider windows give the list more, the floor, a value that is not a number (last in the file, for clippy's items_after_test_module)"
+paths = ["crates/aurora-viewer/src/ui/ao/editor.rs"]
+op = "literal"
+find = '''push(self.out, self.state, change);
+            }
+        });
+    }
+}'''
+replace = '''push(self.out, self.state, change);
+            }
+        });
+    }
+}
+
+// aurora-local-patch: ao-list-height-test
+#[cfg(test)]
+mod list_height_tests {
+    use super::{LIST_FIRST, LIST_FLOOR, list_room};
+
+    #[test]
+    fn the_list_takes_the_room_the_controls_leave_down_to_its_floor() {
+        assert_eq!(list_room(600.0, 200.0), 387.0);
+        assert_eq!(list_room(800.0, 200.0), 587.0, "a taller window, a longer list");
+        assert_eq!(list_room(600.0, 150.0), 437.0, "fewer wrapped lines, a longer list");
+        assert_eq!(list_room(600.5, 200.0), 387.0, "whole points");
+        assert_eq!(list_room(300.0, 250.0), LIST_FLOOR, "a small window scrolls the column");
+        assert_eq!(list_room(f32::INFINITY, 200.0), LIST_FIRST);
+        assert_eq!(list_room(600.0, f32::NAN), LIST_FIRST);
+    }
+}'''

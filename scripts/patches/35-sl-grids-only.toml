@@ -1,0 +1,465 @@
+# The viewer logs in to the two Second Life grids only: Agni (SL_MAIN_GRID)
+# and Aditi (SL_BETA_GRID). The owner uses no other grid, so no login, and no
+# password hash or 2FA code with it, may ever go to another server.
+#
+# Layers, strongest first:
+# - aurora-net's login() refuses any other login server, for the first request
+#   and for every "indeterminate" hop or stopped 307/308 the server asks for;
+#   the login client follows no HTTP redirect away from those servers (a
+#   307/308 resends the body). Every real login goes through it; demo mode
+#   never does (start_login returns before building a request).
+#   Since upstream #3262 (5d67ef55) login() itself asks the user before going
+#   on to another server; that question can still show for a hop away from
+#   Second Life, and agreeing only leads to this patch's refusal: nothing is
+#   sent to the other server either way.
+# - a saved other grid becomes Second Life when the settings load, and
+#   --grid / --loginuri with another grid are ignored (with --login dropped).
+# - the interface offers only the two grids: the grid menu of the login form
+#   and the account cards lists no saved grid and no grid manager, and the
+#   Preferences button of the grid manager is greyed out.
+#
+# What is deliberately not patched (the login refusal covers it, and hiding
+# it would need many anchors in UI code that changes often): the custom login
+# URI fields still show for an account card or a form already on another grid
+# (the login is refused), and the grid manager itself. Hypergrid travel needs
+# a session on a custom grid (grids::resolve answers CrossGrid otherwise), so
+# it cannot start once logins are limited to Second Life.
+#
+# Tests: sl-grids-only-test (the rule, redirects, a refused login reaches no
+# listener) and sl-grids-only-settings-test; upstream's four login tests
+# against a local test server (next server, web page, HTTP error, same
+# server) are rewritten to assert the refusal and that the server received
+# no request (sl-grids-only-test-*).
+#
+# Pairs: the *-test ids go with the behaviour they check. Skip a behaviour
+# patch and its test patch together, or the test fails to build or fails.
+
+[[patch]]
+id = "sl-grids-only-rule"
+why = "Which login addresses are Second Life's: https, no user info, and the host and port of SL_MAIN_GRID or SL_BETA_GRID once login_authority normalised them (case, final dot, default port). The constants stay the only place the hosts are written. Also the login client's redirect rule."
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "regex"
+pattern = '^pub const SL_BETA_GRID: &str = "[^"\n]*";$'
+replace = '''\g<0>
+
+// aurora-local-patch: sl-grids-only-rule
+/// The Second Life grid (`SL_MAIN_GRID` or `SL_BETA_GRID`) whose login
+/// server `uri` is, None for any other server. Over https only and without
+/// user info; the host and port are compared as `login_authority` gives
+/// them, the path does not matter. This viewer logs in to these two only.
+pub fn second_life_grid(uri: &str) -> Option<&'static str> {
+    let url = reqwest::Url::parse(uri.trim()).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let authority = login_authority(uri)?;
+    [SL_MAIN_GRID, SL_BETA_GRID]
+        .into_iter()
+        .find(|grid| login_authority(grid).as_deref() == Some(authority.as_str()))
+}
+
+/// One of the two Second Life login servers.
+pub fn is_second_life_login(uri: &str) -> bool {
+    second_life_grid(uri).is_some()
+}
+
+/// A redirect chain that started at a Second Life login server may only go
+/// to one of them: a 307 or 308 would send the login body, password hash
+/// included, to the new address. `redirect_policy` (upstream's, used by the
+/// login request only) refuses the others before its own rule
+/// (sl-grids-only-redirects).
+fn login_redirect_allowed(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
+    !previous.first().is_some_and(|first| is_second_life_login(first.as_str())) || is_second_life_login(next.as_str())
+}'''
+
+[[patch]]
+id = "sl-grids-only-login"
+why = "The choke point: every real login (button, account card, command line, reconnect, the retry of a refused login) goes through login(), which builds the request here, for the first server and for each 'indeterminate' next_url. Another server gets nothing: no request is built or sent, and the viewer shows the refusal on the login screen like any refused login."
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "literal"
+fn = "login"
+find = '''
+let body = xmlrpc::build_call(&method, &build_params(req, &uri));
+'''
+replace = '''
+// aurora-local-patch: sl-grids-only-login
+        if !is_second_life_login(&uri) {
+            log::warn!("login: the login server is not one of the Second Life grids, nothing sent");
+            return Err(LoginError::Refused {
+                reason: "grid".into(),
+                message: aurora_i18n::tr!("login-second-life-grids-only").into(),
+                message_id: String::new(),
+            });
+        }
+        let body = xmlrpc::build_call(&method, &build_params(req, &uri));'''
+
+[[patch]]
+id = "sl-grids-only-redirects"
+why = "Goes with sl-grids-only-rule: the login request's client (login_http, with upstream's redirect_policy since #3262; the other clients' redirects stay free) follows no HTTP redirect from a Second Life login server to another address, not even to the other Linden Lab hosts upstream's next_server follows on its own. The redirect is stopped and comes back to login(), where sl-grids-only-login refuses any next address that is not one of the two servers."
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "literal"
+fn = "redirect_policy"
+find = 'reqwest::redirect::Policy::custom(|attempt| {'
+replace = '''reqwest::redirect::Policy::custom(|attempt| {
+        // aurora-local-patch: sl-grids-only-redirects
+        if !login_redirect_allowed(attempt.previous(), attempt.url()) {
+            log::warn!("login: a redirect away from the Second Life login servers, not followed");
+            return attempt.stop();
+        }'''
+
+[[patch]]
+id = "sl-grids-only-text-en"
+why = "The refusal shown on the login screen when a login names another grid (English)."
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^cli-unknown-grid = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: sl-grids-only-text-en
+login-second-life-grids-only = This viewer logs in to the Second Life grids only (Second Life and Aditi).'''
+
+[[patch]]
+id = "sl-grids-only-text-fr"
+why = "Goes with sl-grids-only-text-en (French); the parity test wants every key in English, French and Japanese."
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^cli-unknown-grid = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: sl-grids-only-text-fr
+login-second-life-grids-only = Cette visionneuse se connecte uniquement aux grilles de Second Life (Second Life et Aditi).'''
+
+[[patch]]
+id = "sl-grids-only-text-ja"
+why = "Goes with sl-grids-only-text-en (Japanese); the parity test wants every key in English, French and Japanese."
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^cli-unknown-grid = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: sl-grids-only-text-ja
+login-second-life-grids-only = このビューアーはSecond Lifeのグリッド（Second LifeとAditi）にのみログインします。'''
+
+[[patch]]
+id = "sl-grids-only-settings"
+why = "A saved other grid (GridChoice::Custom) becomes Second Life when the settings load, Aditi when its address is Aditi's; it is written on the next normal save. The saved grid list and the typed address stay in the file, unused."
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "insert_fn_start"
+fn = "sanitized"
+impl = "Settings"
+expect_sig = 'fn sanitized\(mut self\) -> Settings'
+body = '''
+// only the two Second Life grids
+if self.grid == GridChoice::Custom {
+    self.grid = match crate::login_accounts::grid(&self.custom_login_uri) {
+        GridChoice::SecondLifeBeta => GridChoice::SecondLifeBeta,
+        _ => GridChoice::SecondLife,
+    };
+    log::warn!("settings: the saved login grid is not a Second Life grid, Second Life is used");
+}
+'''
+
+[[patch]]
+id = "sl-grids-only-cli"
+why = "--grid / --loginuri may only choose Agni or Aditi (by name or by their login address, normalised). Any other grid is ignored with a warning, and a --login given with it is dropped, so that a password meant for that grid is not sent to Second Life instead."
+paths = ["crates/aurora-viewer/src/**/external_links.rs"]
+op = "replace_fn_body"
+fn = "apply_grid"
+expect_sig = 'fn apply_grid\(settings: &mut Settings\)$'
+body = '''
+use crate::settings::GridChoice;
+// only the two Second Life grids
+let refused = |what: &str| {
+    log::warn!("command line: {what} is not a Second Life grid, ignored (and --login with it)");
+    drop(crate::cli::take_login());
+};
+match &crate::cli::get().grid {
+    Some(crate::cli::Grid::SecondLife) => settings.grid = GridChoice::SecondLife,
+    Some(crate::cli::Grid::SecondLifeBeta) => settings.grid = GridChoice::SecondLifeBeta,
+    Some(crate::cli::Grid::LoginUri(uri)) => match aurora_net::login::second_life_grid(uri) {
+        Some(login) => settings.grid = crate::login_accounts::grid(login),
+        None => refused("the login URI"),
+    },
+    Some(crate::cli::Grid::Named(_)) => refused("the --grid name"),
+    None => {}
+}
+'''
+
+[[patch]]
+id = "sl-grids-only-selector"
+why = "The grid menu of the login form and of the account cards offers Second Life and Aditi only: no saved grid, no 'Manage grids' entry. A form already on another grid still names it, and its login is refused."
+paths = ["crates/aurora-viewer/src/ui/**/grids.rs"]
+op = "literal"
+fn = "selector"
+find = '''
+for grid in catalogue {
+    ui.selectable_value(uri, grid.login.clone(), &grid.name);
+}
+if ui.button(aurora_i18n::tr!("grids-manage")).clicked() {
+    request_open(ui.ctx());
+}
+'''
+replace = '''// aurora-local-patch: sl-grids-only-selector (no saved grid, no grid manager)'''
+
+[[patch]]
+id = "sl-grids-only-preferences"
+why = "Preferences > Network: the button of the grid manager is greyed out (the manager adds and selects other grids). Left visible rather than removed, so the row's layout stays upstream's."
+paths = ["crates/aurora-viewer/src/ui/options/**/network.rs"]
+op = "literal"
+fn = "page"
+find = '''
+if ui.button(tr!("grids-manage")).clicked() {
+    crate::ui::grids::request_open(ui.ctx());
+}
+'''
+replace = '''
+// aurora-local-patch: sl-grids-only-preferences
+            if ui.add_enabled(false, egui::Button::new(tr!("grids-manage"))).clicked() {
+                crate::ui::grids::request_open(ui.ctx());
+            }'''
+
+[[patch]]
+id = "sl-grids-only-test"
+why = "Checks the choke point: the two login servers are recognised (case, final dot, default port), anything else is not (http, other port, user info, look-alikes, other hosts); a login to another server is refused before any byte leaves (a local listener receives no connection); redirects from a login server stay on the login servers."
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "regex"
+pattern = '^    #\[test\]\r?\n    fn username_split\(\) \{'
+replace = '''    // aurora-local-patch: sl-grids-only-test
+    #[test]
+    fn only_the_second_life_login_servers_get_a_login() {
+        for (uri, grid) in [
+            (SL_MAIN_GRID, SL_MAIN_GRID),
+            (SL_BETA_GRID, SL_BETA_GRID),
+            ("  HTTPS://LOGIN.AGNI.LINDENLAB.COM./cgi-bin/login.cgi ", SL_MAIN_GRID),
+            ("https://login.aditi.lindenlab.com:443/another/path", SL_BETA_GRID),
+        ] {
+            assert_eq!(second_life_grid(uri), Some(grid), "{uri}");
+            assert!(is_second_life_login(uri), "{uri}");
+        }
+        for uri in [
+            "http://login.agni.lindenlab.com/cgi-bin/login.cgi",
+            "https://login.agni.lindenlab.com:12043/cgi-bin/login.cgi",
+            "https://someone@login.agni.lindenlab.com/cgi-bin/login.cgi",
+            "https://login.agni.lindenlab.com.grid.example/cgi-bin/login.cgi",
+            "https://agni.lindenlab.com/cgi-bin/login.cgi",
+            "https://util.aditi.lindenlab.com/cgi-bin/login.cgi",
+            "https://grid.example:8002/",
+            "http://127.0.0.1:9000/",
+            "login.agni.lindenlab.com",
+            "",
+        ] {
+            assert_eq!(second_life_grid(uri), None, "{uri}");
+        }
+
+        let url = |u: &str| reqwest::Url::parse(u).unwrap();
+        let (main, beta, other) = (url(SL_MAIN_GRID), url(SL_BETA_GRID), url("https://grid.example/login"));
+        assert!(login_redirect_allowed(std::slice::from_ref(&main), &beta));
+        assert!(!login_redirect_allowed(std::slice::from_ref(&main), &other));
+        assert!(!login_redirect_allowed(&[main.clone(), beta.clone()], &other));
+        assert!(login_redirect_allowed(std::slice::from_ref(&other), &main));
+        assert!(login_redirect_allowed(&[other.clone(), url("https://elsewhere.example/")], &other));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let req = LoginRequest {
+            login_uri: format!("http://{}/", listener.local_addr().unwrap()),
+            username: "synthetic".into(),
+            password: "x".into(),
+            start: StartLocation::Last,
+            agree_to_tos: false,
+            read_critical: false,
+            mfa_token: "123456".into(),
+            mfa_hash: String::new(),
+            mac: String::new(),
+            id0: String::new(),
+            last_exec: LastExec::default(),
+            platform: Platform::default(),
+            accepted_next_servers: Vec::new(),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = reqwest::Client::builder().redirect(redirect_policy()).build().unwrap();
+        let err = rt.block_on(login(&client, &req)).unwrap_err();
+        assert!(matches!(&err, LoginError::Refused { reason, .. } if reason == "grid"), "{err}");
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "nothing may reach another server"
+        );
+    }
+
+    #[test]
+    fn username_split() {'''
+
+[[patch]]
+id = "sl-grids-only-settings-test"
+why = "Checks sl-grids-only-settings: a saved other grid loads as Second Life (Aditi when its address is Aditi's), the Second Life grids are kept, and the login address is always one of the two servers."
+paths = ["crates/aurora-viewer/src/**/external_links.rs"]
+op = "regex"
+pattern = '^mod tests \{\r?\n    use super::\*;\r?\n'
+replace = '''\g<0>
+    // aurora-local-patch: sl-grids-only-settings-test
+    #[test]
+    fn a_saved_grid_other_than_second_life_loads_as_second_life() {
+        use crate::settings::GridChoice;
+        use aurora_net::login::{SL_BETA_GRID, SL_MAIN_GRID};
+        for (grid, custom, expected) in [
+            (GridChoice::Custom, "http://grid.example:8002/", GridChoice::SecondLife),
+            (GridChoice::Custom, "", GridChoice::SecondLife),
+            (GridChoice::Custom, SL_MAIN_GRID, GridChoice::SecondLife),
+            (GridChoice::Custom, SL_BETA_GRID, GridChoice::SecondLifeBeta),
+            (GridChoice::SecondLife, "http://grid.example:8002/", GridChoice::SecondLife),
+            (GridChoice::SecondLifeBeta, "http://grid.example:8002/", GridChoice::SecondLifeBeta),
+        ] {
+            let settings = settings_on(grid.clone(), custom, &["http://grid.example:8002"]).sanitized();
+            assert_eq!(settings.grid, expected, "{grid:?} {custom}");
+            assert!(aurora_net::login::is_second_life_login(&settings.login_uri()), "{grid:?} {custom}");
+        }
+    }
+'''
+
+# Upstream's login tests that log in to a local test server: that server is
+# not one of the Second Life grids, so each now proves the block instead. The
+# login is refused (reason "grid") and the server never receives a request,
+# whatever the reply it was ready to give: another server's hop agreed to or
+# not, a web page, an HTTP error, a redirect on the same server.
+
+[[patch]]
+id = "sl-grids-only-test-next-server"
+why = "upstream's next-server test: a local test server, the other server it names and an agreed hop all get no request; the login is refused as a foreign grid"
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "replace_fn_body"
+fn = "another_server_gets_the_login_only_once_agreed"
+expect_sig = 'async fn another_server_gets_the_login_only_once_agreed\(\)'
+body = '''
+// (local patch set: a local test server is not a Second Life grid; the
+// login is refused before any request, agreed to or not)
+let http = reqwest::Client::builder()
+    .no_proxy()
+    .redirect(redirect_policy())
+    .build()
+    .expect("client");
+let (other, other_hits) = login_server(vec![("200 OK", String::new(), wrong_password())]).await;
+let next = answer(&[
+    ("login", "indeterminate"),
+    ("next_url", &other),
+    ("next_method", "login_to_simulator"),
+]);
+let (grid, grid_hits) = login_server(vec![("200 OK", String::new(), next)]).await;
+let (moved, moved_hits) = login_server(vec![("307 Temporary Redirect", format!("Location: {other}\r\n"), String::new())]).await;
+for (server, accepted) in [
+    (&grid, Vec::new()),
+    (&grid, vec![authority_of(&other)]),
+    (&other, vec![authority_of(&other)]),
+    (&moved, Vec::new()),
+] {
+    let refused = login(&http, &synthetic_request(server, &accepted)).await;
+    assert!(
+        matches!(&refused, Err(LoginError::Refused { reason, .. }) if reason == "grid"),
+        "{server}: {refused:?}"
+    );
+}
+for hits in [grid_hits, other_hits, moved_hits] {
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing may reach another server"
+    );
+}
+'''
+
+[[patch]]
+id = "sl-grids-only-test-web-page"
+why = "upstream's wrong-address test: whatever the local test server would answer (a page, another XML document, nothing, a fault), the login is refused as a foreign grid before any request"
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "replace_fn_body"
+fn = "a_web_page_instead_of_a_login_reply_is_told_as_a_wrong_address"
+expect_sig = 'async fn a_web_page_instead_of_a_login_reply_is_told_as_a_wrong_address\(\)'
+body = '''
+// (local patch set: a local test server is not a Second Life grid; the
+// login is refused before any request, whatever it would answer)
+let http = reqwest::Client::builder()
+    .no_proxy()
+    .redirect(redirect_policy())
+    .build()
+    .expect("client");
+let page = "<!DOCTYPE html><html><head><title>A grid</title></head><body><p>Welcome<br></body></html>";
+let not_a_reply = "<?xml version=\"1.0\"?><rss><channel/></rss>";
+let fault = "<?xml version=\"1.0\"?><methodResponse><fault><value><struct>\
+    <member><name>faultCode</name><value><int>4</int></value></member>\
+    <member><name>faultString</name><value><string>Too many parameters.</string></value></member>\
+    </struct></value></fault></methodResponse>";
+for body in [page, not_a_reply, "", fault] {
+    let (grid, hits) = login_server(vec![("200 OK", String::new(), body.to_owned())]).await;
+    let refused = login(&http, &synthetic_request(&grid, &[])).await;
+    assert!(
+        matches!(&refused, Err(LoginError::Refused { reason, .. }) if reason == "grid"),
+        "{body:?}: {refused:?}"
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing may reach another server"
+    );
+}
+'''
+
+[[patch]]
+id = "sl-grids-only-test-http-error"
+why = "upstream's HTTP-error test: the local test server would answer 500; the login is refused as a foreign grid before any request"
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "replace_fn_body"
+fn = "an_http_error_of_the_login_server_is_told_as_the_server_s_problem"
+expect_sig = 'async fn an_http_error_of_the_login_server_is_told_as_the_server_s_problem\(\)'
+body = '''
+// (local patch set: a local test server is not a Second Life grid; the
+// login is refused before any request)
+let http = reqwest::Client::builder()
+    .no_proxy()
+    .redirect(redirect_policy())
+    .build()
+    .expect("client");
+let (grid, hits) = login_server(vec![("500 Internal Server Error", String::new(), String::new())]).await;
+let refused = login(&http, &synthetic_request(&grid, &[])).await;
+assert!(
+    matches!(&refused, Err(LoginError::Refused { reason, .. }) if reason == "grid"),
+    "{refused:?}"
+);
+assert_eq!(
+    hits.load(std::sync::atomic::Ordering::SeqCst),
+    0,
+    "nothing may reach another server"
+);
+'''
+
+[[patch]]
+id = "sl-grids-only-test-same-server"
+why = "upstream's same-server test: the local test server's redirect and hop on itself are never reached; the login is refused as a foreign grid before any request"
+paths = ["crates/aurora-net/src/**/login.rs"]
+op = "replace_fn_body"
+fn = "the_same_server_is_followed_without_a_question"
+expect_sig = 'async fn the_same_server_is_followed_without_a_question\(\)'
+body = '''
+// (local patch set: a local test server is not a Second Life grid; the
+// login is refused before any request)
+let http = reqwest::Client::builder()
+    .no_proxy()
+    .redirect(redirect_policy())
+    .build()
+    .expect("client");
+let (grid, hits) = login_server(vec![
+    ("307 Temporary Redirect", "Location: /login2\r\n".into(), String::new()),
+    (
+        "200 OK",
+        String::new(),
+        answer(&[("login", "indeterminate"), ("next_url", "/login3")]),
+    ),
+    ("200 OK", String::new(), wrong_password()),
+])
+.await;
+let refused = login(&http, &synthetic_request(&grid, &[])).await;
+assert!(
+    matches!(&refused, Err(LoginError::Refused { reason, .. }) if reason == "grid"),
+    "{refused:?}"
+);
+assert_eq!(
+    hits.load(std::sync::atomic::Ordering::SeqCst),
+    0,
+    "nothing may reach another server"
+);
+'''

@@ -1,0 +1,649 @@
+# Scroll speed: the chat and IM lines slide up to a new message.
+#
+# Preferences › Chat › Conversations: a "Scroll speed" slider from 0 to 1 s
+# in 0.05 s steps, 0.3 s by default. Upstream (like the Legacy Viewer) moves
+# the lines of a conversation followed at its end up by a new message's
+# height in one frame; lines jumping make it hard to keep reading. Now they
+# slide there, eased out (emath::easing::cubic_out, as the notification
+# center's cards), over that time. At 0 s they jump as before: the slide is
+# then 0 everywhere and the drawing is upstream's.
+#
+# Where: ui/chat/view.rs View::show, which places the rows against the end
+# itself while it follows the end. A slide draws them `offset` lower than
+# that place, an offset that eases to 0 (ui/chat/slide.rs, pure). The rise
+# is what the new rows move the rows in sight by (all of their height once
+# the conversation fills the view; in a short one nothing for the classic
+# lines, which start at the top, all of it for the workspace, which stands
+# against the bottom). A message during a slide adds its height to what is
+# left and restarts the time from there: no jump, no step back, and the end
+# is reached within the Scroll speed of the latest message. At most one
+# viewport's height is left to slide (a burst of history does not scroll
+# past for a second). The scroll area itself still sticks to the end as
+# upstream does: the offset is only in the drawing.
+#
+# It covers the nearby chat, IMs and group chats, in the Conversations
+# window (Aurora workspace, Bubbles, Legacy lines) and in the conversations
+# opened in their own window, which all draw through conversation_lines and
+# its View. Not touched: the chat history window (its View never gets a
+# Scroll speed, and its pages do not grow live), the nearby chat lines above
+# the chat bar (ui/chat/console.rs, cards that fade, not a scroll area).
+#
+# Unchanged: a view scrolled back or paused by a menu (not at the end: no
+# slide; leaving the end during a slide, by the wheel or the scrollbar,
+# folds what was left into the view's own offset correction so the lines do
+# not jump either), the wheel and the scrollbar, and every jump asked for
+# (find and scroll_to, the button back to the latest messages and the
+# resume after a menu, another conversation, a window opened: a view not shown at the pass
+# before, a resize: no line came in). Reduced motion (egui animation_time 0,
+# theme::apply_motion) jumps. While a slide runs the frame is repainted.
+#
+# Stored as `chat_scroll_seconds`, bounded on load (settings::
+# chat_scroll_seconds: 0..=1, not a number gives 0.3). Demo:
+# AURORA_DEMO_CHAT_SCROLL=<seconds>[:burst] (docs/TESTING.md).
+#
+# Aurora's own design: the Legacy Viewer has no equivalent.
+#
+# Tests: ui/chat/slide.rs (0 s, the duration, monotonic, retarget, the
+# viewport bound, away from the end, leaving the end, reduced motion, the
+# rise), view.rs (a followed conversation in both layouts, 0 s identical to
+# the jump, reduced motion, one read higher up does not move), the setting's
+# bounds and round trip, the Options page list. Texts are in the English,
+# French and Japanese catalogues. Apply or skip the whole file, not one patch of it.
+
+# ---------------------------------------------------------------- settings
+
+[[patch]]
+id = "chat-scroll-setting"
+why = "the saved Scroll speed"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''pub conversations_own_windows: bool,'''
+replace = '''pub conversations_own_windows: bool,
+    /// How long the lines of a conversation followed at its end take to
+    /// slide up to a new message, in seconds (Preferences › Chat ›
+    /// Conversations › Scroll speed, 0.3; 0 jumps at once). Aurora's own.
+    pub chat_scroll_seconds: f32, // aurora-local-patch: chat-scroll-setting'''
+
+[[patch]]
+id = "chat-scroll-limit"
+why = "the default and the bound of Scroll speed, for the slider, the load and the view"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "pub(crate) fn foot_height_limit(value: f32) -> f32 {"
+replace = '''// aurora-local-patch: chat-scroll-limit
+/// Preferences › Chat › Scroll speed: its default and its longest, seconds.
+pub(crate) const DEFAULT_CHAT_SCROLL_SECONDS: f32 = 0.3;
+pub(crate) const MAX_CHAT_SCROLL_SECONDS: f32 = 1.0;
+
+/// Scroll speed, bounded: a saved or typed value outside the slider is
+/// brought back to it, one that is not a number gives the default.
+pub(crate) fn chat_scroll_seconds(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, MAX_CHAT_SCROLL_SECONDS)
+    } else {
+        DEFAULT_CHAT_SCROLL_SECONDS
+    }
+}
+
+pub(crate) fn foot_height_limit(value: f32) -> f32 {'''
+
+[[patch]]
+id = "chat-scroll-default"
+why = "0.3 s until the slider is moved"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''conversations_own_windows: false,
+            send_typing_state: true,'''
+replace = '''conversations_own_windows: false,
+            chat_scroll_seconds: DEFAULT_CHAT_SCROLL_SECONDS, // aurora-local-patch: chat-scroll-default
+            send_typing_state: true,'''
+
+[[patch]]
+id = "chat-scroll-sanitize"
+why = "bounded on load, not a number gives the default"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "self.chat_bubble_opacity = if self.chat_bubble_opacity.is_finite() {"
+replace = '''self.chat_scroll_seconds = chat_scroll_seconds(self.chat_scroll_seconds); // aurora-local-patch: chat-scroll-sanitize
+        self.chat_bubble_opacity = if self.chat_bubble_opacity.is_finite() {'''
+
+[[patch]]
+id = "chat-scroll-sanitize-test"
+why = "old settings get the default; a save keeps it; the load bounds it"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''#[test]
+    fn foot_height_settings_sanitize_limits_and_nonfinite_values() {'''
+replace = '''// aurora-local-patch: chat-scroll-sanitize-test
+    #[test]
+    fn chat_scroll_seconds_default_bound_on_load_and_kept_by_a_save() {
+        let old: Settings = serde_json::from_str(r#"{"chat_timestamps_im":true}"#).unwrap();
+        assert_eq!(old.chat_scroll_seconds, 0.3, "existing preferences get the default");
+        assert_eq!(Settings::default().chat_scroll_seconds, DEFAULT_CHAT_SCROLL_SECONDS);
+        for (value, expected) in [
+            (0.0, 0.0),
+            (0.05, 0.05),
+            (0.3, 0.3),
+            (0.75, 0.75),
+            (1.0, 1.0),
+            (1.5, 1.0),
+            (-0.2, 0.0),
+            (f32::NAN, 0.3),
+            (f32::INFINITY, 0.3),
+            (f32::NEG_INFINITY, 0.3),
+        ] {
+            let settings = Settings {
+                chat_scroll_seconds: value,
+                ..Settings::default()
+            };
+            if value.is_finite() {
+                let saved = serde_json::to_string(&settings).unwrap();
+                let restored: Settings = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored.sanitized().chat_scroll_seconds, expected, "{value} after a save");
+            }
+            assert_eq!(settings.sanitized().chat_scroll_seconds, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn foot_height_settings_sanitize_limits_and_nonfinite_values() {'''
+
+# -------------------------------------------------------------------- page
+
+[[patch]]
+id = "chat-scroll-row"
+why = "the slider, in the Conversations group, under Open conversations in their own window"
+paths = ["crates/aurora-viewer/src/ui/options/pages/chat.rs"]
+op = "literal"
+find = '''&field!(conversations_own_windows),
+                );'''
+replace = '''&field!(conversations_own_windows),
+                );
+                // aurora-local-patch: chat-scroll-row
+                // Aurora's own (the Legacy Viewer jumps at once): how long the
+                // lines followed at the end take to slide up to a new message
+                cx.row(
+                    tr!("ui-options-chat-scroll-speed"),
+                    tr!("ui-options-chat-scroll-speed-hint"),
+                    &field!(chat_scroll_seconds),
+                    |ui, s| {
+                        ui.spacing_mut().slider_width = super::super::SLIDER_W;
+                        ui.add(crate::ui::widgets::restricted_number(
+                            egui::Slider::new(&mut s.chat_scroll_seconds, 0.0..=crate::settings::MAX_CHAT_SCROLL_SECONDS)
+                                .suffix(" s")
+                                .custom_parser(aurora_i18n::parse_number)
+                                .step_by(0.05)
+                                .fixed_decimals(2)
+                                .trailing_fill(true),
+                            crate::ui::widgets::TextPolicy::Decimal,
+                        ))
+                        .changed()
+                    },
+                );'''
+
+[[patch]]
+id = "chat-scroll-options-list"
+why = "the setting is on a page (the Options tests' list of shown settings)"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = '''"show_contacts_tab",
+    "send_typing_state",'''
+replace = '''"show_contacts_tab",
+    "chat_scroll_seconds", // aurora-local-patch: chat-scroll-options-list
+    "send_typing_state",'''
+
+# -------------------------------------------------------------------- view
+
+[[patch]]
+id = "chat-scroll-slide"
+why = "the slide itself, pure, with its tests"
+paths = ["crates/aurora-viewer/src/ui/chat/slide.rs"]
+op = "add_file"
+source = "files/chat-scroll/slide.rs"
+
+[[patch]]
+id = "chat-scroll-mod"
+why = "goes with chat-scroll-slide: declare it beside the view"
+paths = ["crates/aurora-viewer/src/ui/chat.rs"]
+op = "literal"
+find = '''mod sidebar;'''
+replace = '''mod sidebar;
+mod slide; // aurora-local-patch: chat-scroll-mod'''
+
+[[patch]]
+id = "chat-scroll-field"
+why = "the Scroll speed, given every frame by the app like the other chat options"
+paths = ["crates/aurora-viewer/src/ui/chat.rs"]
+op = "literal"
+find = '''pub timestamps_im: bool,'''
+replace = '''pub timestamps_im: bool,
+    /// Preferences › Chat › Scroll speed, in seconds (0: the lines jump to
+    /// a new message), given every frame by the app.
+    pub scroll_seconds: f32, // aurora-local-patch: chat-scroll-field'''
+
+[[patch]]
+id = "chat-scroll-seconds"
+why = "every conversation's view gets it (nearby, IM, group; the window and their own windows)"
+paths = ["crates/aurora-viewer/src/ui/chat.rs"]
+op = "literal"
+fn = "conversation_lines"
+find = '''let view = st.views.entry(st.selected).or_default();'''
+replace = '''let view = st.views.entry(st.selected).or_default();
+    view.set_slide_seconds(st.scroll_seconds); // aurora-local-patch: chat-scroll-seconds'''
+
+[[patch]]
+id = "chat-scroll-app"
+why = "the setting reaches the chat every frame (the demo's for its run)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''self.chat_ui.timestamps_im = self.settings.chat_timestamps_im;'''
+replace = '''self.chat_ui.timestamps_im = self.settings.chat_timestamps_im;
+                // AURORA_DEMO_CHAT_SCROLL=<seconds>: for the run, nothing saved
+                // aurora-local-patch: chat-scroll-app
+                self.chat_ui.scroll_seconds = match crate::demo::chat_scroll_scenario().filter(|_| self.demo) {
+                    Some((seconds, _)) => seconds,
+                    None => self.settings.chat_scroll_seconds,
+                };'''
+
+[[patch]]
+id = "chat-scroll-view"
+why = "the view's slide, its Scroll speed and what it saw at its last show"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+find = '''/// Row to bring in sight at the next `show`.
+    scroll_to: Option<usize>,
+}'''
+replace = '''/// Row to bring in sight at the next `show`.
+    scroll_to: Option<usize>,
+    // aurora-local-patch: chat-scroll-view
+    /// Preferences › Chat › Scroll speed, in seconds (0, the default: the
+    /// rows jump to new lines, as the chat history's pages do).
+    slide_seconds: f32,
+    /// The rows sliding up to the lines that came in (`slide.rs`).
+    slide: super::slide::Slide,
+    /// At the last `show` (not a sizing pass): its pass, whether the rows
+    /// stood against the end, the lines' token and the number after the
+    /// last line.
+    slide_shown: Option<(u64, bool, u64, u64)>,
+}'''
+
+[[patch]]
+id = "chat-scroll-step"
+why = "goes with chat-scroll-view: the frame's slide, from what came in since the last show"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+find = '''pub fn scroll_to(&mut self, row: usize) {
+        self.scroll_to = Some(row);
+    }'''
+replace = '''pub fn scroll_to(&mut self, row: usize) {
+        self.scroll_to = Some(row);
+    }
+
+    // aurora-local-patch: chat-scroll-step
+    /// The Scroll speed of the next `show`, in seconds (bounded).
+    pub fn set_slide_seconds(&mut self, seconds: f32) {
+        self.slide_seconds = crate::settings::chat_scroll_seconds(seconds);
+    }
+
+    /// This frame's slide (`slide.rs`), the rows placed: how much lower than
+    /// the end they are drawn, and what is left of a slide the reader just
+    /// stopped by leaving the end.
+    fn slide_step(&mut self, ui: &egui::Ui, anchored: bool, first: u64, view_height: f32) -> super::slide::Step {
+        if ui.is_sizing_pass() {
+            // (a window's sizing pass scrolls an area of its own, unseen)
+            return super::slide::Step::default();
+        }
+        let pass = ui.ctx().cumulative_pass_nr();
+        let before = self.slide_shown.replace((pass, anchored, self.token, self.next));
+        let shown_before = before.is_some_and(|(p, ..)| p + 1 == pass);
+        let was_at_end = before.is_some_and(|(_, end, ..)| end);
+        // the rows after the last line of the last show: the lines that came
+        // in since (none when the conversation's lines were replaced)
+        let appended = match before {
+            Some((_, _, token, next)) if token == self.token && next < self.next => {
+                let from = self.rows.partition_point(|r| first + (r.line as u64) < next);
+                self.rows.get(from).map_or(0.0, |r| self.total - r.y)
+            }
+            _ => 0.0,
+        };
+        // reduced motion (`theme::apply_motion`): at once
+        let seconds = if ui.style().animation_time > 0.0 { self.slide_seconds } else { 0.0 };
+        let step = self.slide.step(super::slide::Frame {
+            now: ui.input(|i| i.time),
+            seconds,
+            shown_before,
+            at_end: anchored,
+            was_at_end,
+            arrived: super::slide::rise(self.total, appended, view_height, self.layout.workspace()),
+            limit: view_height,
+        });
+        if step.offset > 0.0 {
+            ui.ctx().request_repaint();
+        }
+        step
+    }'''
+
+[[patch]]
+id = "chat-scroll-measure"
+why = "goes with chat-scroll-view: the rows a slide draws above the viewport are measured before they are placed"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+fn = "show"
+find = '''while i > 0 && up < viewport.height() {'''
+replace = '''// aurora-local-patch: chat-scroll-measure
+            // (twice that while the rows may slide: a slide draws up to a
+            // viewport's height more of them)
+            let reach = if self.slide_seconds > 0.0 { 2.0 } else { 1.0 } * viewport.height();
+            while i > 0 && up < reach {'''
+
+[[patch]]
+id = "chat-scroll-show"
+why = "goes with chat-scroll-view: each show takes its slide once the rows are placed"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+fn = "show"
+find = '''let grown = height - self.shown_height;
+        self.shown_height = height;'''
+replace = '''let grown = height - self.shown_height;
+        self.shown_height = height;
+        // aurora-local-patch: chat-scroll-show
+        // Scroll speed: at the end the rows slide up to the lines that came
+        // in, drawn this much lower; leaving the end during a slide keeps
+        // them where they are (a row asked for jumps at once).
+        let slide = self.slide_step(ui, anchored, first, viewport.height());
+        let dropped = if target.is_none() { slide.dropped } else { 0.0 };'''
+
+[[patch]]
+id = "chat-scroll-dropped"
+why = "goes with chat-scroll-show: leaving the end mid-slide moves the offset, not the lines"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+fn = "show"
+find = '''.unwrap_or(shift_above);'''
+replace = '''.unwrap_or(shift_above - dropped); // aurora-local-patch: chat-scroll-dropped'''
+
+[[patch]]
+id = "chat-scroll-offset"
+why = "goes with chat-scroll-show: at the end the rows are drawn the slide's offset lower"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+fn = "show"
+find = '''(rect.top() + lift + viewport.top() - top, self.total - viewport.height())'''
+replace = '''// aurora-local-patch: chat-scroll-offset
+            (
+                rect.top() + lift + viewport.top() - top + slide.offset,
+                self.total - viewport.height() - slide.offset,
+            )'''
+
+[[patch]]
+id = "chat-scroll-view-tests"
+why = "a followed conversation slides in both layouts, 0 s and reduced motion jump, one read higher up stays"
+paths = ["crates/aurora-viewer/src/ui/chat/view.rs"]
+op = "literal"
+find = '''/// Away from the end, the view says how far it is and counts the lines
+    /// that came in since;'''
+replace = '''// aurora-local-patch: chat-scroll-view-tests
+    /// A conversation followed at its end (or scrolled to its top with
+    /// `back`) gets a line at frame 10, in frames of 1/60 s, at this Scroll
+    /// speed: where the top of `watched` (a line in sight) is drawn on each
+    /// frame, and the bottom of the newest line once settled.
+    fn slide_frames(seconds: f32, layout: Layout, back: bool, reduced: bool, watched: usize) -> (Vec<f32>, f32) {
+        let mut lines: VecDeque<ChatLine> = (0..40).map(|i| line("Jane", &format!("line {i}"), i * 600)).collect();
+        let mut clock = LineClock::default();
+        let mut view = View::default();
+        view.set_slide_seconds(seconds);
+        let mut frames = crate::ui::widgets::elide_tests::Frames::new();
+        if reduced {
+            frames.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+        }
+        let (mut tops, mut newest) = (Vec::new(), 0.0);
+        for n in 0..60 {
+            if n == 3 && back {
+                view.scroll_to(0);
+            }
+            if n == 10 {
+                lines.push_back(line("Bob", "new", 40 * 600));
+                clock.pushed_back();
+            }
+            let (mut top, mut bottom) = (None, None);
+            frames.run(Vec::new(), |ui| {
+                ui.set_max_width(400.0);
+                crate::ui::widgets::scroll_offset::show(ui, egui::ScrollArea::vertical(), "slide")
+                    .stick_to_bottom(true)
+                    .animated(false)
+                    .auto_shrink([false, false])
+                    .max_height(300.0)
+                    .min_scrolled_height(300.0)
+                    .show_viewport(ui, |ui, viewport| {
+                        let source = Source {
+                            lines: &lines,
+                            clock,
+                            filter: "",
+                            find: "",
+                            layout,
+                            first_unread: None,
+                            blocked: Default::default(),
+                        };
+                        view.sync(&source, 400.0);
+                        view.show(ui, viewport, clock.first, &mut |ui, row, painted| {
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.max_rect().width(), 20.0), egui::Sense::hover());
+                            if painted && row.line == watched {
+                                top = Some(rect.top());
+                            }
+                            if painted && row.line == 40 {
+                                bottom = Some(rect.bottom());
+                            }
+                        });
+                    });
+            });
+            // (not drawn: NaN)
+            tops.push(top.unwrap_or(f32::NAN));
+            if let Some(b) = bottom {
+                newest = b;
+            }
+        }
+        (tops, newest)
+    }
+
+    /// Scroll speed 0: the lines jump to the new one on its frame, as
+    /// before the setting; otherwise they slide there within it, never back.
+    #[test]
+    fn the_lines_slide_up_to_a_new_message_within_the_scroll_speed() {
+        for layout in [Layout::Classic, Layout::Aurora] {
+            let (jump, end) = slide_frames(0.0, layout, false, false, 35);
+            // the new row's height (its line and the gap under it)
+            let h = jump[9] - jump[10];
+            assert!(h > 15.0, "{layout:?}: at once {jump:?}");
+            assert!(jump[10..].iter().all(|&t| (t - jump[10]).abs() < 0.01), "{jump:?}");
+            let (slid, slid_end) = slide_frames(0.5, layout, false, false, 35);
+            assert_eq!(slid[..10], jump[..10], "{layout:?}: the same until a line comes in");
+            assert!(
+                (slid[10] - slid[9]).abs() < 0.5,
+                "{layout:?}: the arrival moves nothing at once {slid:?}"
+            );
+            for pair in slid[9..].windows(2) {
+                assert!(pair[1] <= pair[0] + 0.01, "{layout:?}: never back {slid:?}");
+            }
+            let midway = slid[10 + 8];
+            assert!(midway < slid[9] - 2.0 && midway > jump[10] + 1.0, "{layout:?}: on its way {slid:?}");
+            // there at the Scroll speed (30 frames), where the jump put them
+            assert!(
+                slid[10 + 31..].iter().all(|&t| (t - jump[10]).abs() < 0.01),
+                "{layout:?}: {slid:?} {jump:?}"
+            );
+            assert!((slid_end - end).abs() < 0.01, "{layout:?}: the newest line at the bottom");
+            // reduced motion: the jump
+            let (reduced, _) = slide_frames(0.5, layout, false, true, 35);
+            assert_eq!(reduced, jump, "{layout:?}");
+        }
+    }
+
+    /// Scrolled back to older lines, a new message moves nothing.
+    #[test]
+    fn a_new_message_does_not_move_a_conversation_read_higher_up() {
+        let (tops, _) = slide_frames(0.5, Layout::Aurora, true, false, 0);
+        assert!(tops[6].is_finite(), "{tops:?}");
+        assert!(tops[6..].iter().all(|&t| (t - tops[6]).abs() < 0.01), "{tops:?}");
+    }
+
+    /// Away from the end, the view says how far it is and counts the lines
+    /// that came in since;'''
+
+# -------------------------------------------------------------------- demo
+
+[[patch]]
+id = "chat-scroll-demo"
+why = "AURORA_DEMO_CHAT_SCROLL: the Scroll speed for the run and the friend's messages at known frames"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = '''/// AURORA_DEMO_CONV=aurora[:flag…]: the Conversations window in Aurora's
+/// workspace'''
+replace = '''// aurora-local-patch: chat-scroll-demo
+/// AURORA_DEMO_CHAT_SCROLL=<seconds>[:burst]: Preferences › Chat › Scroll
+/// speed for the run (nothing saved), the friend's conversation (the one
+/// `AURORA_DEMO_CONV=aurora` or `bubbles` shows) a few screens long and
+/// followed at its end, where the friend writes at frame 800 and then every
+/// 120 frames, six times; with `burst` each message comes with a second one
+/// 6 frames later, which retargets the slide on its way.
+pub fn chat_scroll_scenario() -> Option<(f32, bool)> {
+    let value = std::env::var("AURORA_DEMO_CHAT_SCROLL").ok()?;
+    let mut parts = value.trim().split(':');
+    let seconds = parts
+        .next()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(crate::settings::DEFAULT_CHAT_SCROLL_SECONDS);
+    let burst = parts.any(|p| p.trim() == "burst");
+    Some((crate::settings::chat_scroll_seconds(seconds), burst))
+}
+
+/// The Scroll speed scenario's messages, at their frames.
+pub fn chat_scroll_message(world: &mut crate::world::World, frame: u64) {
+    let Some((_, burst)) = chat_scroll_scenario() else {
+        return;
+    };
+    // once a frame, whatever the interface's passes
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    if LAST.swap(frame, std::sync::atomic::Ordering::Relaxed) == frame {
+        return;
+    }
+    let message = |n: i64| crate::world::ChatLine {
+        time: std::time::SystemTime::now(),
+        from: "Nova Example".into(),
+        text: aurora_i18n::tr!("demo-flash-message", n = n),
+        kind: crate::world::ChatKind::Im,
+        source: DEMO_FRIEND,
+        origin: crate::world::Origin::Live,
+        blocked: false,
+        beyond_range: false,
+        speaker: Default::default(),
+    };
+    let Some(after) = frame.checked_sub(800) else {
+        return;
+    };
+    let (k, phase) = (after / 120, after % 120);
+    if k >= 6 {
+        return;
+    }
+    if phase == 0 {
+        world.conversation_line(DEMO_FRIEND, message(2 * k as i64 + 1));
+    } else if burst && phase == 6 {
+        world.conversation_line(DEMO_FRIEND, message(2 * k as i64 + 2));
+    }
+}
+
+/// AURORA_DEMO_CONV=aurora[:flag…]: the Conversations window in Aurora's
+/// workspace'''
+
+[[patch]]
+id = "chat-scroll-demo-messages"
+why = "goes with chat-scroll-demo: the friend writes while we follow"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''crate::demo::conv_scroll_new(&mut self.world, self.chat_ui.demo_scrolled);'''
+replace = '''crate::demo::conv_scroll_new(&mut self.world, self.chat_ui.demo_scrolled);
+                    // AURORA_DEMO_CHAT_SCROLL: the friend writes while we follow
+                    crate::demo::chat_scroll_message(&mut self.world, self.frame_count); // aurora-local-patch: chat-scroll-demo-messages'''
+
+[[patch]]
+id = "chat-scroll-demo-lines"
+why = "goes with chat-scroll-demo: the long talk of the scroll scenario, without going to its top"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''crate::demo::conv_scroll_lines(&mut self.world);
+                self.chat_ui.demo_scroll = Some(crate::demo::DEMO_FRIEND);
+            }'''
+replace = '''crate::demo::conv_scroll_lines(&mut self.world);
+                self.chat_ui.demo_scroll = Some(crate::demo::DEMO_FRIEND);
+            } else if crate::demo::chat_scroll_scenario().is_some() {
+                // AURORA_DEMO_CHAT_SCROLL: the same long talk, followed at its end
+                crate::demo::conv_scroll_lines(&mut self.world); // aurora-local-patch: chat-scroll-demo-lines
+            }'''
+
+[[patch]]
+id = "chat-scroll-demo-doc"
+why = "goes with chat-scroll-demo: its line in the table of docs/TESTING.md"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''| `AURORA_DEMO_CONV_SCROLL=up\|new` | The friend's conversation, long, shown from its top: no button with `up`; `new` with three messages come in and the button back to the latest messages (with `AURORA_DEMO_CONV`) |'''
+replace = '''| `AURORA_DEMO_CONV_SCROLL=up\|new` | The friend's conversation, long, shown from its top: no button with `up`; `new` with three messages come in and the button back to the latest messages (with `AURORA_DEMO_CONV`) |
+| `AURORA_DEMO_CHAT_SCROLL=<seconds>[:burst]` | The friend's conversation, long, followed at its end while the friend writes: the lines slide up at this Scroll speed (with `AURORA_DEMO_CONV`; local patch set) <!-- // aurora-local-patch: chat-scroll-demo-doc --> |'''
+
+[[patch]]
+id = "chat-scroll-demo-details"
+why = "goes with chat-scroll-demo: its details paragraph in docs/TESTING.md"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''  Conversations > Show the button to the latest messages disabled (always absent).'''
+replace = '''  Conversations > Show the button to the latest messages disabled (always absent).
+
+<!-- // aurora-local-patch: chat-scroll-demo-details -->
+- **`AURORA_DEMO_CHAT_SCROLL=<seconds>[:burst]`** (local patch set):
+  Preferences › Chat › Conversations › Scroll speed is
+  `<seconds>` for the run (0 to 1, nothing saved; 0.3 if not a number).
+  With `AURORA_DEMO_CONV=aurora`, `aurora:compact`, `bubbles` or
+  `bubbles:legacy`, the friend's conversation gets the forty earlier
+  messages of `AURORA_DEMO_CONV_SCROLL` and stays at its end; the friend
+  writes at frame 800, then every 120 frames, six times. With `burst` each
+  message comes with a second one 6 frames later, while the first still
+  slides. At 0 the lines jump on the message's frame; otherwise they slide
+  up to it, eased out, and stand against the field after `<seconds>` (from
+  the latest message). Capture consecutive frames with
+  `AURORA_FPS_LIMIT=60` and `AURORA_CAPTURE_FRAMES=799,800,803,806,810,820`:
+  the lines at intermediate heights, whole, with the new message coming in
+  from under the bottom edge. Scroll up by hand: nothing moves when the
+  friend writes. "Reduce animations" makes them jump.'''
+
+# ------------------------------------------------------------------- texts
+
+[[patch]]
+id = "chat-scroll-ftl-en"
+why = "the row's label and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^(ui-options-conversations-own-windows-hint = [^\n]*\n)'
+replace = '''\1# // aurora-local-patch: chat-scroll-ftl-en
+ui-options-chat-scroll-speed = Scroll speed
+ui-options-chat-scroll-speed-hint = When a message arrives in a conversation you are following at its end, the lines slide up to it over this time instead of jumping, so you can keep reading. 0 s jumps at once. With "Reduce animations" on, the lines always jump. Default: 0.3 s.
+'''
+
+[[patch]]
+id = "chat-scroll-ftl-fr"
+why = "the row's label and help (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^(ui-options-conversations-own-windows-hint = [^\n]*\n)'
+replace = '''\1# // aurora-local-patch: chat-scroll-ftl-fr
+ui-options-chat-scroll-speed = Vitesse de défilement
+ui-options-chat-scroll-speed-hint = Quand un message arrive dans une conversation que vous suivez à sa fin, les lignes glissent jusqu’à lui en ce temps au lieu de sauter, pour que vous puissiez continuer à lire. 0 s saute aussitôt. Avec « Réduire les animations », les lignes sautent toujours. Par défaut : 0,3 s.
+'''
+
+[[patch]]
+id = "chat-scroll-ftl-ja"
+why = "the row's label and help (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^(ui-options-conversations-own-windows-hint = [^\n]*\n)'
+replace = '''\1# // aurora-local-patch: chat-scroll-ftl-ja
+ui-options-chat-scroll-speed = スクロール速度
+ui-options-chat-scroll-speed-hint = 最新の行を表示している会話にメッセージが届いたとき、行が一気に飛ぶのではなく、この時間をかけて滑らかに上へ移動するので、読み続けられます。０秒ですぐに移動します。「アニメーションを減らす」がオンのときは常にすぐに移動します。デフォルト：０．３秒。
+'''

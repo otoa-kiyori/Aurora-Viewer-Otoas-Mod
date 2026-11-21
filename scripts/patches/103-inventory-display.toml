@@ -1,0 +1,446 @@
+# Two display switches for the inventory window, both off by default,
+# saved with its other preferences (InventoryPreferences): in the window's
+# own preferences (the cog of both interface styles, controls.rs
+# preferences_for_tab, beside "Folder colors" and the tab switches) and in
+# Preferences › Inventory › Display. Display only: what the folder lists
+# show and how a folder's name is drawn. No right, asset id or message
+# changes.
+#
+# - "Hide empty system folders" (hide_empty_system_folders): the Legacy
+#   Viewer's DebugHideEmptySystemFolders. LLInventoryPanel::
+#   updateHideEmptySystemFolders (llinventorypanel.cpp, also read at
+#   LLInventoryPanel::initFromParams and LLPanelMainInventory's filter
+#   reset) sets FILTERTYPE_EMPTYFOLDERS; LLInventoryFilter::
+#   checkAgainstFilterType (llinventoryfilter.cpp) then refuses a folder
+#   whose type LLViewerFolderType::lookupIsHiddenIfEmpty marks (the "hide
+#   if empty" column of LLViewerFolderDictionary, llviewerfoldertype.cpp:
+#   Textures, Sounds, Calling Cards, Landmarks, Clothing, Objects,
+#   Notecards, Scripts, Body Parts, Photo Album, Lost And Found,
+#   Animations, Gestures, Favorites, My Outfits, Meshes, Received Items,
+#   Merchant Outbox, Marketplace Listings, Settings, Materials, My
+#   Suitcase...; never the root, the Trash, the Current Outfit, an outfit
+#   or an ordinary folder) while it has no direct descendant, folder or
+#   item. Two differences, both hiding less: a folder whose contents are
+#   not loaded yet stays (the Legacy Viewer counts it as empty), so that
+#   nothing disappears and comes back during the login fetch; and the
+#   inventory and Library roots always stay. A hidden folder shows again as
+#   soon as it holds something (the set is found again at each inventory
+#   change). The rule is display.rs (empty_system_folders, tested); the
+#   view keeps the set beside its children (ViewCache::prepare) and
+#   children_iter leaves it out, so every folder list built from it follows:
+#   the tree of the Legacy style and of Aurora's compact width, Aurora's
+#   explorer list (medium and wide widths) and its folder column, folder
+#   windows, Expand all. Not the search and filter results (their own tree,
+#   as upstream: a hidden folder never holds a match), nor the pickers
+#   (their own view, the switch never given to it).
+# - "Bold folders that hold worn items" (bold_worn_folders), a local
+#   addition (the Legacy Viewer bolds worn items alone, LLItemBridge::
+#   getLabelStyle): a folder is bold when a worn item, at any depth, is
+#   inside it. Facts::worn holds the originals of what is worn; links (the
+#   Current Outfit's, the saved outfits') are not the items worn and bold
+#   nothing. The inventory and Library roots are never bold: the inventory
+#   root holds everything worn, so its bold would say nothing. The folders are found by walking up from each worn item
+#   (display.rs worn_folders, tested), again only when the inventory
+#   generation or the worn set changed (ViewCache::follow_worn); with the
+#   switch off, nothing is computed. The name takes the worn item's bold
+#   of each style: the Legacy row's embolden and faux bold pass (as
+#   item_row), Aurora's semi-bold (as its selected and worn rows) in the
+#   tree, the explorer list, the folder column, the results, and the folder
+#   tiles of the gallery view and of the combination view (gallery.rs tile,
+#   in the ink of the other folder names; display.rs folder_tile_bold,
+#   tested).
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ---------------------------------------------------------------- the rule
+
+[[patch]]
+id = "inventory-display-module"
+why = "the two rules (empty system folders, folders holding a worn item) and their tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/ui/inventory/display.rs"]
+source = "files/inventory-display/display.rs"
+
+[[patch]]
+id = "inventory-display-mod"
+why = "declare the module, in rustfmt's order after delete"
+paths = ["crates/aurora-viewer/src/ui/inventory.rs"]
+op = "literal"
+find = '''mod delete;
+pub use delete::DeleteRequest;'''
+replace = '''mod delete;
+mod display; // aurora-local-patch: inventory-display-mod
+pub use delete::DeleteRequest;'''
+
+# --------------------------------------------------------- the preferences
+
+[[patch]]
+id = "inventory-display-prefs"
+why = "the two switches, saved with the inventory preferences (serde(default): older files read them as off)"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+find = '''pub folder_colors: std::collections::BTreeMap<Uuid, [u8; 3]>,
+}'''
+replace = '''pub folder_colors: std::collections::BTreeMap<Uuid, [u8; 3]>,
+    // aurora-local-patch: inventory-display-prefs
+    /// Local patch set: empty system folders are left out of the folder
+    /// lists (`display::empty_system_folders`, the Legacy Viewer's
+    /// DebugHideEmptySystemFolders). Off by default.
+    pub hide_empty_system_folders: bool,
+    /// Local patch set: a folder holding a worn item, at any depth, has a
+    /// bold name (`display::worn_folders`). Off by default.
+    pub bold_worn_folders: bool,
+}'''
+
+[[patch]]
+id = "inventory-display-prefs-default"
+why = "goes with inventory-display-prefs: both off, the window as upstream's"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+find = "folder_colors: Default::default(),"
+replace = '''folder_colors: Default::default(),
+            hide_empty_system_folders: false, // aurora-local-patch: inventory-display-prefs-default
+            bold_worn_folders: false,'''
+
+# ------------------------------------------------------------- the view
+
+[[patch]]
+id = "inventory-display-fields"
+why = "the view keeps the hidden folders and the folders holding a worn item, with what they were found for"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+find = '''holding: Option<IdSet>,
+}'''
+replace = '''holding: Option<IdSet>,
+    // aurora-local-patch: inventory-display-fields
+    /// Local patch set, "Hide empty system folders" (display.rs): the switch
+    /// as last given, and the folders `children_iter` leaves out.
+    hide_empty: bool,
+    hidden: IdSet,
+    /// Local patch set, "Bold folders that hold worn items": the folders
+    /// above a worn item, and the inventory and worn set they were found for.
+    worn_folders: IdSet,
+    worn_key: Option<(Uuid, u64)>,
+    worn_seen: HashSet<Uuid>,
+}'''
+
+[[patch]]
+id = "inventory-display-hidden"
+why = "the empty system folders found again at each rebuild of the view (each inventory change), from the children just listed"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+find = '''self.version = Some(version);
+        self.built = self.built.wrapping_add(1);'''
+replace = '''// aurora-local-patch: inventory-display-hidden
+        // "Hide empty system folders" (local patch set): from the children
+        // just listed, once per rebuild; nothing to do with the switch off.
+        self.hidden = if self.hide_empty {
+            super::display::empty_system_folders(inv, |id| self.children.get(&id).map_or(0, Vec::len))
+        } else {
+            IdSet::default()
+        };
+        self.version = Some(version);
+        self.built = self.built.wrapping_add(1);'''
+
+[[patch]]
+id = "inventory-display-children"
+why = "every folder list built from the view (trees, explorer, folder column, Expand all) leaves the hidden folders out"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+fn = "children_iter"
+find = ".filter(move |id| show_library || **id != lib_root)"
+replace = '''.filter(move |id| show_library || **id != lib_root)
+            // aurora-local-patch: inventory-display-children
+            .filter(move |id| !self.hidden.contains(*id))'''
+
+[[patch]]
+id = "inventory-display-methods"
+why = "the switch given to the view (a change rebuilds it), the worn folders found again only on a change, and the row's question"
+paths = ["crates/aurora-viewer/src/ui/inventory/view.rs"]
+op = "literal"
+find = '''pub fn built(&self) -> u64 {
+        self.built
+    }'''
+replace = '''pub fn built(&self) -> u64 {
+        self.built
+    }
+
+    // aurora-local-patch: inventory-display-methods
+    /// "Hide empty system folders" (local patch set) for the folder lists
+    /// to come: a change rebuilds the view at its next `prepare`.
+    pub(super) fn hide_empty_system_folders(&mut self, on: bool) {
+        if self.hide_empty != on {
+            self.hide_empty = on;
+            self.version = None;
+        }
+    }
+
+    /// "Bold folders that hold worn items" (local patch set): the folders
+    /// above a worn item, found again only when the inventory or the worn
+    /// set changed; with the switch off, nothing is kept or computed.
+    pub(super) fn follow_worn(&mut self, inv: &Inventory, worn: &HashSet<Uuid>, on: bool) {
+        if !on {
+            if self.worn_key.take().is_some() {
+                self.worn_folders = IdSet::default();
+                self.worn_seen = HashSet::new();
+            }
+            return;
+        }
+        let key = (inv.root, inv.generation);
+        if self.worn_key == Some(key) && self.worn_seen == *worn {
+            return;
+        }
+        self.worn_folders = super::display::worn_folders(inv, worn);
+        self.worn_seen = worn.clone();
+        self.worn_key = Some(key);
+    }
+
+    /// The folder holds a worn item (`follow_worn`).
+    pub(super) fn holds_worn(&self, id: Uuid) -> bool {
+        self.worn_folders.contains(&id)
+    }'''
+
+# ------------------------------------------- where the lists are prepared
+
+[[patch]]
+id = "inventory-display-tree"
+why = "the tree of every window, width and style (rows::scroll) gives the view both switches"
+paths = ["crates/aurora-viewer/src/ui/inventory/rows.rs"]
+op = "literal"
+fn = "scroll"
+find = '''st.view.prepare(inv, prefs.sort_for(st.tab));
+    let collapsed = st.expand_all.take()'''
+replace = '''// aurora-local-patch: inventory-display-tree
+    // The two display switches (local patch set, display.rs).
+    st.view.hide_empty_system_folders(prefs.hide_empty_system_folders);
+    st.view.prepare(inv, prefs.sort_for(st.tab));
+    st.view.follow_worn(inv, &facts.worn, prefs.bold_worn_folders);
+    let collapsed = st.expand_all.take()'''
+
+[[patch]]
+id = "inventory-display-side"
+why = "Aurora's folder column (medium and wide widths) gives the view both switches too; it is drawn before the explorer list"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/sidebar.rs"]
+op = "literal"
+fn = "show"
+find = '''st.view.prepare(inv, prefs.sort_for(st.tab));
+    let follow = st.side.follow(inv, st.browse, base);'''
+replace = '''// aurora-local-patch: inventory-display-side
+    // The two display switches (local patch set, display.rs).
+    st.view.hide_empty_system_folders(prefs.hide_empty_system_folders);
+    st.view.prepare(inv, prefs.sort_for(st.tab));
+    st.view.follow_worn(inv, &facts.worn, prefs.bold_worn_folders);
+    let follow = st.side.follow(inv, st.browse, base);'''
+
+[[patch]]
+id = "inventory-display-results"
+why = "the search and filter results draw folder rows too: the worn folders are kept up to date for them"
+paths = ["crates/aurora-viewer/src/ui/inventory.rs"]
+op = "literal"
+fn = "list"
+find = '''prepare_result_tree(st, inv, root);
+        return search_scroll('''
+replace = '''// aurora-local-patch: inventory-display-results
+        // a folder holding a worn item is bold in the results too (local patch set)
+        st.view.follow_worn(inv, &facts.worn, prefs.bold_worn_folders);
+        prepare_result_tree(st, inv, root);
+        return search_scroll('''
+
+# ------------------------------------------------------------- the rows
+
+[[patch]]
+id = "inventory-display-bold-legacy"
+why = "the Legacy style's folder row: bold as a worn item's name (item_row), with the faux bold pass of a font without semi-bold"
+paths = ["crates/aurora-viewer/src/ui/inventory.rs"]
+op = "literal"
+fn = "folder_row"
+find = "let mut job = tree::name(&label, p);"
+replace = '''let mut job = tree::name(&label, p);
+        // aurora-local-patch: inventory-display-bold-legacy
+        // A folder holding a worn item (local patch set): its name bold as a
+        // worn item's in item_row, with the faux bold pass of a font without
+        // a semi-bold face.
+        let holds_worn = state.view.holds_worn(id);
+        if holds_worn && let Some(section) = job.sections.first_mut() {
+            super::widgets::embolden(ui, &mut section.format);
+        }
+        let bold_name = (holds_worn && super::widgets::faux_bold_offset(ui).is_some())
+            .then(|| ui.painter().layout_no_wrap(label.clone(), tree::font(), p.ink));'''
+
+[[patch]]
+id = "inventory-display-bold-legacy-label"
+why = "goes with inventory-display-bold-legacy: the label gets the faux bold pass"
+paths = ["crates/aurora-viewer/src/ui/inventory.rs"]
+op = "literal"
+fn = "folder_row"
+find = "let r = super::widgets::inventory_item_label_tagged(ui, job, state.selection.contains(&id), sense, None, tag);"
+replace = '''// aurora-local-patch: inventory-display-bold-legacy-label
+        let r = super::widgets::inventory_item_label_tagged(ui, job, state.selection.contains(&id), sense, bold_name, tag);'''
+
+[[patch]]
+id = "inventory-display-bold-aurora"
+why = "Aurora's folder row (tree, explorer list, results): semi-bold as its worn and selected names"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/rows.rs"]
+op = "literal"
+fn = "folder"
+find = '''let job = if selected {
+        sheet::semibold(ui, &label, NAME, p.ink)'''
+replace = '''// aurora-local-patch: inventory-display-bold-aurora
+    // a folder holding a worn item: semi-bold as a worn item's name (local patch set)
+    let job = if selected || st.view.holds_worn(id) {
+        sheet::semibold(ui, &label, NAME, p.ink)'''
+
+[[patch]]
+id = "inventory-display-side-bold"
+why = "Aurora's folder column: an entry can have a semi-bold name"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/sidebar.rs"]
+op = "literal"
+find = '''left: f32,
+    color: Option<egui::Color32>,
+) -> egui::Response {'''
+replace = '''left: f32,
+    color: Option<egui::Color32>,
+    // aurora-local-patch: inventory-display-side-bold
+    // a folder holding a worn item (local patch set): its name semi-bold
+    bold: bool,
+) -> egui::Response {'''
+
+[[patch]]
+id = "inventory-display-side-entry"
+why = "goes with inventory-display-side-bold: the shortcuts are never bold"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/sidebar.rs"]
+op = "literal"
+fn = "entry"
+find = "entry_tinted(ui, p, icon, label, count, waiting, selected, left, None)"
+replace = "entry_tinted(ui, p, icon, label, count, waiting, selected, left, None, false) // aurora-local-patch: inventory-display-side-entry"
+
+[[patch]]
+id = "inventory-display-side-name"
+why = "goes with inventory-display-side-bold: the semi-bold of Aurora's rows (sheet::semibold)"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/sidebar.rs"]
+op = "literal"
+fn = "entry_tinted"
+find = '''let mut job =
+        egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(egui::FontId::proportional(13.0), p.ink));'''
+replace = '''// aurora-local-patch: inventory-display-side-name
+    let mut job = if bold {
+        crate::ui::sheet::semibold(ui, label, 13.0, p.ink)
+    } else {
+        egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(egui::FontId::proportional(13.0), p.ink))
+    };'''
+
+[[patch]]
+id = "inventory-display-side-folders"
+why = "goes with inventory-display-side-bold: a folder of the column holding a worn item"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/sidebar.rs"]
+op = "literal"
+fn = "show"
+find = "let response = entry_tinted(ui, p, icon, &name, None, 0, selected, left, color);"
+replace = '''let bold = st.view.holds_worn(row.id); // aurora-local-patch: inventory-display-side-folders
+            let response = entry_tinted(ui, p, icon, &name, None, 0, selected, left, color, bold);'''
+
+[[patch]]
+id = "inventory-display-gallery-worn"
+why = "Aurora's gallery tiles (the gallery view and the combination view's tiles): the worn folders kept up to date for them"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/gallery.rs"]
+op = "literal"
+fn = "pane"
+find = '''prepare(inv, st, prefs, root);
+    let count = st.plain.tiles;'''
+replace = '''prepare(inv, st, prefs, root);
+    // aurora-local-patch: inventory-display-gallery-worn
+    st.view.follow_worn(inv, &facts.worn, prefs.bold_worn_folders);
+    let count = st.plain.tiles;'''
+
+[[patch]]
+id = "inventory-display-gallery-bold"
+why = "a folder tile holding a worn item: its name semi-bold in the ink of the other folder names (display::folder_tile_bold)"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/gallery.rs"]
+op = "literal"
+fn = "tile"
+find = '''let mut job = if selected || worn {
+        sheet::semibold(ui, &label, NAME, ink)'''
+replace = '''// aurora-local-patch: inventory-display-gallery-bold
+    let holds_worn = super::super::display::folder_tile_bold(&st.view, id, folder.is_some());
+    let mut job = if selected || worn || holds_worn {
+        sheet::semibold(ui, &label, NAME, ink)'''
+
+# ------------------------------------------------------------ the switches
+
+[[patch]]
+id = "inventory-display-controls"
+why = "the two switches in the window's own preferences (both styles), after Folder colors"
+paths = ["crates/aurora-viewer/src/ui/inventory/controls.rs"]
+op = "literal"
+fn = "preferences_for_tab"
+find = '''changed |= check(ui, p, aurora_i18n::tr!("inventory-folder-colors"), &mut prefs.folder_colors_enabled);'''
+replace = '''changed |= check(ui, p, aurora_i18n::tr!("inventory-folder-colors"), &mut prefs.folder_colors_enabled);
+    // aurora-local-patch: inventory-display-controls
+    changed |= check(
+        ui,
+        p,
+        aurora_i18n::tr!("inventory-hide-empty-system-folders"),
+        &mut prefs.hide_empty_system_folders,
+    );
+    changed |= check(ui, p, aurora_i18n::tr!("inventory-bold-worn-folders"), &mut prefs.bold_worn_folders);'''
+
+[[patch]]
+id = "inventory-display-page"
+why = "the same switches in Preferences › Inventory › Display, after Folder colors"
+paths = ["crates/aurora-viewer/src/ui/options/pages/inventory.rs"]
+op = "literal"
+fn = "page"
+find = "cx.track(&field!(inventory.folder_colors));"
+replace = '''cx.track(&field!(inventory.folder_colors));
+        // aurora-local-patch: inventory-display-page
+        cx.toggle(
+            tr!("inventory-hide-empty-system-folders"),
+            tr!("inventory-hide-empty-system-folders-help"),
+            &field!(inventory.hide_empty_system_folders),
+        );
+        cx.toggle(
+            tr!("inventory-bold-worn-folders"),
+            tr!("inventory-bold-worn-folders-help"),
+            &field!(inventory.bold_worn_folders),
+        );'''
+
+# --------------------------------------------------------------- the texts
+
+[[patch]]
+id = "inventory-display-text-en"
+why = "the labels and help of the two switches (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^inventory-folder-colors-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: inventory-display-text-en
+inventory-hide-empty-system-folders = Hide empty system folders
+inventory-hide-empty-system-folders-help = System folders such as Textures, Landmarks or Lost And Found are left out of the folder lists while they hold nothing. A folder whose contents have not loaded yet stays, and each one shows again as soon as something is put in it.
+inventory-bold-worn-folders = Bold folders that hold worn items
+inventory-bold-worn-folders-help = A folder's name is bold when something you wear is inside it, at any depth. Links, such as those of the Current Outfit and of saved outfits, do not count.'''
+
+[[patch]]
+id = "inventory-display-text-fr"
+why = "goes with inventory-display-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^inventory-folder-colors-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: inventory-display-text-fr
+inventory-hide-empty-system-folders = Masquer les dossiers système vides
+inventory-hide-empty-system-folders-help = Les dossiers système comme Textures, Repères ou Objets perdus et trouvés sont retirés des listes de dossiers tant qu'ils ne contiennent rien. Un dossier dont le contenu n'est pas encore chargé reste affiché, et chacun réapparaît dès que quelque chose y est placé.
+inventory-bold-worn-folders = Dossiers des objets portés en gras
+inventory-bold-worn-folders-help = Le nom d'un dossier est en gras quand il contient, à n'importe quelle profondeur, quelque chose que vous portez. Les liens, comme ceux de la tenue actuelle et des tenues enregistrées, ne comptent pas.'''
+
+[[patch]]
+id = "inventory-display-text-ja"
+why = "goes with inventory-display-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^inventory-folder-colors-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: inventory-display-text-ja
+inventory-hide-empty-system-folders = 空のシステムフォルダを隠す
+inventory-hide-empty-system-folders-help = 「テクスチャ」「ランドマーク」「遺失物」などのシステムフォルダは、中身が空の間はフォルダ一覧に表示しません。中身をまだ読み込んでいないフォルダは表示したままにし、何かを入れるとすぐに再び表示します。
+inventory-bold-worn-folders = 着用中のアイテムを含むフォルダを太字にする
+inventory-bold-worn-folders-help = 着用中のアイテムが入っているフォルダの名前を、階層の深さに関係なく太字で表示します。「着用中のアウトフィット」や保存したアウトフィットにあるリンクは数えません。'''

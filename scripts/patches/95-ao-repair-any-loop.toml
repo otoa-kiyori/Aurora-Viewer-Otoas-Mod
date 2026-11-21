@@ -1,0 +1,67 @@
+# The AO repairs every looping animation the simulator lost, one-frame
+# poses included.
+#
+# When the simulator's list of our animations loses one that the AO still
+# plays (a worn script stopped it, or an echo went missing), the AO starts it
+# again, at most every 2 s (Runtime::reconcile_loops). Only loops are
+# repaired, never a one-shot that has ended. The looping test was
+# Animation::loop_range, which is None for a looping one-frame pose (loop
+# out = loop in): ANIM_AGENT_SIT_GENERIC under the AO's sit and one-frame AO
+# poses were never repaired after an external stop. The AO still drew them
+# locally, so observers lost them for good. The test is now the animation's
+# loop flag.
+#
+# The Legacy AO has no such repair: AOEngine::reassertAlwaysAnimations
+# (indra/newview/aoengine.cpp:439-470) starts only the "Always" animations
+# again. The repair is upstream Aurora's improvement, and this patch widens it
+# to every loop.
+#
+# Tests: files/ao-repair-any-loop/ (the stop and repair sequence, a one-frame
+# loop repaired, a one-shot not). Retire this whole file once upstream tests
+# the loop flag: its patches then report DRIFT or ALREADY. Apply or skip the
+# whole file, not one patch of it.
+
+[[patch]]
+id = "ao-repair-any-loop-rule"
+why = "Runtime::repairs: which lost animations the AO starts again (any loop, one-frame poses included)"
+paths = ["crates/aurora-viewer/src/ao/**/*.rs"]
+op = "literal"
+find = """/// Repair a missing simulator echo only for an active looping clip. A
+    /// finished one-shot must never be replayed merely because it disappeared."""
+replace = """/// Whether `reconcile_loops` starts this animation again: any loop,
+    /// one-frame poses included (`Animation::loop_range` is None for those, and
+    /// the cover of the AO's sit was never repaired). Never a one-shot.
+    // aurora-local-patch: ao-repair-any-loop-rule
+    pub fn repairs(anim: &aurora_assets::Animation) -> bool {
+        anim.looping
+    }
+
+    /// Repair a missing simulator echo only for an active looping clip. A
+    /// finished one-shot must never be replayed merely because it disappeared."""
+
+[[patch]]
+id = "ao-repair-any-loop-use"
+why = "the AO's repair asks Runtime::repairs instead of Animation::loop_range"
+paths = ["crates/aurora-viewer/src/app/ao.rs"]
+op = "literal"
+fn = "update_ao"
+find = """.reconcile_loops(raw, now, |id| anims.get(id).is_some_and(|a| a.anim.loop_range().is_some())),"""
+replace = """// aurora-local-patch: ao-repair-any-loop-use
+                .reconcile_loops(raw, now, |id| anims.get(id).is_some_and(|a| runtime::Runtime::repairs(&a.anim))),"""
+
+[[patch]]
+id = "ao-repair-any-loop-tests-mod"
+why = "declare the AO's repair tests beside its other test modules"
+paths = ["crates/aurora-viewer/src/ao/mod.rs"]
+op = "literal"
+find = "pub mod runtime;"
+replace = """#[cfg(test)]
+mod repair_tests; // aurora-local-patch: ao-repair-any-loop-tests-mod
+pub mod runtime;"""
+
+[[patch]]
+id = "ao-repair-any-loop-tests"
+why = "the AO's repair of lost loops: timing, one-frame loops, one-shots"
+paths = ["crates/aurora-viewer/src/ao/repair_tests.rs"]
+op = "add_file"
+source = "files/ao-repair-any-loop/repair_tests.rs"

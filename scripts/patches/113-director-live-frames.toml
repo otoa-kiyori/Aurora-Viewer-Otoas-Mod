@@ -1,0 +1,526 @@
+# Director: a Live film takes a new view every render frame it needs one,
+# not every third.
+#
+# Cause: upstream's live film asks the renderer for one frame at a time
+# (director_record_frame: `!record_pending && wants_frame`, the frame kept
+# in Films::live_asked until its pixels reach the main thread). The film
+# readback never waits (aurora-render's film_readback.rs) and its pixels
+# come back about three render frames after the frame is drawn, so the film
+# gets about one different view every three render frames; the recorder
+# (recorder.rs, Pace) fills the periods between with repeats. A film of
+# 24 fps drawn at 30 frames a second holds about 10 different views a
+# second. The user's frame-rate limit, and the unfocused window's, also
+# keep applying while a film records, so the render rate itself can sit
+# near the film's rate. The Legacy Viewer has no video recorder to compare
+# with.
+#
+# This build:
+#  - several frames in flight: Films::live_asked becomes an ordered queue
+#    of the frames asked (tag, the instant asked, the film period it is
+#    for). A frame asks a new view while fewer than the setting are in
+#    flight (the queue and Renderer::films_in_flight, so another film
+#    request counts too), at most one a render frame (the renderer takes
+#    one `film_request`; none is asked over another one). The pacing counts
+#    the views in flight: a view is asked only for a period that neither
+#    the frames written nor the newest view in flight cover yet
+#    (director_live::ask, with Recording::period, the count Pace::due
+#    owes against). No period gets two views, none is asked twice, and each
+#    view still goes to the film at the instant it was asked (upstream's
+#    rule), repeated for the periods since the one before it.
+#  - delivery: the readback answers in the order asked; an answer takes
+#    its entry and any older one that never came back. A failed frame (no
+#    pixels) frees its place, the next view covers its period. A view of
+#    another size (the window resized) ends the film at once and drops
+#    what is still in flight, as upstream.
+#  - stop: Record pressed again, the track's playback over or the Director
+#    closed: the film keeps its frames in flight. It asks for no more and
+#    waits up to DRAIN_FRAMES (8) render frames for them, then ends
+#    (director_live::at_stop); its sound ends at the stop itself, the
+#    frames waited for were all asked before it. A failed writer ends at
+#    once. Whatever comes back after the film ended is dropped, as upstream.
+#  - the setting: "Frames fetched at once" in the Output section's "More
+#    options", Live mode only (recorder::Options::in_flight, saved with the
+#    Director's other film choices; 1 to 10, default 3, brought into range
+#    when the settings load and when shown). 1 is upstream's behaviour, one
+#    at a time. 3: the pixels are back in about three render frames, so
+#    three let the film take a view every render frame; more help a card
+#    that answers later.
+#  - the readback's buffers: film_readback.rs keeps up to 12 for reuse
+#    instead of 4 (10 live frames, or an offline render's 2, plus spares).
+#    They are made when a frame needs one, as before: a high setting costs
+#    nothing until that many frames are really in flight; the buffers kept
+#    stay until a film of another size, as upstream's four did.
+#  - frame rate: while a Live film records (or waits for its last frames),
+#    the user's frame-rate limit and the unfocused window's limit are not
+#    applied (film_frame_cap, beside frame_cap). Unchanged: vsync, the
+#    headset's pacing, the process limit (--fps-limit), the screen rate
+#    outside the world, the throttle behind another viewer and the gaming
+#    mode. An offline render and the idle viewer keep frame_cap as it is.
+#
+# Log: "director: the film ends, waiting for its N frames in flight" when a
+# stop waits, "director: N frames still in flight dropped at the end of the
+# film" when the wait ran out.
+#
+# Tests: director_live.rs (a view only for a period nothing covers; the
+# bound at 1, 3 and 10, another request counted; the setting clamped, on
+# load too, and its default for a settings file without it; a 24 fps film
+# at 30 render frames with views back three frames later: one at a time
+# gets 9 different views, three get one for every period, ten no fewer and
+# more when the card answers later; the stop's wait) and app.rs
+# (film_frame_cap: the user's and the unfocused limits lifted, the process
+# limit, the screen rate and the headset kept).
+# Apply or skip the whole file, not one patch of it.
+
+# --- the rules (aurora-viewer/src/director_live.rs)
+
+[[patch]]
+id = "director-live-frames-module"
+why = "the pure rules: how many views to ask given the periods owed, written and in flight; what a stop does; the setting's range; tests"
+paths = ["crates/aurora-viewer/src/director_live.rs"]
+op = "add_file"
+source = "files/director-live-frames/director_live.rs"
+
+[[patch]]
+id = "director-live-frames-mod"
+why = "declare the module"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = "mod director_library;"
+replace = '''mod director_library;
+mod director_live; // aurora-local-patch: director-live-frames-mod'''
+
+# --- the readback's buffers (aurora-render)
+
+[[patch]]
+id = "director-live-frames-pool"
+why = "keep enough readback buffers for the most live frames in flight the setting allows"
+paths = ["crates/aurora-render/src/film_readback.rs"]
+op = "literal"
+find = '''/// Readback buffers kept for the next frames of a film.
+const POOL: usize = 4;'''
+replace = '''/// Readback buffers kept for the next frames of a film.
+// aurora-local-patch: director-live-frames-pool
+// (up to 10 live frames in flight, the viewer's setting, or a render's 2,
+// plus spares; a buffer is made only when a frame needs one)
+const POOL: usize = 12;'''
+
+# --- the setting (recorder.rs, settings.rs)
+
+[[patch]]
+id = "director-live-frames-option"
+why = "the live film's frames in flight, kept with the Director's other film choices"
+paths = ["crates/aurora-viewer/src/recorder.rs"]
+op = "literal"
+find = '''/// Voice chat in it: other people's voices, off unless asked.
+    pub voice: bool,
+}'''
+replace = '''/// Voice chat in it: other people's voices, off unless asked.
+    pub voice: bool,
+    // aurora-local-patch: director-live-frames-option
+    /// The live film's frames asked of the renderer at once, 1 to 10
+    /// (`director_live::IN_FLIGHT_RANGE`); 1 is one at a time.
+    pub in_flight: u32,
+}'''
+
+[[patch]]
+id = "director-live-frames-option-default"
+why = "goes with director-live-frames-option: three by default (a settings file without it too)"
+paths = ["crates/aurora-viewer/src/recorder.rs"]
+op = "literal"
+find = '''ui_sounds: false,
+            voice: false,'''
+replace = '''ui_sounds: false,
+            voice: false,
+            // aurora-local-patch: director-live-frames-option-default
+            in_flight: crate::director_live::IN_FLIGHT_DEFAULT,'''
+
+[[patch]]
+id = "director-live-frames-period"
+why = "the frames the film should hold at an instant, the count the pacing owes against, and those written"
+paths = ["crates/aurora-viewer/src/recorder.rs"]
+op = "literal"
+find = '''/// The writer ended on its own: the encoder failed, or the disk.
+    pub fn failed(&self) -> bool {'''
+replace = '''// aurora-local-patch: director-live-frames-period
+    /// The frames the film should hold at `now`, repeats included: what
+    /// `Pace::due` counts the frames owed against.
+    pub fn period(&self, now: Instant) -> u64 {
+        (self.elapsed(now) * f64::from(self.pace.fps)).floor() as u64 + 1
+    }
+
+    /// The frames handed to the writer so far, repeats included.
+    pub fn written(&self) -> u64 {
+        self.pace.written()
+    }
+
+    /// The writer ended on its own: the encoder failed, or the disk.
+    pub fn failed(&self) -> bool {'''
+
+[[patch]]
+id = "director-live-frames-settings-sanitize"
+why = "the live film's frames in flight brought into 1 to 10 when the settings load"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''pub(crate) fn sanitized(mut self) -> Settings {'''
+replace = '''pub(crate) fn sanitized(mut self) -> Settings {
+        // aurora-local-patch: director-live-frames-settings-sanitize
+        self.director_record.in_flight = crate::director_live::in_flight(self.director_record.in_flight);'''
+
+# --- the queue (app/director_render.rs)
+
+[[patch]]
+id = "director-live-frames-queue"
+why = "the live film's frames asked, in order, and the stop's wait"
+paths = ["crates/aurora-viewer/src/app/director_render.rs"]
+op = "literal"
+find = '''/// The live film's frame asked of the renderer, and when.
+    live_asked: Option<(u64, Instant)>,'''
+replace = '''// aurora-local-patch: director-live-frames-queue
+    /// The live film's frames asked of the renderer and not back yet, in
+    /// the order asked: tag, when, and the film period it is for
+    /// (`Recording::period`).
+    pub(super) live_asked: std::collections::VecDeque<(u64, Instant, u64)>,
+    /// The live film was asked to end: the render frames it has waited
+    /// for its frames in flight (`director_live::at_stop`).
+    pub(super) live_drain: Option<u32>,'''
+
+[[patch]]
+id = "director-live-frames-ask"
+why = "a frame asked joins the queue with its instant and its period; the stop's wait; whether a live film is on"
+paths = ["crates/aurora-viewer/src/app/director_render.rs"]
+op = "literal"
+find = '''renderer.film_request = Some(FilmRequest { tag, size: None, huds });
+        films.live_asked = Some((tag, Instant::now()));
+        self.director.record_pending = true;
+    }'''
+replace = '''renderer.film_request = Some(FilmRequest { tag, size: None, huds });
+        // aurora-local-patch: director-live-frames-ask
+        let now = Instant::now();
+        let period = self.director.recording.as_ref().map_or(0, |(recording, _)| recording.period(now));
+        films.live_asked.push_back((tag, now, period));
+        self.director.record_pending = true;
+    }
+
+    // aurora-local-patch: director-live-frames-ask
+    /// A live film asked to end: true while it waits for its frames still
+    /// in flight (it ends at a later frame, `director_record_stop` called
+    /// again), false when it ends now.
+    pub(super) fn director_live_wait(&mut self) -> bool {
+        let failed = self.director.recording.as_ref().is_none_or(|(recording, _)| recording.failed());
+        let films = &mut self.director.films;
+        let waited = films.live_drain.unwrap_or(0);
+        match crate::director_live::at_stop(films.live_asked.len(), failed, waited) {
+            crate::director_live::AtStop::Wait => {
+                if films.live_drain.is_none() {
+                    log::info!(
+                        "director: the film ends, waiting for its {} frames in flight",
+                        films.live_asked.len()
+                    );
+                }
+                films.live_drain = Some(waited + 1);
+                true
+            }
+            crate::director_live::AtStop::End => {
+                if films.live_drain.take().is_some() && !films.live_asked.is_empty() {
+                    log::info!(
+                        "director: {} frames still in flight dropped at the end of the film",
+                        films.live_asked.len()
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    /// A live film is being recorded, or waits for its last frames.
+    pub(super) fn director_live_filming(&self) -> bool {
+        self.director.recording.is_some()
+    }'''
+
+[[patch]]
+id = "director-live-frames-deliver"
+why = "a frame back takes its place in the queue (and any older one that never came back), at the instant it was asked"
+paths = ["crates/aurora-viewer/src/app/director_render.rs"]
+op = "literal"
+fn = "director_films_after"
+find = '''let Some((tag, asked)) = self.director.films.live_asked else {
+                continue;
+            };
+            if tag != film.tag {
+                continue;
+            }
+            self.director.films.live_asked = None;
+            self.director.record_pending = false;'''
+replace = '''// aurora-local-patch: director-live-frames-deliver
+            // (the readback answers in the order asked: an older frame
+            // still listed never came back and goes with it)
+            let live = &mut self.director.films.live_asked;
+            let Some(at) = live.iter().position(|(tag, _, _)| *tag == film.tag) else {
+                continue;
+            };
+            let Some((_, asked, _)) = live.drain(..=at).next_back() else {
+                continue;
+            };
+            self.director.record_pending = !live.is_empty();'''
+
+[[patch]]
+id = "director-live-frames-resized"
+why = "a view of another size ends the film at once: what is in flight is dropped, no wait"
+paths = ["crates/aurora-viewer/src/app/director_render.rs"]
+op = "literal"
+fn = "director_films_after"
+find = '''log::info!("director: the window changed size, the recording ends");
+                self.director_record_stop();'''
+replace = '''log::info!("director: the window changed size, the recording ends");
+                // aurora-local-patch: director-live-frames-resized
+                self.director.films.live_asked.clear();
+                self.director_record_stop();'''
+
+[[patch]]
+id = "director-live-frames-ended"
+why = "no film: what was in flight is forgotten, and the stop's wait"
+paths = ["crates/aurora-viewer/src/app/director_render.rs"]
+op = "literal"
+fn = "director_films_after"
+find = '''if self.director.recording.is_none() {
+            self.director.films.live_asked = None;
+            self.director.record_pending = false;
+        }'''
+replace = '''if self.director.recording.is_none() {
+            // aurora-local-patch: director-live-frames-ended
+            self.director.films.live_asked.clear();
+            self.director.films.live_drain = None;
+            self.director.record_pending = false;
+        }'''
+
+# --- the film's frames (app/director.rs)
+
+[[patch]]
+id = "director-live-frames-draining"
+why = "a film that waits for its last frames asks for none and tries to end again each frame"
+paths = ["crates/aurora-viewer/src/app/director.rs"]
+op = "literal"
+fn = "director_record_frame"
+find = '''let Some((recording, with_track)) = &self.director.recording else {
+            return;
+        };
+        let playing ='''
+replace = '''// aurora-local-patch: director-live-frames-draining
+        if self.director.films.live_drain.is_some() {
+            self.director_record_stop();
+            return;
+        }
+        let Some((recording, with_track)) = &self.director.recording else {
+            return;
+        };
+        let playing ='''
+
+[[patch]]
+id = "director-live-frames-due"
+why = "ask while fewer than the setting are in flight, for a period no view covers, one a render frame"
+paths = ["crates/aurora-viewer/src/app/director.rs"]
+op = "literal"
+fn = "director_record_frame"
+find = '''// (one frame of the film on its way at a time: read back later,
+        // the frame loop does not wait for it)
+        if free && !self.director.record_pending && recording.wants_frame(Instant::now()) {'''
+replace = '''// aurora-local-patch: director-live-frames-due
+        // (a few frames of the film on their way, read back later: the
+        // frame loop does not wait for them; one asked a render frame, for
+        // a period that no frame written or in flight covers yet)
+        let now = Instant::now();
+        let live = &self.director.films.live_asked;
+        let due = crate::director_live::ask(
+            recording.period(now),
+            recording.written(),
+            live.back().map(|(_, _, period)| *period),
+            live.len(),
+            renderer.films_in_flight(),
+            self.settings.director_record.in_flight,
+        );
+        if free && renderer.film_request.is_none() && due {'''
+
+[[patch]]
+id = "director-live-frames-stop"
+why = "a film asked to end waits for its frames in flight first (bounded), its sound ending now"
+paths = ["crates/aurora-viewer/src/app/director.rs"]
+op = "literal"
+fn = "director_record_stop"
+find = '''self.director_sound_end();
+        if let Some((recording, _)) = self.director.recording.take() {'''
+replace = '''self.director_sound_end();
+        // aurora-local-patch: director-live-frames-stop
+        if self.director_live_wait() {
+            return;
+        }
+        if let Some((recording, _)) = self.director.recording.take() {'''
+
+# --- the frame rate while filming (app.rs)
+
+[[patch]]
+id = "director-live-frames-cap"
+why = "while a live film records, the user's and the unfocused window's frame-rate limits are not applied"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''let timed = self.capture.is_some() || self.frame_profile.enabled();
+        let cap = frame_cap(
+            &self.settings,
+            self.focused,
+            gfx.renderer.vr_engaged(),
+            self.in_world(),
+            monitor_hz,
+            timed,
+            crate::cli::get().fps_limit,
+        );'''
+replace = '''let timed = self.capture.is_some() || self.frame_profile.enabled();
+        // aurora-local-patch: director-live-frames-cap
+        // (a live film draws as fast as it can: its views are the frames)
+        let cap = if self.director_live_filming() {
+            film_frame_cap(
+                gfx.renderer.vr_engaged(),
+                self.in_world(),
+                monitor_hz,
+                crate::cli::get().fps_limit,
+                &self.settings,
+            )
+        } else {
+            frame_cap(
+                &self.settings,
+                self.focused,
+                gfx.renderer.vr_engaged(),
+                self.in_world(),
+                monitor_hz,
+                timed,
+                crate::cli::get().fps_limit,
+            )
+        };'''
+
+[[patch]]
+id = "director-live-frames-cap-fn"
+why = "goes with director-live-frames-cap: frame_cap without the user's limit and the unfocused one"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''/// Zero explicitly disables the user cap for reproducible uncapped tests;'''
+replace = '''// aurora-local-patch: director-live-frames-cap-fn
+/// frame_cap while a live film of the Director records: the user's
+/// frame-rate limit and the unfocused window's are not applied; the
+/// headset's pacing (`s` only matters there), the process limit and the
+/// screen rate outside the world are frame_cap's.
+fn film_frame_cap(headset_engaged: bool, in_world: bool, monitor_hz: f32, fps_limit: Option<u32>, s: &Settings) -> f32 {
+    if headset_engaged {
+        return frame_cap(s, true, true, in_world, monitor_hz, true, fps_limit);
+    }
+    let mut cap = fps_limit.map_or(f32::INFINITY, |limit| limit as f32);
+    if !in_world {
+        cap = cap.min(monitor_hz);
+    }
+    if cap.is_finite() { cap } else { 0.0 }
+}
+
+/// Zero explicitly disables the user cap for reproducible uncapped tests;'''
+
+[[patch]]
+id = "director-live-frames-cap-test"
+why = "film_frame_cap: the user's and unfocused limits lifted, the rest kept"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''#[test]
+    fn frame_cap_rules() {'''
+replace = '''// aurora-local-patch: director-live-frames-cap-test
+    #[test]
+    fn a_live_film_lifts_only_the_users_limits() {
+        use super::film_frame_cap;
+        let capped = Settings {
+            fps_cap: true,
+            fps_limit: 30,
+            background_fps_cap: true,
+            background_fps_limit: 30,
+            ..Settings::default()
+        };
+        // in world, focused or not: no limit of the user's
+        assert_eq!(film_frame_cap(false, true, 144.0, None, &capped), 0.0);
+        // the process limit and the screen rate outside the world stay
+        assert_eq!(film_frame_cap(false, true, 144.0, Some(60), &capped), 60.0);
+        assert_eq!(film_frame_cap(false, false, 144.0, None, &capped), 144.0);
+        // the headset's pacing is frame_cap's
+        for limit in [None, Some(72)] {
+            assert_eq!(
+                film_frame_cap(true, true, 144.0, limit, &capped),
+                frame_cap(&capped, false, true, true, 144.0, false, limit)
+            );
+        }
+        // frame_cap with the user's two limits off, focused or not
+        let free = Settings {
+            fps_cap: false,
+            background_fps_cap: false,
+            ..Settings::default()
+        };
+        for in_world in [false, true] {
+            for limit in [None, Some(24), Some(500)] {
+                for focused in [false, true] {
+                    assert_eq!(
+                        film_frame_cap(false, in_world, 60.0, limit, &capped),
+                        frame_cap(&free, focused, false, in_world, 60.0, false, limit)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_cap_rules() {'''
+
+# --- the interface (ui/director_output.rs, catalogues)
+
+[[patch]]
+id = "director-live-frames-slider"
+why = "the setting in the Output section's More options, Live mode only"
+paths = ["crates/aurora-viewer/src/ui/director_output.rs"]
+op = "literal"
+fn = "more_options"
+find = '''} else {
+        ui.add_enabled_ui(options.sound, |ui| {'''
+replace = '''} else {
+        // aurora-local-patch: director-live-frames-slider
+        row(ui, p, aurora_i18n::tr!("director-output-in-flight"), |ui| {
+            ui.spacing_mut().slider_width = super::director::SLIDER_W;
+            options.in_flight = crate::director_live::in_flight(options.in_flight);
+            let slider = egui::Slider::new(&mut options.in_flight, crate::director_live::IN_FLIGHT_RANGE)
+                .custom_parser(aurora_i18n::parse_number)
+                .trailing_fill(true);
+            ui.add(slider).on_hover_text(aurora_i18n::tr!("director-output-in-flight-tip"));
+        });
+        ui.add_enabled_ui(options.sound, |ui| {'''
+
+[[patch]]
+id = "director-live-frames-en"
+why = "the slider's label and help, English"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''director-sound-ui-tip = The interface's sounds (clicks, alerts) in the film too.'''
+replace = '''director-sound-ui-tip = The interface's sounds (clicks, alerts) in the film too.
+# // aurora-local-patch: director-live-frames-en
+director-output-in-flight = Frames fetched at once
+director-output-in-flight-tip = How many pictures are fetched from the graphics card at once while recording live. More gives a smoother film when the card answers late; 1 is the original behaviour.'''
+
+[[patch]]
+id = "director-live-frames-fr"
+why = "the slider's label and help, French"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''director-sound-ui-tip = Les sons de l’interface (clics, alertes) dans le film aussi.'''
+replace = '''director-sound-ui-tip = Les sons de l’interface (clics, alertes) dans le film aussi.
+# // aurora-local-patch: director-live-frames-fr
+director-output-in-flight = Images récupérées à la fois
+director-output-in-flight-tip = Combien d’images sont récupérées à la fois auprès de la carte graphique pendant un film en direct. Davantage donne un film plus fluide quand la carte répond tard ; 1 est le comportement d’origine.'''
+
+[[patch]]
+id = "director-live-frames-ja"
+why = "the slider's label and help, Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = '''director-sound-ui-tip = インターフェイスの音（クリック、通知）も映像に含めます。'''
+replace = '''director-sound-ui-tip = インターフェイスの音（クリック、通知）も映像に含めます。
+# // aurora-local-patch: director-live-frames-ja
+director-output-in-flight = 同時に取得するフレーム数
+director-output-in-flight-tip = ライブ撮影中にグラフィックカードから同時に取得する画像の数です。グラフィックカードの応答が遅いときは、多くすると映像が滑らかになります。１は従来の動作です。'''

@@ -1,0 +1,560 @@
+# Optional volumetric light rays from the sun or the moon, off by default.
+#
+# Source: the code of this manifest is the code of the commit
+# https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+# ("Add optional volumetric rays from the sun and moon"), from a fork of this
+# same viewer, ported here as local patches. Its new file is
+# files/sky-rays/volume_depth.rs, unchanged below its header.
+#
+# What it does: after the scene is drawn, a full-screen pass marches the view
+# ray from the camera to the surface (at most 128 m, and no farther than the
+# last shadow cascade), sampling the sun or moon shadow cascades along the
+# way, and adds the light scattered by the lit parts of the air to the HDR
+# colour (additive blend, alpha untouched). The light follows the
+# shadow-casting body: sun_color, with the EEP moon brightness for the moon
+# when the classic sky is not in use. It needs shadows: the pass is drawn
+# only with shadows on, outside a cut-out photo. Under MSAA a small pass
+# first writes the nearest sample of the final multisampled depth into the
+# single-sample depth (volume_depth.rs), so the rays stop at the rigged
+# blended faces drawn after the prepass too.
+#
+# Settings (Graphics > Light, under the shadows, greyed out with shadows off):
+#  - sky_rays_enabled "Volumetric Sun & Moon rays": false
+#  - sky_ray_source "Ray source": 0 (0 Automatic: whichever of sun or moon
+#    is up; 1 Sun: only while the sun is up; 2 Moon: only while the sun is
+#    down and the moon up)
+#  - sky_ray_strength "Ray strength": 0.8 (0 to 4)
+#  - sky_ray_fade "Near fade": 3.0 m (0 to 40)
+#  - sky_ray_samples "Ray samples": 32 (16 to 256)
+# Settings::directional_rays brings each value into its range every frame and
+# gives the renderer zeros when the effect is off or its body is down.
+#
+# Demo: AURORA_DEMO_SKY_RAYS=sun|moon puts the demo day's sun (or moon) up
+# at 26 degrees (azimuth 300) and the other body down, moon brightness 0.75.
+#
+# Adaptations to this tree (the behaviour, defaults, setting names and text
+# are the commit's):
+#  - FrameU / Frame (renderer.rs, common.wgsl): the commit inserts sky_rays
+#    between the `photo` field and its doc comment; here it goes right after
+#    `aurora` with a doc comment of its own. Same place in the layout (after
+#    aurora, before photo) in both the Rust and the WGSL struct.
+#  - Pipelines (renderer.rs): likewise, sky_rays goes right after `sky`, not
+#    between `clouds_weather` and its doc comment.
+#  - FrameParams (types.rs): the field's doc comment also names where it is
+#    set.
+#  - Every insertion is anchored on this tree's lines (the commit's base is
+#    the fork's tree); the text keys are added after the same last key of
+#    each catalogue as in the commit.
+# Nothing else is changed: the shader, the depth resolve, its test and the
+# settings test are the commit's code.
+#
+# Off, it costs no work per frame: directional_rays gives zeros and the pass
+# (render_view, `f.shadows && !f.cutout && f.sky_rays[0] > 0.0`) and the
+# resolve are skipped; what stays is one more pipeline built with the scene
+# ones and, under MSAA, the resolve's small pipeline made with the targets.
+# On, under MSAA, the resolve overwrites the single-sample prepass depth for
+# the rest of the frame (the cursor's depth pick and the passes after it read
+# it), as the commit does.
+#
+# Tests: the commit's own, settings.rs directional_ray_tests
+# (follows_the_body_that_casts_shadows: off by default, Automatic follows
+# the body that is up, Moon only with the sun down, Sun only with the sun
+# up) and volume_depth.rs
+# (volume_depth_includes_late_blended_faces_and_nearest_msaa_sample_on_gpu:
+# on a GPU, the resolved depth includes the late blended faces and takes the
+# nearest MSAA sample; skipped without an adapter); the shader validation,
+# i18n parity and theme guard tests cover the rest.
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------------- text
+
+[[patch]]
+id = "sky-rays-text-en"
+why = "the rays' labels and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-proxy-direct-media-confirm = [^\n]*$'
+replace = '''\g<0>
+
+# // aurora-local-patch: sky-rays-text-en
+# Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+sky-rays-enabled = Volumetric Sun & Moon rays
+sky-rays-help = Scatters light from the active shadow-casting sun or moon. Requires shadows.
+sky-rays-source = Ray source
+sky-rays-auto = Automatic
+sky-rays-sun = Sun
+sky-rays-moon = Moon
+sky-rays-strength = Ray strength
+sky-rays-fade = Near fade
+sky-rays-samples = Ray samples'''
+
+[[patch]]
+id = "sky-rays-text-fr"
+why = "the rays' labels and help (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-proxy-direct-media-confirm = [^\n]*$'
+replace = '''\g<0>
+
+# // aurora-local-patch: sky-rays-text-fr
+# Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+sky-rays-enabled = Rayons volumétriques du soleil et de la lune
+sky-rays-help = Diffuse la lumière de l’astre qui projette les ombres. Nécessite les ombres.
+sky-rays-source = Source des rayons
+sky-rays-auto = Automatique
+sky-rays-sun = Soleil
+sky-rays-moon = Lune
+sky-rays-strength = Intensité des rayons
+sky-rays-fade = Fondu proche
+sky-rays-samples = Échantillons'''
+
+[[patch]]
+id = "sky-rays-text-ja"
+why = "the rays' labels and help (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-proxy-direct-media-confirm = [^\n]*$'
+replace = '''\g<0>
+
+# // aurora-local-patch: sky-rays-text-ja
+# Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+sky-rays-enabled = 太陽と月のボリューム光
+sky-rays-help = 影を落とす太陽または月の光を散乱させます。影を有効にしてください。
+sky-rays-source = 光源
+sky-rays-auto = 自動
+sky-rays-sun = 太陽
+sky-rays-moon = 月
+sky-rays-strength = 光の強さ
+sky-rays-fade = 近距離フェード
+sky-rays-samples = サンプル数'''
+
+# ----------------------------------------------------------- aurora-render
+
+[[patch]]
+id = "sky-rays-volume-depth"
+why = "the final MSAA scene depth resolve the rays stop at, with its GPU test"
+op = "add_file"
+paths = ["crates/aurora-render/src/volume_depth.rs"]
+source = "files/sky-rays/volume_depth.rs"
+
+[[patch]]
+id = "sky-rays-mod"
+why = "declare the module"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = "mod cutout;"
+replace = '''mod cutout;
+// aurora-local-patch: sky-rays-mod
+mod volume_depth;'''
+
+[[patch]]
+id = "sky-rays-frame-u"
+why = "the rays' parameters in the frame uniform (Rust side)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''    /// The aurora (`RainLook::aurora`).
+    aurora: [f32; 4],'''
+replace = '''/// The aurora (`RainLook::aurora`).
+    aurora: [f32; 4],
+    // aurora-local-patch: sky-rays-frame-u
+    // Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+    /// The sun and moon rays (`FrameParams::sky_rays`): strength (0: off),
+    /// near fade (m), ray samples, padding.
+    sky_rays: [f32; 4],'''
+
+[[patch]]
+id = "sky-rays-targets-field"
+why = "the depth resolve, made with the MSAA targets"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    depth_msaa_tex: Option<wgpu::Texture>,"
+replace = '''depth_msaa_tex: Option<wgpu::Texture>,
+    // aurora-local-patch: sky-rays-targets-field
+    /// Writes the nearest sample of `depth_msaa` into `depth_ss` for the
+    /// sun and moon rays (MSAA only).
+    volume_depth: Option<crate::volume_depth::Resolve>,'''
+
+[[patch]]
+id = "sky-rays-targets-new"
+why = "make the depth resolve with the MSAA depth"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            depth_msaa,
+            depth_msaa_tex,
+            blend_layers: None,'''
+replace = '''// aurora-local-patch: sky-rays-targets-new
+            volume_depth: depth_msaa
+                .as_ref()
+                .map(|depth| crate::volume_depth::Resolve::new(device, depth, DEPTH_FORMAT)),
+            depth_msaa,
+            depth_msaa_tex,
+            blend_layers: None,'''
+
+[[patch]]
+id = "sky-rays-pipelines-field"
+why = "the rays' pipeline"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''
+    sky: wgpu::RenderPipeline,
+    /// The volumetric clouds' weather map'''
+replace = '''
+sky: wgpu::RenderPipeline,
+    // aurora-local-patch: sky-rays-pipelines-field
+    /// The sun and moon rays (env.wgsl `fs_sky_rays`).
+    sky_rays: wgpu::RenderPipeline,
+    /// The volumetric clouds' weather map'''
+
+[[patch]]
+id = "sky-rays-pipelines-new"
+why = "keep the rays' pipeline"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            sky: sky.resolve(&mut done),
+            clouds_weather: clouds_weather.resolve(&mut done),'''
+replace = '''sky: sky.resolve(&mut done),
+            sky_rays: sky_rays.resolve(&mut done), // aurora-local-patch: sky-rays-pipelines-new
+            clouds_weather: clouds_weather.resolve(&mut done),'''
+
+[[patch]]
+id = "sky-rays-pipeline"
+why = "the rays' full-screen pass: additive on the HDR colour, alpha untouched, no depth attachment"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            ..base("sky", "vs_sky", g("fs_sky", "fs_sky_g"))
+        });'''
+replace = '''..base("sky", "vs_sky", g("fs_sky", "fs_sky_g"))
+        });
+        // aurora-local-patch: sky-rays-pipeline
+        // Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+        let sky_rays = pipe(PipeDesc {
+            vb: Vb::None,
+            cull: None,
+            depth_write: false,
+            depth_format: None,
+            samples: 1,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            ..base("Sun and Moon rays", "vs_sky", "fs_sky_rays")
+        });'''
+
+[[patch]]
+id = "sky-rays-uniform"
+why = "the rays' parameters reach the frame uniform"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        let n_lights = f.lights.len().min(MAX_LIGHTS);"
+replace = '''let n_lights = f.lights.len().min(MAX_LIGHTS);
+        u.sky_rays = f.sky_rays; // aurora-local-patch: sky-rays-uniform'''
+
+[[patch]]
+id = "sky-rays-pass"
+why = "the rays' pass after the scene, only with shadows on, outside a cut-out photo and with a strength above 0: nothing is drawn when off"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "render_view"
+find = '''            self.drawn_pick.encode_copy(&mut encoder);
+        }
+        // depth under the cursor, read back in a later frame'''
+replace = '''self.drawn_pick.encode_copy(&mut encoder);
+        }
+        // aurora-local-patch: sky-rays-pass
+        // Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+        if f.shadows && !f.cutout && f.sky_rays[0] > 0.0 {
+            if let Some(resolve) = &self.targets.volume_depth {
+                resolve.encode(&mut encoder, &self.targets.depth_ss);
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sun and Moon rays"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            bind_mesh(&mut pass, &self.groups.b);
+            pass.set_pipeline(&self.pipelines.sky_rays);
+            pass.draw(0..3, 0..1);
+        }
+        // depth under the cursor, read back in a later frame'''
+
+[[patch]]
+id = "sky-rays-frame-wgsl"
+why = "the rays' parameters in the frame uniform (WGSL side, same place as in FrameU)"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "regex"
+pattern = '^    aurora: vec4<f32>, [^\n]*$'
+replace = '''\g<0>
+    sky_rays: vec4<f32>,        // the sun and moon rays: x strength (0: off), y near fade (m), z ray samples, w unused // aurora-local-patch: sky-rays-frame-wgsl'''
+
+[[patch]]
+id = "sky-rays-shader"
+why = "the ray march through the shadow cascades and its fragment entry"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''    if (c.a < 0.5) { discard; }
+    return vec4<f32>(c.rgb / c.a, 1.0);
+}'''
+replace = '''if (c.a < 0.5) { discard; }
+    return vec4<f32>(c.rgb / c.a, 1.0);
+}
+
+// aurora-local-patch: sky-rays-shader
+// Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+
+fn sky_ray_cascade(world_pos: vec3<f32>, cascade: u32) -> f32 {
+    let matrix = frame.cascade_vp[cascade];
+    let lp = matrix * vec4<f32>(world_pos, 1.0);
+    let ndc = lp.xyz / lp.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    let atlas = vec2<f32>(textureDimensions(shadow_map));
+    let scale = vec2<f32>(0.5, atlas.x / (2.0 * atlas.y));
+    let tile = vec2<f32>(f32(cascade % 2u), f32(cascade / 2u));
+    let half_texel = vec2<f32>(1.0 / atlas.x);
+    let compare_uv = (clamp(uv, half_texel, vec2<f32>(1.0) - half_texel) + tile) * scale;
+    let depth_per_metre = length(vec3<f32>(matrix[0].z, matrix[1].z, matrix[2].z));
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, compare_uv, ndc.z - 0.12 * depth_per_metre);
+}
+
+fn sky_ray_visibility(world_pos: vec3<f32>, distance_to_eye: f32) -> f32 {
+    let splits = frame.cascade_splits.xyz;
+    var cascade = select(0u, 1u, distance_to_eye > splits.x);
+    if (distance_to_eye > splits.y) { cascade = 2u; }
+    let visible = sky_ray_cascade(world_pos, cascade);
+    if (cascade == 2u) { return max(visible, 0.0); }
+    let boundary = splits[cascade];
+    let first = select(0.0, splits.x, cascade == 1u);
+    let blend = smoothstep(mix(first, boundary, 0.85), boundary, distance_to_eye);
+    if (visible >= 0.0 && blend <= 0.0) { return visible; }
+    let next = sky_ray_cascade(world_pos, cascade + 1u);
+    if (next < 0.0) { return max(visible, 0.0); }
+    if (visible < 0.0) { return next; }
+    return mix(visible, next, blend);
+}
+
+fn sky_ray_radiance(eye: vec3<f32>, ray: vec3<f32>, reach: f32, pixel: vec2<f32>) -> vec3<f32> {
+    if (frame.sky_rays.x <= 0.0 || frame.params.z < 0.5) { return vec3<f32>(0.0); }
+    let limit = min(frame.cascade_splits.z, 128.0);
+    let distance = min(reach, limit);
+    if (distance <= 0.01) { return vec3<f32>(0.0); }
+    let samples = u32(frame.sky_rays.z);
+    let step = distance / f32(samples);
+    // Stable stratification in full-photo pixels, including across tile seams.
+    let seed = pixel + frame.photo.xy;
+    let jitter = fract(52.9829189 * fract(dot(seed, vec2<f32>(0.06711056, 0.00583715))));
+    let extinction = 0.018;
+    let scatter = 1.0 - exp(-extinction * step);
+    let decay = exp(-extinction * step);
+    let toward_light = max(dot(ray, frame.sun_dir.xyz), 0.0);
+    let phase = 0.2 + 0.8 * pow(toward_light, 4.0);
+    var transmission = 1.0;
+    var sum = 0.0;
+    for (var i = 0u; i < samples; i++) {
+        let t = (f32(i) + jitter) * step;
+        let near = smoothstep(0.0, max(frame.sky_rays.y, 0.01), t);
+        let far = 1.0 - smoothstep(limit * 0.8, limit, t);
+        sum += sky_ray_visibility(eye + ray*t, t) * near * far * transmission;
+        transmission *= decay;
+    }
+    // PBR object lighting does not use the EEP moon brightness multiplier.
+    let moon = frame.sky_sun.z < 0.0;
+    let light = select(frame.sun_color.rgb, frame.sun_color.rgb * frame.sky_misc.z, moon && frame.sky_ll.x == 0.0);
+    return light * (sum * scatter * phase * frame.sky_rays.x);
+}
+
+@fragment
+fn fs_sky_rays(in: SkyOut) -> @location(0) vec4<f32> {
+    let depth = textureLoad(depth_tex, vec2<i32>(in.clip.xy), 0);
+    let far_h = frame.inv_view_proj * vec4<f32>(in.ndc, max(depth, 0.00001), 1.0);
+    let end = far_h.xyz / far_h.w;
+    let delta = end - frame.camera_pos.xyz;
+    let distance_to_surface = min(length(delta), 128.0);
+    let ray = normalize(delta);
+    let light_sum = sky_ray_radiance(frame.camera_pos.xyz, ray, distance_to_surface, in.clip.xy);
+    return vec4<f32>(light_sum, 0.0);
+}'''
+
+[[patch]]
+id = "sky-rays-params"
+why = "the rays' parameters of a frame"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "    pub sun_visible: f32,\n"
+replace = '''pub sun_visible: f32,
+    // aurora-local-patch: sky-rays-params
+    /// Strength, near fade, step count and padding of directional scattering
+    /// (the viewer's `Settings::directional_rays`; zeros when off).
+    pub sky_rays: [f32; 4],'''
+
+# ----------------------------------------------------------- aurora-viewer
+
+[[patch]]
+id = "sky-rays-app"
+why = "the frame's rays from the settings and whether the sun and the moon are up"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "            sun_visible: env.sun_visible,\n"
+replace = '''sun_visible: env.sun_visible,
+            // aurora-local-patch: sky-rays-app
+            sky_rays: self.settings.directional_rays(env.sky.sun_dir.z >= 0.0, env.sky.moon_dir.z >= 0.0),'''
+
+[[patch]]
+id = "sky-rays-demo"
+why = "AURORA_DEMO_SKY_RAYS=sun|moon: the demo day with that body up and the other down"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = '''fn demo_day(sky: Llsd) -> Llsd {
+    use aurora_llsd::llsd_map;
+    let mut frames = aurora_llsd::Map::new();'''
+replace = '''// aurora-local-patch: sky-rays-demo
+// AURORA_DEMO_SKY_RAYS, ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+fn demo_day(mut sky: Llsd) -> Llsd {
+    use aurora_llsd::llsd_map;
+    let mut frames = aurora_llsd::Map::new();
+    if let Ok(mode) = std::env::var("AURORA_DEMO_SKY_RAYS")
+        && let Llsd::Map(ref mut map) = sky
+        && matches!(mode.as_str(), "sun" | "moon")
+    {
+        let rotation = |azimuth, elevation| {
+            let q = crate::ui::environment::rotation_from(azimuth, elevation);
+            Llsd::Array(q.to_array().into_iter().map(|v| Llsd::Real(v as f64)).collect())
+        };
+        let above = rotation(300.0, 26.0);
+        let below = rotation(120.0, -26.0);
+        let (sun, moon) = if mode == "sun" { (above, below) } else { (below, above) };
+        map.insert("sun_rotation".into(), sun);
+        map.insert("moon_rotation".into(), moon);
+        map.insert("moon_brightness".into(), Llsd::Real(0.75));
+    }'''
+
+[[patch]]
+id = "sky-rays-settings"
+why = "the rays' settings"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub shadow_quality: u8,\n"
+replace = '''pub shadow_quality: u8,
+    // aurora-local-patch: sky-rays-settings
+    // Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+    pub sky_rays_enabled: bool,
+    pub sky_ray_source: u8,
+    pub sky_ray_strength: f32,
+    pub sky_ray_fade: f32,
+    pub sky_ray_samples: u32,'''
+
+[[patch]]
+id = "sky-rays-settings-default"
+why = "off by default; Automatic source, strength 0.8, near fade 3 m, 32 samples"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "            shadow_quality: 3,\n"
+replace = '''shadow_quality: 3,
+            // aurora-local-patch: sky-rays-settings-default
+            sky_rays_enabled: false,
+            sky_ray_source: 0,
+            sky_ray_strength: 0.8,
+            sky_ray_fade: 3.0,
+            sky_ray_samples: 32,'''
+
+[[patch]]
+id = "sky-rays-settings-rule"
+why = "the renderer's rays: the settings in range, zeros when off or when the chosen body is down"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "impl Settings {\n"
+replace = '''impl Settings {
+    // aurora-local-patch: sky-rays-settings-rule
+    pub(crate) fn directional_rays(&self, sun_up: bool, moon_up: bool) -> [f32; 4] {
+        let active = match self.sky_ray_source {
+            1 => sun_up,
+            2 => !sun_up && moon_up,
+            _ => sun_up || moon_up,
+        };
+        if self.sky_rays_enabled && active {
+            [
+                self.sky_ray_strength.clamp(0.0, 4.0),
+                self.sky_ray_fade.clamp(0.0, 40.0),
+                self.sky_ray_samples.clamp(16, 256) as f32,
+                0.0,
+            ]
+        } else {
+            [0.0; 4]
+        }
+    }
+'''
+
+[[patch]]
+id = "sky-rays-settings-test"
+why = "the commit's test: the rays follow the body that casts shadows"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = '''        assert_eq!(loaded.render_scale_percent, 67);
+    }
+}
+'''
+replace = '''assert_eq!(loaded.render_scale_percent, 67);
+    }
+}
+
+// aurora-local-patch: sky-rays-settings-test
+#[cfg(test)]
+mod directional_ray_tests {
+    use super::Settings;
+
+    #[test]
+    fn follows_the_body_that_casts_shadows() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.directional_rays(true, false)[0], 0.0);
+        settings.sky_rays_enabled = true;
+        assert!(settings.directional_rays(false, true)[0] > 0.0);
+        settings.sky_ray_source = 2;
+        assert_eq!(settings.directional_rays(true, true)[0], 0.0);
+        assert!(settings.directional_rays(false, true)[0] > 0.0);
+        settings.sky_ray_source = 1;
+        assert_eq!(settings.directional_rays(false, true)[0], 0.0);
+    }
+}'''
+
+[[patch]]
+id = "sky-rays-options"
+why = "the rays' controls, under the shadows (greyed out with shadows off)"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = '''        let off = cx.s.shadow_quality == 0;
+        cx.subs(off, |cx| {
+'''
+replace = '''let off = cx.s.shadow_quality == 0;
+        cx.subs(off, |cx| {
+            // aurora-local-patch: sky-rays-options
+            // Ported from https://github.com/rickrizzlers/Aurora-Sun-Moon-Preview/commit/c5d71a4a61c9ef7e6f280dc2059ca87703e755b1
+            cx.toggle(tr!("sky-rays-enabled"), tr!("sky-rays-help"), &field!(sky_rays_enabled));
+            cx.combo(
+                tr!("sky-rays-source"),
+                tr!("sky-rays-help"),
+                &field!(sky_ray_source),
+                &[(0, tr!("sky-rays-auto")), (1, tr!("sky-rays-sun")), (2, tr!("sky-rays-moon"))],
+            );
+            cx.slider(tr!("sky-rays-strength"), "", &field!(sky_ray_strength), 0.0..=4.0, "");
+            cx.slider(tr!("sky-rays-fade"), "", &field!(sky_ray_fade), 0.0..=40.0, " m");
+            cx.slider(tr!("sky-rays-samples"), "", &field!(sky_ray_samples), 16..=256, "");'''

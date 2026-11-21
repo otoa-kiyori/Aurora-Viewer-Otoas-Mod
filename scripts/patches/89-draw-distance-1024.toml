@@ -1,0 +1,138 @@
+# The photo boost raises the draw distance to 1,024 m, the top of the draw
+# distance range.
+#
+# Upstream now offers 32..1024 m itself (the settings sanitizer, the
+# Preferences and Quick preferences sliders, the "dd" chat command, saved
+# qualities and presets, world/parked.rs OUT_OF_REACH: settings::
+# DRAW_DISTANCE_MIN / DRAW_DISTANCE_MAX), so those parts of this file are
+# retired. Upstream keeps the photo boost at 512 m on purpose (video memory);
+# this file keeps raising it to 1,024 m, as before. The memory estimate
+# (extra_bytes) counts the ground by the draw distance's area, and the photo
+# quality memory ladder gets a 512 m step between 1,024 and 384, so that it
+# lowers the draw distance by small steps when the card cannot hold it.
+# The tests that expect the photo boost's 512 m (snapshot/quality.rs and the
+# auto-tune test of a photo taken under its hold) expect 1,024 m.
+#
+# Retire this file if upstream raises the photo maxima itself: the patches
+# then report DRIFT or ALREADY.
+
+# ------------------------------------------------------------ photo quality
+
+[[patch]]
+id = "draw-distance-1024-photo-maxima"
+why = "the photo quality's draw distance maximum is the top of the range, 1,024 m (upstream keeps 512 m); the memory ladder lowers it when the card cannot hold it"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = """/// The most each setting goes to. The draw distance stays at 512 m on
+/// purpose, below Aurora's 1,024 m (the Legacy Viewer's slider): every metre
+/// beyond grows the ground's buffers by area ([`GROUND_BYTES_PER_M2`]), and a
+/// boost must not run a photo out of video memory; a user already at 1,024 m
+/// keeps it, since a boost never lowers a setting. The LOD factor goes to 4
+/// (the Legacy Viewer allows 8 by hand). Every avatar is drawn in full (no
+/// impostor up to Aurora's 100, no complexity limit): a photo shows people as
+/// they are.
+fn photo_maxima() -> Values {
+    Values {
+        draw_distance: 512.0,"""
+replace = """/// The most each setting goes to. The draw distance goes to 1,024 m, the top
+/// of its range (the Legacy Viewer's slider; the local patch set, upstream
+/// stops at 512 m): every metre grows the ground's buffers by area
+/// ([`GROUND_BYTES_PER_M2`]), which the memory estimate counts, and the
+/// ladder lowers the draw distance (512, 384, 256, 128 m) when the card cannot
+/// hold it. The LOD factor goes to 4 (the Legacy Viewer allows 8 by hand).
+/// Every avatar is drawn in full (no impostor up to Aurora's 100, no
+/// complexity limit): a photo shows people as they are.
+fn photo_maxima() -> Values {
+    Values {
+        draw_distance: 1024.0, // aurora-local-patch: draw-distance-1024-photo-maxima"""
+
+[[patch]]
+id = "draw-distance-1024-ladder-doc"
+why = "the photo quality ladder doc lists its new 512 m draw distance step"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = """distance (384, 256, 128 m, then the user's), then the shadows (level 3,
+/// a quarter"""
+replace = """distance (512, 384, 256, 128 m, then the user's), then the shadows (level 3,
+// aurora-local-patch: draw-distance-1024-ladder-doc
+/// a quarter"""
+
+[[patch]]
+id = "draw-distance-1024-ladder"
+why = "from 1,024 m the ladder lowers the draw distance by halves first: 512 m before 384"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = "for d in [384.0, 256.0, 128.0] {"
+replace = """for d in [512.0, 384.0, 256.0, 128.0] {
+        // aurora-local-patch: draw-distance-1024-ladder"""
+
+# ------------------------------------------------------------------- tests
+
+[[patch]]
+id = "draw-distance-1024-photo-test-boost"
+why = "the boost test expects the photo maxima's 1,024 m"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = "assert_eq!((s.draw_distance, s.lod_factor, s.max_avatars), (512.0, 4.0, 100));"
+replace = "assert_eq!((s.draw_distance, s.lod_factor, s.max_avatars), (1024.0, 4.0, 100)); // aurora-local-patch: draw-distance-1024-photo-test-boost"
+
+[[patch]]
+id = "draw-distance-1024-photo-test-ladder"
+why = "the ladder test lists the draw distance steps from 1,024 m, 512 m included"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = """// MSAA 8x, 4x, 2x, SMAA; 512, 384, 256, 128, 96 m; shadows 4, 3 (the
+        // user's); then the rest"""
+replace = """// MSAA 8x, 4x, 2x, SMAA; 1024, 512, 384, 256, 128, 96 m; shadows 4, 3 (the
+        // user's); then the rest
+        // aurora-local-patch: draw-distance-1024-photo-test-ladder"""
+
+[[patch]]
+id = "draw-distance-1024-photo-test-ladder-steps"
+why = "the ladder test's draw distance list and step count with the extra 512 m step"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = """assert_eq!(&dd[..5], &[512.0, 384.0, 256.0, 128.0, 96.0]);
+        assert_eq!(steps[8].shadow_quality, 3);
+        assert_eq!(steps.len(), 10);"""
+replace = """assert_eq!(&dd[..6], &[1024.0, 512.0, 384.0, 256.0, 128.0, 96.0]); // aurora-local-patch: draw-distance-1024-photo-test-ladder-steps
+        assert_eq!(steps[9].shadow_quality, 3);
+        assert_eq!(steps.len(), 11);"""
+
+[[patch]]
+id = "draw-distance-1024-photo-test-retarget-top"
+why = "back up to the whole boost: the draw distance is the photo maxima's 1,024 m"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = "assert_eq!((s.draw_distance, s.shadow_quality, s.antialiasing), (512.0, 4, MSAA_4X));"
+replace = "assert_eq!((s.draw_distance, s.shadow_quality, s.antialiasing), (1024.0, 4, MSAA_4X)); // aurora-local-patch: draw-distance-1024-photo-test-retarget-top"
+
+[[patch]]
+id = "draw-distance-1024-photo-test-held"
+why = "a boosted profile shows the photo maxima's 1,024 m"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = "assert_eq!(s.draw_distance, 512.0);"
+replace = "assert_eq!(s.draw_distance, 1024.0); // aurora-local-patch: draw-distance-1024-photo-test-held"
+
+[[patch]]
+id = "draw-distance-1024-photo-test-estimate"
+why = "the whole boost now draws 1,024 m of ground: about 2.5 GB more at the test's 3440 x 1369 screen instead of 1.4 GB (the ground is 512 bytes per m2, pi * 1024^2 * 512 is about 1.7 GB), which the memory ladder is there to lower"
+paths = ["crates/aurora-viewer/src/snapshot/quality.rs"]
+op = "literal"
+find = """// the whole boost there: about 1.4 GB
+        let all = extra_bytes(&user, &boosted(user), s) / MB;
+        assert!((1300..1550).contains(&all), "{all} MB");"""
+replace = """// the whole boost there: about 2.5 GB with the 1,024 m draw distance
+        let all = extra_bytes(&user, &boosted(user), s) / MB;
+        assert!((2400..2700).contains(&all), "{all} MB"); // aurora-local-patch: draw-distance-1024-photo-test-estimate"""
+
+[[patch]]
+id = "draw-distance-1024-autotune-test-photo"
+why = "upstream's auto-tune test of a photo boost under the hold expects the photo maxima's draw distance, now 1,024 m"
+paths = ["crates/aurora-viewer/src/settings/autotune/tests.rs"]
+op = "regex"
+fn = "the_photo_quality_and_the_steps_keep_the_users_values"
+expect = 3
+pattern = '^(\s*assert_eq!\(\((?:s|off)\.draw_distance, (?:s|off)\.max_avatars\), )\(512\.0, 100\)(.*;)$'
+replace = '\g<1>(1024.0, 100)\g<2> // aurora-local-patch: draw-distance-1024-autotune-test-photo'
