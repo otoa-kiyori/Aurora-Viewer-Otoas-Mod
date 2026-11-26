@@ -1,0 +1,60 @@
+# The import window follows Aurora's own logging settings too.
+#
+# Upstream 0.9.2 (#2250, #2524) imported every transcript a Legacy Viewer
+# folder holds, the conversations and the nearby chat alike, whatever
+# Preferences > Chat said. Upstream #2540 (d981d286) now makes the import at
+# login follow log_im and log_nearby (import::Kinds, a file left out is not
+# recorded as imported, both off: no import), which is what this manifest
+# used to do for the login import; that part is retired.
+#
+# Upstream keeps the import window taking everything (Kinds::ALL), because
+# the user asked for it. Here it follows the same two settings: a
+# conversation (IM, group, conference) comes in only while log_im is on, the
+# nearby chat only while log_nearby is on, so that turning a log off keeps
+# it out of Aurora's history whichever way the import starts.
+#
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "chat-import-window-kinds"
+why = "the import window takes only what the logging settings keep, like the import at login"
+paths = ["crates/aurora-viewer/src/**/chat_log.rs"]
+op = "literal"
+fn = "import"
+find = "self.start_import(import::Sources::Folders(folders), import::Kinds::ALL, false)"
+replace = '''// aurora-local-patch: chat-import-window-kinds
+        let kinds = import::Kinds {
+            im: self.cfg.log_im,
+            nearby: self.cfg.log_nearby,
+        };
+        self.start_import(import::Sources::Folders(folders), kinds, false)'''
+
+[[patch]]
+id = "chat-import-window-test"
+why = "upstream's test expects the window to import with both logs off; here it follows them"
+paths = ["crates/aurora-viewer/src/**/transcripts.rs"]
+op = "literal"
+fn = "with_both_saves_off_the_login_import_does_not_run_and_the_window_still_does"
+find = '''w.chat_log.cfg.log_nearby = false;
+        assert!(w.chat_log.import(vec![from.clone()]));
+        assert_eq!(imported(&mut w).added, 2);'''
+replace = '''// aurora-local-patch: chat-import-window-test
+        // the window follows the logging settings: both off, nothing comes in
+        w.chat_log.cfg.log_nearby = false;
+        assert!(w.chat_log.import(vec![from.clone()]));
+        assert_eq!(imported(&mut w).added, 0);
+        // conversations only (Aurora's defaults): Bob, not the nearby chat
+        w.chat_log.cfg.log_im = true;
+        assert!(w.chat_log.import(vec![from.clone()]));
+        let report = imported(&mut w);
+        assert_eq!(report.added, 1);
+        assert_eq!(report.changed.into_iter().collect::<Vec<_>>(), ["Bob"]);'''
+
+[[patch]]
+id = "chat-import-all-test-only"
+why = "with the window following the settings, Kinds::ALL is used by upstream's tests only: no dead-code warning in the release build"
+paths = ["crates/aurora-viewer/src/**/chat_log/import.rs"]
+op = "literal"
+find = "pub const ALL: Kinds = Kinds { im: true, nearby: true };"
+replace = '''#[cfg_attr(not(test), allow(dead_code))] // aurora-local-patch: chat-import-all-test-only
+    pub const ALL: Kinds = Kinds { im: true, nearby: true };'''

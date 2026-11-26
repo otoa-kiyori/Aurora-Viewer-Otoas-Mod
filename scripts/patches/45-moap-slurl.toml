@@ -1,0 +1,193 @@
+# Links clicked on an in-world web page (media on a prim or a HUD, parcel
+# media).
+#
+# The browser plugin hands a clicked secondlife:// link back to the viewer
+# (click_nofollow, nav_type "clicked") instead of loading it. Upstream now
+# keeps those clicks (media/update.rs, `MediaManager::links`, user clicks
+# only through `MediaEvent::clicked_url`) and runs each one as the floating
+# browser does (`clicked_link_action`): a teleport SLURL teleports as from a
+# trusted window, and the commands the Legacy Viewer refuses from an
+# untrusted page run. These patches keep upstream's capture and route the
+# app's loop through the Legacy Viewer's rules for an UNTRUSTED browser
+# (LLViewerMediaImpl::handleMediaEvent -> LLURLDispatcher::dispatch with
+# trusted_browser false; indra/newview/llviewermedia.cpp, llurldispatcher.cpp,
+# llcommandhandler.cpp):
+# - a place SLURL opens the place details, never a teleport;
+# - secondlife:///app/teleport/... always asks before teleporting, whatever
+#   the teleport confirmation setting (the Legacy Viewer's TeleportViaSLAPP);
+# - the UNTRUSTED_BLOCK commands are refused with the blocked-link notice;
+#   the others run as the same link clicked in a chat text (which upstream
+#   already reads as untrusted content, see slapp.rs);
+# - any other scheme goes to the existing OpenUrl scheme guard, unchanged.
+# Only clicks count: a navigation started by a script or a redirect is
+# ignored (upstream's clicked_url), simpler than the Legacy Viewer's
+# throttle of those.
+#
+# Pairs: moap-slurl-test checks moap-slurl-rule; moap-slurl-dispatch needs
+# moap-slurl-rule. Skip them all together.
+
+[[patch]]
+id = "moap-slurl-rule"
+why = "The pure rule for a link clicked on an in-world page (upstream's media.links): reuses clicked_link_action (the floating browser's SLURL/app-link parsing) and adds the untrusted adjustments: app/teleport becomes a forced confirmation, the Legacy Viewer's UNTRUSTED_BLOCK commands are refused by name (so a command upstream later learns to run for trusted sources stays refused here). Plus the kind of link for the log, without the URL."
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "regex"
+pattern = '^((?:///[^\n]*\n)*)(pub\(crate\) fn clicked_link_action\(url: &str\) -> super::context::CtxAction \{)$'
+replace = '''// aurora-local-patch: moap-slurl-rule
+/// What a link clicked on an in-world web page (prim or parcel media) does.
+/// Such a page is untrusted content, as for the Legacy Viewer
+/// (LLViewerMediaImpl::handleMediaEvent dispatches with trusted_browser
+/// false; indra/newview/llviewermedia.cpp, llurldispatcher.cpp,
+/// llcommandhandler.cpp).
+#[derive(Debug)]
+pub(crate) enum InWorldClick {
+    /// Run like the same link clicked in a chat text.
+    Action(super::context::CtxAction),
+    /// `secondlife:///app/teleport/...`: asked first, whatever the teleport
+    /// confirmation setting (LLTeleportHandler's TeleportViaSLAPP notice).
+    ConfirmTeleport(String, glam::Vec3),
+    /// An UNTRUSTED_BLOCK command: refused with the blocked-link notice.
+    Blocked,
+}
+
+/// The commands the Legacy Viewer refuses from an untrusted browser
+/// (handlers registered UNTRUSTED_BLOCK), checked by name before parsing.
+/// Its own and its test handlers are unknown here (the unsupported notice).
+const IN_WORLD_BLOCKED: &[&str] = &[
+    "floater",
+    "balance",
+    "wear_folder",
+    "add_folder",
+    "remove_folder",
+    "object",
+    "location_login",
+];
+
+/// The command of a `secondlife:///app/<command>/...` link, lowercased
+/// (case-insensitive scheme, as slapp::parse); None for another link.
+fn app_command(url: &str) -> Option<String> {
+    const PREFIX: &str = "secondlife:///app/";
+    let rest = url
+        .get(..PREFIX.len())
+        .filter(|p| p.eq_ignore_ascii_case(PREFIX))
+        .map(|_| &url[PREFIX.len()..])?;
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    Some(path.split('/').find(|t| !t.is_empty()).unwrap_or("").to_ascii_lowercase())
+}
+
+/// A link clicked on an in-world page, with the untrusted rules.
+pub(crate) fn in_world_click(url: &str) -> InWorldClick {
+    use super::context::CtxAction;
+    if app_command(url).is_some_and(|c| IN_WORLD_BLOCKED.contains(&c.as_str())) {
+        return InWorldClick::Blocked;
+    }
+    match clicked_link_action(url) {
+        CtxAction::TeleportToPlace(region, pos) => InWorldClick::ConfirmTeleport(region, pos),
+        CtxAction::AppLink(crate::slapp::AppLink::Blocked(_)) => InWorldClick::Blocked,
+        action => InWorldClick::Action(action),
+    }
+}
+
+/// The kind of a clicked link for the log (teleport, place, app/<command>,
+/// other), never the URL itself.
+pub(crate) fn in_world_click_kind(url: &str) -> String {
+    match (crate::slurl::place_link(url), app_command(url)) {
+        (Some(place), _) if place.teleport => "teleport".into(),
+        (Some(_), _) => "place".into(),
+        (None, Some(command)) => {
+            let command: String = command
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .take(32)
+                .collect();
+            format!("app/{command}")
+        }
+        (None, None) => "other".into(),
+    }
+}
+
+\1\2'''
+
+[[patch]]
+id = "moap-slurl-dispatch"
+why = "Upstream's loop over the links clicked on an in-world page (media.links, which ran them as a trusted window does) runs each with moap-slurl-rule instead: the action through the context-action loop, app/teleport through the place teleport confirmation (set directly, so the confirm_teleports setting cannot skip it), a blocked command with the blocked-link notice. One info line per click with its kind, not the URL."
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''for url in std::mem::take(&mut self.media.links) {
+                    self.on_ctx_action(crate::ui::web_view::clicked_link_action(&url));
+                }'''
+replace = '''// aurora-local-patch: moap-slurl-dispatch
+                for url in std::mem::take(&mut self.media.links) {
+                    use ui::web_view::InWorldClick;
+                    let kind = ui::web_view::in_world_click_kind(&url);
+                    log::info!("media: link clicked on an in-world page ({kind})");
+                    match ui::web_view::in_world_click(&url) {
+                        InWorldClick::Action(action) => ui::context::request(&self.egui_ctx, action),
+                        InWorldClick::ConfirmTeleport(region, pos) => self.place_confirm = Some((region, pos, false)),
+                        InWorldClick::Blocked => {
+                            self.world.notifications.push(
+                                crate::world::notifications::Kind::Info,
+                                aurora_i18n::tr!("ui-chat-applink-blocked"),
+                                "",
+                                crate::world::notifications::Data::None,
+                            );
+                        }
+                    }
+                }'''
+
+[[patch]]
+id = "moap-slurl-test"
+why = "Checks moap-slurl-rule: a place SLURL opens the place details, app/teleport always asks, the UNTRUSTED_BLOCK commands are refused (also the ones upstream does not parse), the allowed app links and web links keep the clicked-link path, and the log kind never carries the URL."
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "regex"
+pattern = '^(#\[cfg\(test\)\]\nmod tests \{\n    use super::\*;\n)'
+replace = '''\1
+    // aurora-local-patch: moap-slurl-test
+    #[test]
+    fn in_world_place_slurl_opens_place_details() {
+        let click = in_world_click("secondlife://Aurora%20Plaza/12/34/56");
+        assert!(
+            matches!(click, InWorldClick::Action(super::super::context::CtxAction::ShowPlaceInfo(region, pos))
+            if region == "Aurora Plaza" && pos == glam::Vec3::new(12.0, 34.0, 56.0))
+        );
+        assert_eq!(in_world_click_kind("secondlife://Aurora%20Plaza/12/34/56"), "place");
+    }
+
+    #[test]
+    fn in_world_teleport_slurl_always_asks() {
+        let url = "secondlife:///app/teleport/Aurora%20Plaza/12/34/56";
+        assert!(matches!(in_world_click(url), InWorldClick::ConfirmTeleport(region, pos)
+            if region == "Aurora Plaza" && pos == glam::Vec3::new(12.0, 34.0, 56.0)));
+        assert_eq!(in_world_click_kind(url), "teleport");
+    }
+
+    #[test]
+    fn in_world_untrusted_block_commands_are_refused() {
+        for url in [
+            "secondlife:///app/balance/request",
+            "secondlife:///app/wear_folder/?folder_id=0e346d8b-4433-4d66-a6b0-fd37083abc4c",
+            "secondlife:///app/add_folder/?folder_id=0e346d8b-4433-4d66-a6b0-fd37083abc4c",
+            "secondlife:///app/remove_folder/?folder_id=0e346d8b-4433-4d66-a6b0-fd37083abc4c",
+            "secondlife:///app/floater/preferences",
+            "SECONDLIFE:///app/Object/0e346d8b-4433-4d66-a6b0-fd37083abc4c/edit",
+            "secondlife:///app/location_login/Aurora/1/2/3",
+        ] {
+            assert!(matches!(in_world_click(url), InWorldClick::Blocked), "{url}");
+        }
+    }
+
+    #[test]
+    fn in_world_allowed_app_links_and_web_links_keep_their_path() {
+        use super::super::context::CtxAction;
+        use crate::slapp::AppLink;
+        let group = "secondlife:///app/group/0e346d8b-4433-4d66-a6b0-fd37083abc4c/about";
+        assert!(matches!(
+            in_world_click(group),
+            InWorldClick::Action(CtxAction::AppLink(AppLink::Group(_)))
+        ));
+        assert_eq!(in_world_click_kind(group), "app/group");
+        assert!(matches!(in_world_click("https://example.org/"),
+            InWorldClick::Action(CtxAction::OpenUrl(url)) if url == "https://example.org/"));
+        assert_eq!(in_world_click_kind("https://example.org/private?token=x"), "other");
+        assert_eq!(in_world_click_kind("secondlife:///app/we<ird>%20cmd/x"), "app/weird20cmd");
+    }
+'''

@@ -1,0 +1,2565 @@
+# The environment's texture elements cross-fade during an environment
+# change: the cloud noise, the sun, the moon, the rainbow, the 22° halo and
+# the water normal map each show two layers at once, first · (1 − blend) +
+# next · blend, each layer drawn exactly as its own side draws it, the blend
+# being the change's own linear progress over its time (the manual
+# transition time for a personal change). The frame used to switch to the
+# next texture half way and to slide, zoom, warp and speed up the one it
+# showed with the lerped values. No setting, no interface, nothing sent: the
+# frames' own fields (what the editors, RLVa's replies and saved settings
+# read) keep their values.
+#
+# Only an environment change fades: the selector's fade (EnvSelector::frame,
+# world/eep_env.rs: another environment, a parcel's, an altitude zone's, a
+# local, pushed or photo one, a fade begun over another), through
+# SkyFrame::fade_to_with and WaterFrame::fade_to_with. The blend between the
+# keyframes of a day cycle (DayCycle::sky_at, water_at) stays the plain lerp,
+# exactly as upstream: ids switch half way, offsets, scale, variance, scroll
+# rate, waves and the normal scale are lerped, no fade is carried, every
+# share is 0. A day cycle moves between two keyframes for hours; fading
+# there doubled the reads all that time.
+#
+# A layer (files/env-texture-fade/eep_fade.rs, module doc) is a texture with
+# everything that places, sizes, moves or warps its pattern, and a
+# difference in any of them starts the fade:
+# - clouds: the texture, cloud_pos_density1 and 2 xy, cloud_scale,
+#   cloud_variance, cloud_scroll_rate and the layer's own scroll position
+#   (eep_fade.rs CloudScroll, which replaces the one shared scroll of the
+#   lerped rate: each layer advances at its own rate; a layer coming in
+#   starts on the one it fades from; the one that remains goes on from its
+#   place; a still sky keeps the one accumulated scroll of before);
+# - water: the normal map, wave1, wave2 (direction and speed) and the normal
+#   scale. The water has no accumulated position: every shader that reads the
+#   normal pattern places a map layer at wave × time (env.wgsl water_pixel,
+#   above and below the surface; patch 91's slope pass; patch 120's shape),
+#   so a layer with its own waves is at its own place in every one of them.
+#   Patch 109's open-sea swell travels along a layer's wave1: each layer
+#   has its own swell, in its own direction.
+# Left blended as numbers, on both layers alike (amounts and colours, they
+# move no pattern): the cloud colour, densities (cloud_pos_density1/2 z) and
+# cover (cloud_shadow); the water fog, fresnel and blur multiplier.
+#
+# Layers: fade_to gives each element its weighted layers (two; three when a
+# change begins over another, the rule takes up to four); equal ones merge,
+# the two heaviest stay, renormalised, in the order they come, so a texture
+# keeps its slot; the scroll positions follow the layers, not the slots, and
+# a layer taking a slot over takes the place of the one it replaces. A frame
+# keeps its fade with its own fields as blended: changed afterwards (an
+# editor, RLVa, an experience's push) it shows its own textures again.
+#
+# Loading (eep_fade.rs TextureClock): both textures are asked for as soon as
+# a frame names them (Scene::env_fade_textures, after the first ones, so
+# that a texture moving from one set to the other stays resident), and the
+# scene tells the selector which are in (Scene::env_ready_textures). An
+# incoming texture still loading keeps its layer in the second slot at share
+# 0 (the old layer alone, in its own place); once in, its share rises from 0
+# at twice the change's pace until it meets the change's progress, then
+# follows it; past the change's time the change goes on for the textures
+# alone (the values are the target's) until it reaches 1, the old layer
+# staying meanwhile; a texture not in 30 s after the change's time switches
+# as before. A nil texture is its element's stand-in and keeps its share: no
+# clouds (their cover thins), the procedural sun, no moon, no rainbow or
+# halo, the analytic water.
+#
+# GPU: nine vec4 appended to the frame uniform (renderer.rs FrameU,
+# common.wgsl Frame; a test compares the two through naga), zero while
+# nothing fades, and every second tap behind a test of a uniform share above
+# 0: with no fade the shaders take exactly their earlier taps. The flat
+# clouds (sky_clouds, sky_cloud_layer): each layer its own texture, zoom,
+# variance and offsets at its own scroll; the two images dissolved (covers
+# mixed, colour weighted by cover). The water: the three normal taps of each
+# map at its own waves and scale. The sun's and the moon's texels
+# (mix_disc), the rainbow's and the halo's taps, and patch 91's slope pass
+# (its own small uniform, files of 91). Volumetric clouds: a second weather
+# map (fs_cloud_weather_next, drawn when the first is, only while a second
+# texture fades), laid by the trace at the second layer's own tile and place
+# with its 3D noise anchored to its own pattern, the two densities weighted
+# by the shares (clouds.rs LayerFade, clouds.wgsl cloud_density). Patch 120's
+# wave shape: a second height map in 256 rows of its own under the first,
+# made on the background jobs from the next normal map as the first is, and
+# mixed by the share in water_shape_at and in its CPU mirror; when a fade
+# ends the next map's height map becomes the first's (files of 120). Patch
+# 109's swell: while the two layers' big waves point different ways, the
+# old swell and the new one, each in its own direction, mixed by the water
+# layer's share in the displacement, the normals, the crest foam and the
+# CPU's copy (a fifth vec4 of the swell's uniform tail, files of 109); when
+# patch 91's caustics fade to or from the analytic water (a nil map, which
+# it draws from another light map), they dim to nothing at the middle of
+# the share and come back in the other pattern.
+#
+# Legacy Viewer: LLSettingsSky::blend and LLSettingsWater::blend
+# (indra/llinventory/llsettingssky.cpp, llsettingswater.cpp) keep the next
+# texture ids and a blend factor; cloudsF.glsl, sunDiscF.glsl and
+# waterF.glsl mix with it (LLDrawPoolWLSky::renderSkyCloudsDeferred and
+# renderHeavenlyBodies, indra/newview/lldrawpoolwlsky.cpp;
+# LLDrawPoolWater::renderPostDeferred, lldrawpoolwater.cpp), at the lerped
+# offsets, scale and waves, with one scroll of the lerped rate: both
+# textures slide, zoom and speed up. Its moon keeps the first texture to the
+# end (the blend is commented out in renderHeavenlyBodies), its rainbow and
+# halo have no next texture (renderSkyHazeDeferred binds the current sky's),
+# and clouds that do not scroll do not blend. Here every element fades and
+# each layer keeps its own place, size and motion: better than the Legacy
+# Viewer.
+#
+# Cost while something fades (texture reads, counted): flat clouds 7 to 14
+# a sky pixel; sun, moon, rainbow, halo 1 to 2 where each is drawn; water 3
+# to 6 a pixel; volumetric clouds a second weather map of 2 taps a texel when
+# the first is drawn, and a second weather tap and density (3D noise) for
+# each density of the march; patch 91's slope pass 3 to 6 a texel; patch
+# 120's shape (Ratio above 0) 16..24 to 32..48 loads a vertex and a pixel;
+# patch 109's swell, while the two directions differ, a second set of four
+# waves for each of its evaluations (a vertex, a pixel, the CPU's queries);
+# only while an environment change lasts (its 1 to 5 s, or the manual
+# transition time, and a late texture's join), never under a day cycle
+# alone. Nothing fading: the same reads as before; on the CPU a few
+# comparisons a frame and the scroll of one layer.
+#
+# Apply or skip the whole file, not one patch of it; patches 91, 109 and 120
+# read its fields, apply it with them.
+
+# ------------------------------------------------------------ frames
+
+[[patch]]
+id = "env-texture-fade-module"
+why = "the fade of each texture element (two layers, each with everything that places, sizes, moves or warps its pattern, a share), the four-way merge of nested fades, the late textures' clock, the cloud layers' own scroll positions, the frames' stamps, the tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/world/eep_fade.rs"]
+source = "files/env-texture-fade/eep_fade.rs"
+
+[[patch]]
+id = "env-texture-fade-mod"
+why = "the world's module beside the other EEP ones"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''pub mod eep_env;
+pub mod eep_photo;'''
+replace = '''pub mod eep_env;
+pub mod eep_fade; // aurora-local-patch: env-texture-fade-mod
+pub mod eep_photo;'''
+
+[[patch]]
+id = "env-texture-fade-sky-field"
+why = "a sky frame carries what its texture elements show while it blends two others"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''    pub rainbow_id: Uuid,
+    pub halo_id: Uuid,
+}'''
+replace = '''pub rainbow_id: Uuid,
+    pub halo_id: Uuid,
+    // aurora-local-patch: env-texture-fade-sky-field
+    /// While this frame blends two others, what its texture elements show
+    /// (world/eep_fade.rs): two textures each, with the frame's own fields
+    /// they were blended to; None while nothing fades.
+    pub texture_fade: Option<super::eep_fade::Stamped<super::eep_fade::SkyFade>>,
+}'''
+
+[[patch]]
+id = "env-texture-fade-settings-size"
+why = "a sky frame carries its texture cross-fade by value, so that it stays Copy: the parsed asset's sky variant is the larger for it"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''/// One settings asset (LLSettingsBase "type": sky, water or daycycle).
+#[derive(Debug, Clone)]
+pub enum Settings {'''
+replace = '''/// One settings asset (LLSettingsBase "type": sky, water or daycycle).
+// aurora-local-patch: env-texture-fade-settings-size
+// (a sky frame carries its texture cross-fade by value, world/eep_fade.rs,
+// so that it stays Copy, and the sky variant is the larger for it; a parsed
+// asset is short-lived, and boxing it would touch every match on it)
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum Settings {'''
+
+[[patch]]
+id = "env-texture-fade-sky-default"
+why = "goes with env-texture-fade-sky-field: no fade"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = "halo_id: DEFAULT_HALO_ID,"
+replace = '''halo_id: DEFAULT_HALO_ID,
+            texture_fade: None, // aurora-local-patch: env-texture-fade-sky-default'''
+
+[[patch]]
+id = "env-texture-fade-sky-parse"
+why = "goes with env-texture-fade-sky-field: a parsed sky does not fade"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''halo_id: uuid(s, "halo_id", d.halo_id),'''
+replace = '''halo_id: uuid(s, "halo_id", d.halo_id),
+        texture_fade: None, // aurora-local-patch: env-texture-fade-sky-parse'''
+
+[[patch]]
+id = "env-texture-fade-sky-lerp"
+why = "goes with env-texture-fade-sky-field: the plain blend (a day cycle's keyframes) stays as before and carries no fade; only an environment change's blend fades (SkyFrame::fade_to, world/eep_fade.rs)"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''            halo_id: pick(a.halo_id, b.halo_id),
+        }'''
+replace = '''halo_id: pick(a.halo_id, b.halo_id),
+            // aurora-local-patch: env-texture-fade-sky-lerp
+            // (no cross-fade here: a day cycle's keyframes switch their
+            // textures half way, as before; an environment change fades,
+            // SkyFrame::fade_to in world/eep_fade.rs)
+            texture_fade: None,
+        }'''
+
+[[patch]]
+id = "env-texture-fade-water-field"
+why = "a water frame carries what its normal map shows while it blends two others"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''    pub wave2: Vec2,
+    pub normal_map: Uuid,
+}'''
+replace = '''pub wave2: Vec2,
+    pub normal_map: Uuid,
+    // aurora-local-patch: env-texture-fade-water-field
+    /// While this frame blends two others, what its normal map shows
+    /// (world/eep_fade.rs); None while nothing fades.
+    pub texture_fade: Option<super::eep_fade::Stamped<super::eep_fade::WaterFade>>,
+}'''
+
+[[patch]]
+id = "env-texture-fade-water-validated"
+why = "goes with env-texture-fade-water-field: the ranges keep the fade (a value clamped no longer matches it)"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = "normal_map: self.normal_map,"
+replace = '''normal_map: self.normal_map,
+            texture_fade: self.texture_fade, // aurora-local-patch: env-texture-fade-water-validated'''
+
+[[patch]]
+id = "env-texture-fade-water-default"
+why = "goes with env-texture-fade-water-field: no fade"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = "normal_map: DEFAULT_WATER_NORMAL,"
+replace = '''normal_map: DEFAULT_WATER_NORMAL,
+            texture_fade: None, // aurora-local-patch: env-texture-fade-water-default'''
+
+[[patch]]
+id = "env-texture-fade-water-parse"
+why = "goes with env-texture-fade-water-field: a parsed water does not fade"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''normal_map: uuid(w, "normal_map", d.normal_map),'''
+replace = '''normal_map: uuid(w, "normal_map", d.normal_map),
+        texture_fade: None, // aurora-local-patch: env-texture-fade-water-parse'''
+
+[[patch]]
+id = "env-texture-fade-water-lerp"
+why = "goes with env-texture-fade-water-field: the plain blend (a day cycle's keyframes) stays as before and carries no fade (WaterFrame::fade_to fades, world/eep_fade.rs)"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''            normal_map: if t < 0.5 { a.normal_map } else { b.normal_map },
+        }'''
+replace = '''normal_map: if t < 0.5 { a.normal_map } else { b.normal_map },
+            // aurora-local-patch: env-texture-fade-water-lerp
+            // (no cross-fade: WaterFrame::fade_to, world/eep_fade.rs)
+            texture_fade: None,
+        }'''
+
+# ------------------------------------------------------------ selector
+
+[[patch]]
+id = "env-texture-fade-selector"
+why = "an environment change (the selector's fade: another environment, a parcel's, an altitude zone's, a local or pushed one, the photo window closing, one begun over another) cross-fades the textures, each at its own share (a texture still loading joins from its arrival, the change going on for the textures alone past its time); the day cycle beneath keeps its plain blend"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''        let (sky, water) = match self.fade {
+            Some(f) => {
+                let t = ((input.now - f.start) as f32 / f.duration).clamp(0.0, 1.0);
+                if t >= 1.0 {
+                    self.fade = None;
+                    (sky, water)
+                } else {
+                    (f.sky.lerp(&sky, t), f.water.lerp(&water, t))
+                }
+            }
+            None => (sky, water),
+        };'''
+replace = '''// aurora-local-patch: env-texture-fade-selector
+        // (the change cross-fades its textures, world/eep_fade.rs, each at its
+        // own share: the change's progress, or, for a texture still loading,
+        // from its arrival on; past its time the change goes on for its
+        // textures alone, the values being the target's; a day cycle's
+        // keyframes never fade)
+        let ready = self.ready_textures;
+        let mut ended = false;
+        let (sky, water) = match self.fade.as_mut() {
+            Some(f) => {
+                let t = ((input.now - f.start) as f32 / f.duration).clamp(0.0, 1.0);
+                let is_ready = |id: Uuid| id.is_nil() || ready.is_none_or(|r| r.contains(&id));
+                let waiting = super::eep_fade::waiting((&f.sky, &f.water), (&sky, &water), is_ready);
+                let shares = f.clock.advance(input.now, t, f.duration, waiting);
+                if t >= 1.0 && f.clock.done() {
+                    ended = true;
+                    (sky, water)
+                } else {
+                    let sky_shares = [shares[0], shares[1], shares[2], shares[3], shares[4]];
+                    (f.sky.fade_to_with(&sky, t, sky_shares), f.water.fade_to_with(&water, t, shares[5]))
+                }
+            }
+            None => (sky, water),
+        };
+        if ended {
+            self.fade = None;
+        }'''
+
+[[patch]]
+id = "env-texture-fade-selector-clock"
+why = "goes with env-texture-fade-selector: a change keeps the shares of its textures"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''struct Fade {
+    sky: SkyFrame,
+    water: WaterFrame,
+    start: f64,
+    duration: f32,
+}'''
+replace = '''struct Fade {
+    sky: SkyFrame,
+    water: WaterFrame,
+    start: f64,
+    duration: f32,
+    // aurora-local-patch: env-texture-fade-selector-clock
+    /// Each texture element's share of its incoming texture
+    /// (world/eep_fade.rs TextureClock).
+    clock: super::eep_fade::TextureClock,
+}'''
+
+[[patch]]
+id = "env-texture-fade-selector-start"
+why = "goes with env-texture-fade-selector-clock: every share starts at 0 with the change"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''            self.fade = (duration > 0.0).then_some(Fade {
+                sky: prev.sky,
+                water: prev.water,
+                start: input.now,
+                duration,
+            });'''
+replace = '''self.fade = (duration > 0.0).then_some(Fade {
+                sky: prev.sky,
+                water: prev.water,
+                start: input.now,
+                duration,
+                clock: super::eep_fade::TextureClock::new(input.now), // aurora-local-patch: env-texture-fade-selector-start
+            });'''
+
+[[patch]]
+id = "env-texture-fade-selector-ready"
+why = "the selector knows which environment textures are in (the scene's, a frame late), for the textures a change waits for"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = "    fade: Option<Fade>,"
+replace = '''fade: Option<Fade>,
+    // aurora-local-patch: env-texture-fade-selector-ready
+    /// The environment textures that are in (the scene's, last frame:
+    /// `set_ready_textures`); None: all taken as in (before the first frame,
+    /// and in the tests).
+    ready_textures: Option<[Uuid; 12]>,'''
+
+[[patch]]
+id = "env-texture-fade-selector-ready-set"
+why = "goes with env-texture-fade-selector-ready"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''    /// Sky and water for this frame, crossfading when the source or the
+    /// sky track changes.'''
+replace = '''// aurora-local-patch: env-texture-fade-selector-ready-set
+    /// The environment textures that are in (Scene::env_ready_textures, nil
+    /// for the others): a change keeps a texture that is not at share 0
+    /// until it is (world/eep_fade.rs TextureClock).
+    pub fn set_ready_textures(&mut self, ids: [Uuid; 12]) {
+        self.ready_textures = Some(ids);
+    }
+
+    /// Sky and water for this frame, crossfading when the source or the
+    /// sky track changes.'''
+
+[[patch]]
+id = "env-texture-fade-selector-test"
+why = "a change between two environments fades and ends with no fade; between two day cycles whose keyframes differ, only the two sides fade, the share rising with the change, and the days alone never fade; a change of the cloud scroll alone cross-fades over the manual time with each layer at its own rate and no jump; a late texture joins from its arrival and still fades in after the change's time"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''    #[test]
+    fn altitude_track_switch_fades() {'''
+replace = '''#[test]
+    fn an_environment_change_cross_fades_its_textures_and_ends_still() {
+        // aurora-local-patch: env-texture-fade-selector-test
+        use super::super::env::Environment;
+        let id = Uuid::from_u128;
+        let fixed = |cloud: Uuid, normal: Uuid| {
+            let mut a = answer(-1, Some(1.0));
+            if let Some(d) = a.day.as_mut() {
+                d.sky_tracks[0] = vec![(
+                    0.0,
+                    SkyFrame {
+                        cloud_id: cloud,
+                        ..Default::default()
+                    },
+                )];
+                d.water = vec![(
+                    0.0,
+                    WaterFrame {
+                        normal_map: normal,
+                        ..Default::default()
+                    },
+                )];
+            }
+            a
+        };
+        let mut sel = EnvSelector::default();
+        sel.on_answer(REGION, -1, fixed(id(1), id(2)), ctx(None));
+        let (sky, water) = sel.frame(&input(0.0));
+        assert!(sky.texture_fade.is_none() && water.texture_fade.is_none());
+        sel.on_answer(REGION, -1, fixed(id(3), id(4)), ctx(None));
+        sel.frame(&input(10.0));
+        // half way through the 5 s: both textures, half each
+        let (sky, water) = sel.frame(&input(12.5));
+        let (s, w) = (sky.shown_textures(), water.shown_textures());
+        assert_eq!((s.cloud.first.id, s.cloud.next.id), (id(1), id(3)));
+        assert_eq!((w.first.id, w.next.id), (id(2), id(4)));
+        assert!((s.cloud.blend - 0.5).abs() < 1e-5 && (w.blend - 0.5).abs() < 1e-5);
+        let env = Environment::from_eep(&sky, &water, glam::Vec2::ZERO, 96.0);
+        assert_eq!((env.textures[0], env.next_textures[0]), (id(1), id(3)));
+        assert!(env.sky.fade.cloud.blend > 0.0 && env.water.fade.on);
+        // the end: one texture each, nothing carried, every share 0
+        for now in [15.0, 16.0, 100.0] {
+            let (sky, water) = sel.frame(&input(now));
+            assert!(sky.texture_fade.is_none() && water.texture_fade.is_none(), "{now}");
+            let env = Environment::from_eep(&sky, &water, glam::Vec2::ZERO, 96.0);
+            assert_eq!((env.textures[0], env.textures[3]), (id(3), id(4)));
+            assert!(env.next_textures.iter().all(Uuid::is_nil), "{now}");
+            assert_eq!((env.sky.fade, env.water.fade), Default::default(), "{now}");
+        }
+    }
+
+    #[test]
+    fn a_change_between_day_cycles_fades_only_between_the_two_sides() {
+        // aurora-local-patch: env-texture-fade-selector-test
+        use super::super::eep_fade::{SkyFade, WaterLayer};
+        let id = Uuid::from_u128;
+        // a day whose two keyframes differ in every texture, the cloud
+        // offsets, the waves and the normal scale
+        let cycle = |n: u128| {
+            let key = |k: u128, x: f32| {
+                let sky = SkyFrame {
+                    cloud_id: id(n + k),
+                    sun_id: id(n + k + 10),
+                    moon_id: id(n + k + 20),
+                    cloud_pos_density1: Vec3::new(x, 0.3, 1.0),
+                    cloud_pos_density2: Vec3::new(x * 2.0, 0.1, 0.5),
+                    ..Default::default()
+                };
+                let water = WaterFrame {
+                    normal_map: id(n + k + 30),
+                    wave1: glam::Vec2::new(x, 1.0 - x),
+                    normal_scale: Vec3::splat(1.0 + x),
+                    ..Default::default()
+                };
+                (sky, water)
+            };
+            let ((s0, w0), (s1, w1)) = (key(0, n as f32 / 1000.0), key(1, 0.7));
+            let mut a = answer(-1, Some(1.0));
+            if let Some(d) = a.day.as_mut() {
+                d.sky_tracks[0] = vec![(0.0, s0), (0.5, s1)];
+                d.water = vec![(0.0, w0), (0.5, w1)];
+            }
+            a
+        };
+        // 14400 s a day: unix 3500 is 0.486 of the first segment, 3700 0.514
+        let at = |now: f64, unix: f64| FrameInput {
+            unix_secs: unix,
+            ..input(now)
+        };
+        let mut sel = EnvSelector::default();
+        sel.on_answer(REGION, -1, cycle(100), ctx(None));
+        // the day alone, across its half-way switch: no fade at all
+        let mut shown = sel.frame(&at(0.0, 3500.0));
+        for (now, unix) in [(1.0, 3700.0), (2.0, 2000.0), (3.0, 1000.0)] {
+            assert!(shown.0.texture_fade.is_none() && shown.1.texture_fade.is_none(), "{unix}");
+            shown = sel.frame(&at(now, unix));
+        }
+        assert!(shown.0.texture_fade.is_none() && shown.1.texture_fade.is_none());
+        assert_eq!(shown.0.cloud_id, id(100));
+        let (from, from_water) = (SkyFade::of(&shown.0).cloud.first, WaterLayer::of(&shown.1));
+        // another day: the change fades from what was shown to the other
+        // day as it moves, two layers, the share rising with the change
+        sel.on_answer(REGION, -1, cycle(200), ctx(None));
+        sel.frame(&at(10.0, 1000.0));
+        let mut last = 0.0;
+        for (now, unix) in [(10.5, 1010.0), (11.5, 1020.0), (12.5, 1030.0), (13.5, 1040.0), (14.5, 1050.0)] {
+            let (sky, water) = sel.frame(&at(now, unix));
+            let target = sel.shown.expect("shown");
+            assert!(target.target_sky.texture_fade.is_none() && target.target_water.texture_fade.is_none());
+            let (s, w) = (sky.shown_textures(), water.shown_textures());
+            let t = ((now - 10.0) / 5.0) as f32;
+            assert_eq!(
+                (s.cloud.first, s.cloud.next),
+                (from, SkyFade::of(&target.target_sky).cloud.first),
+                "{now}"
+            );
+            assert_eq!((w.first, w.next), (from_water, WaterLayer::of(&target.target_water)), "{now}");
+            assert_eq!((s.sun.first, s.sun.next), (id(110), id(210)), "{now}");
+            assert!(
+                (s.cloud.blend - t).abs() < 1e-5 && (w.blend - t).abs() < 1e-5,
+                "{now}: {}",
+                s.cloud.blend
+            );
+            assert!(s.cloud.blend > last, "{now}");
+            last = s.cloud.blend;
+        }
+        // over: the other day alone, moving, and never fading
+        for (now, unix) in [(15.0, 1060.0), (16.0, 3500.0), (17.0, 3700.0)] {
+            let (sky, water) = sel.frame(&at(now, unix));
+            assert!(sky.texture_fade.is_none() && water.texture_fade.is_none(), "{now}");
+        }
+    }
+
+    /// The share is the change's own progress over its own duration (the
+    /// local change's manual transition time here, as a personal sky
+    /// preset applied over a parcel's day), the same clock and the same
+    /// linear ratio as every other value of the change
+    /// (LLSettingsBlenderTimeDelta: time spent / blend span); exactly 0
+    /// before the start and from the end on; a change of 0 s is instant,
+    /// with no fade and no second texture.
+    #[test]
+    fn the_texture_share_is_the_changes_own_progress() {
+        // aurora-local-patch: env-texture-fade-selector-test
+        use super::super::eep_fade::SkyFade;
+        use super::super::env::Environment;
+        let id = Uuid::from_u128;
+        // the shared environment: a day whose keyframes differ
+        let mut shared = answer(-1, Some(0.7));
+        if let Some(d) = shared.day.as_mut() {
+            let key = |cloud: u128, x: f32| SkyFrame {
+                cloud_id: id(cloud),
+                cloud_pos_density1: Vec3::new(x, 0.2, 1.0),
+                ..Default::default()
+            };
+            d.sky_tracks[0] = vec![(0.0, key(1, 0.1)), (0.5, key(2, 0.8))];
+        }
+        let preset = Arc::new(Settings::Sky(SkyFrame {
+            cloud_id: id(9),
+            cloud_pos_density1: Vec3::new(0.5, 0.1, 1.0),
+            ..Default::default()
+        }));
+        for duration in [0.0f32, 2.0, 29.0, 60.0] {
+            let mut sel = EnvSelector::default();
+            sel.on_answer(REGION, -1, shared.clone(), ctx(None));
+            let (before, _) = sel.frame(&input(0.0));
+            assert!(before.texture_fade.is_none());
+            let from = SkyFade::of(&before).cloud.first;
+            sel.set_manual_transition(duration);
+            sel.request_local(SKY, SettingsKind::Sky);
+            sel.on_settings(SKY, Some(preset.clone()));
+            // the change starts with the next frame
+            let start = 1.0;
+            let (sky, water) = sel.frame(&input(start));
+            assert!(
+                sky.texture_fade.is_none() && water.texture_fade.is_none(),
+                "{duration}: at its start"
+            );
+            if duration == 0.0 {
+                assert_eq!(sky.cloud_id, id(9), "instant");
+                let env = Environment::from_eep(&sky, &water, glam::Vec2::ZERO, 96.0);
+                assert!(env.next_textures.iter().all(Uuid::is_nil));
+                continue;
+            }
+            for part in [0.25f32, 0.5, 0.75] {
+                let (sky, water) = sel.frame(&input(start + f64::from(part * duration)));
+                let s = sky.shown_textures().cloud;
+                assert_eq!((s.first, s.next.id), (from, id(9)), "{duration} at {part}");
+                assert!((s.blend - part).abs() < 1e-4, "{duration} at {part}: {}", s.blend);
+                // the frame's own offset, lerped by the same ratio
+                let x = before.cloud_pos_density1.x;
+                assert!(
+                    (sky.cloud_pos_density1.x - (x + (0.5 - x) * part)).abs() < 1e-4,
+                    "{duration} at {part}"
+                );
+                // the water does not change: no fade of its own
+                assert!(water.texture_fade.is_none(), "{duration} at {part}");
+            }
+            for end in [start + f64::from(duration), start + f64::from(duration) + 0.5] {
+                let (sky, water) = sel.frame(&input(end));
+                assert!(sky.texture_fade.is_none() && water.texture_fade.is_none(), "{duration} at {end}");
+                assert_eq!(sky.cloud_id, id(9));
+            }
+        }
+    }
+
+    /// A personal sky that differs from the shared one only in its cloud
+    /// scroll (the same texture, offsets and scale, as a Midday and a
+    /// Midnight preset): over the 29 s manual transition both layers show,
+    /// the share is the change's progress, each layer scrolls at its own
+    /// rate (CloudScroll, as the frame loop feeds it), the renderer gets
+    /// each one's own place, and the clouds go on without a jump at the
+    /// end. The water, the same on both sides, does not fade.
+    #[test]
+    fn a_change_of_the_cloud_scroll_alone_cross_fades_without_a_jump() {
+        // aurora-local-patch: env-texture-fade-selector-test
+        use super::super::eep_fade::{CloudLayer, CloudScroll};
+        use super::super::env::Environment;
+        let slow = SkyFrame {
+            cloud_scroll_rate: glam::Vec2::new(0.5, 0.0),
+            ..Default::default()
+        };
+        let fast = SkyFrame {
+            cloud_scroll_rate: glam::Vec2::new(4.0, 2.0),
+            ..slow
+        };
+        let mut shared = answer(-1, Some(1.0));
+        if let Some(d) = shared.day.as_mut() {
+            d.sky_tracks[0] = vec![(0.0, slow)];
+        }
+        let mut sel = EnvSelector::default();
+        sel.on_answer(REGION, -1, shared, ctx(None));
+        let mut scroll = CloudScroll::default();
+        let dt = 0.25f32;
+        let mut now = 0.0f64;
+        let mut p = [glam::Vec2::ZERO; 2];
+        for _ in 0..8 {
+            let (sky, _) = sel.frame(&input(now));
+            p = scroll.advance(&sky.shown_textures().cloud, dt);
+            now += f64::from(dt);
+        }
+        sel.set_manual_transition(29.0);
+        sel.request_local(SKY, SettingsKind::Sky);
+        sel.on_settings(SKY, Some(Arc::new(Settings::Sky(fast))));
+        let start = now;
+        let (mut first, mut second) = (p[0], p[0]);
+        let mut last_share = 0.0f32;
+        while now < start + 29.0 {
+            let (sky, water) = sel.frame(&input(now));
+            assert!(water.texture_fade.is_none());
+            let c = sky.shown_textures().cloud;
+            let t = ((now - start) / 29.0) as f32;
+            let q = scroll.advance(&c, dt);
+            if t > 0.0 {
+                assert!(c.fading(), "{t}");
+                assert_eq!((c.first, c.next), (CloudLayer::of(&slow), CloudLayer::of(&fast)));
+                assert!((c.blend - t).abs() < 1e-4, "linear: {t} {}", c.blend);
+                assert!(c.blend >= last_share);
+                last_share = c.blend;
+                // each layer at its own rate, from where it was
+                assert!((q[0] - first - slow.cloud_scroll_rate * dt / 100.0).length() < 1e-4, "{t}");
+                assert!((q[1] - second - fast.cloud_scroll_rate * dt / 100.0).length() < 1e-4, "{t}");
+                let env = Environment::from_eep_scrolled(&sky, &water, q, 96.0);
+                // the first layer as its own sky draws it, the second at its own scroll
+                assert!((env.sky.cloud_pos_density1.x - (slow.cloud_pos_density1.x - q[0].x)).abs() < 1e-5);
+                let n = env.sky.fade.cloud_next;
+                assert!(
+                    (n[0] - (fast.cloud_pos_density1.x - q[1].x)).abs() < 1e-5
+                        && (n[1] - (fast.cloud_pos_density1.y + q[1].y)).abs() < 1e-5
+                );
+                assert_eq!(env.sky.fade.cloud_next_shape, [fast.cloud_scale, fast.cloud_variance]);
+            }
+            (first, second) = (q[0], q[1]);
+            now += f64::from(dt);
+        }
+        // the end: the fast layer alone, going on from its place
+        let (sky, water) = sel.frame(&input(now));
+        assert!(sky.texture_fade.is_none());
+        let end = scroll.advance(&sky.shown_textures().cloud, dt);
+        assert!(
+            (end[0] - second - fast.cloud_scroll_rate * dt / 100.0).length() < 1e-4,
+            "{end:?} {second:?}"
+        );
+        let env = Environment::from_eep_scrolled(&sky, &water, end, 96.0);
+        assert_eq!(env.sky.fade, Default::default());
+        assert!((env.sky.cloud_pos_density1.x - (fast.cloud_pos_density1.x - end[0].x)).abs() < 1e-5);
+    }
+
+    /// A texture still loading when the change starts: the old layer shows
+    /// alone at its own place while the new one waits in its slot at share
+    /// 0 (asked for); once in, its share rises from 0 at twice the change's
+    /// pace, and it goes on fading in past the change's time (the values
+    /// then the target's) until it is whole, never switched at once.
+    #[test]
+    fn a_late_texture_joins_the_change_and_still_fades_in_after_it() {
+        // aurora-local-patch: env-texture-fade-selector-test
+        use super::super::env::Environment;
+        let id = Uuid::from_u128;
+        let fixed = |cloud: Uuid, normal: Uuid| {
+            let mut a = answer(-1, Some(1.0));
+            if let Some(d) = a.day.as_mut() {
+                d.sky_tracks[0] = vec![(
+                    0.0,
+                    SkyFrame {
+                        cloud_id: cloud,
+                        ..Default::default()
+                    },
+                )];
+                d.water = vec![(
+                    0.0,
+                    WaterFrame {
+                        normal_map: normal,
+                        ..Default::default()
+                    },
+                )];
+            }
+            a
+        };
+        let mut ready = [Uuid::nil(); 12];
+        (ready[0], ready[1], ready[2]) = (id(1), id(2), id(4));
+        let mut sel = EnvSelector::default();
+        sel.set_ready_textures(ready);
+        sel.on_answer(REGION, -1, fixed(id(1), id(2)), ctx(None));
+        sel.frame(&input(0.0));
+        sel.on_answer(REGION, -1, fixed(id(3), id(4)), ctx(None));
+        sel.frame(&input(10.0));
+        let mut last = 0.0f32;
+        let mut prev_now = 10.0;
+        for now in [11.0, 12.0, 13.0, 14.0, 14.5, 15.0, 15.5, 16.0, 16.5] {
+            if now >= 14.5 {
+                // the cloud texture is in from 14.5 s on
+                ready[3] = id(3);
+                sel.set_ready_textures(ready);
+            }
+            let (sky, water) = sel.frame(&input(now));
+            let t = (((now - 10.0) / 5.0) as f32).min(1.0);
+            // the water's maps are in: it follows the change
+            if now < 15.0 {
+                assert!((water.shown_textures().blend - t).abs() < 1e-5, "{now}");
+            } else {
+                assert!(water.texture_fade.is_none(), "{now}");
+            }
+            if now >= 16.5 {
+                assert!(sky.texture_fade.is_none(), "whole at {now}");
+                assert_eq!(sky.cloud_id, id(3));
+                continue;
+            }
+            let c = sky.shown_textures().cloud;
+            assert_eq!((c.first.id, c.next.id), (id(1), id(3)), "{now}");
+            let env = Environment::from_eep(&sky, &water, glam::Vec2::ZERO, 96.0);
+            assert_eq!(env.next_textures[0], id(3), "asked for at {now}");
+            if now < 14.5 {
+                assert_eq!(c.blend, 0.0, "not in: no share at {now}");
+                assert_eq!(env.sky.fade.cloud.blend, 0.0);
+            } else {
+                assert!(c.blend > last && c.blend <= t, "{now}: {}", c.blend);
+                assert!(c.blend - last <= 2.0 * (now - prev_now) as f32 / 5.0 + 1e-5, "no pop at {now}");
+            }
+            if now >= 15.0 {
+                // past the change's time: the target's values, the textures still fading
+                assert_eq!(sky.cloud_id, id(3));
+                assert!(c.blend < 1.0);
+            }
+            last = c.blend;
+            prev_now = now;
+        }
+    }
+
+    #[test]
+    fn altitude_track_switch_fades() {'''
+
+# ------------------------------------------------------------ environment
+
+[[patch]]
+id = "env-texture-fade-env-use"
+why = "the frame lighting reads the frames' fades"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = "use super::eep::{self, SkyFrame, WaterFrame};"
+replace = '''use super::eep::{self, SkyFrame, WaterFrame};
+use super::eep_fade::{Fade, SkyFade, WaterFade}; // aurora-local-patch: env-texture-fade-env-use'''
+
+[[patch]]
+id = "env-texture-fade-env-scrolled"
+why = "the environment is built with each cloud layer's own scroll position (the first's, then the second's while the clouds cross-fade)"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''    pub fn from_eep(sky: &SkyFrame, water: &WaterFrame, cloud_scroll: glam::Vec2, draw_distance: f32) -> Environment {
+        Self::build(sky, water, cloud_scroll, draw_distance)
+    }'''
+replace = '''pub fn from_eep(sky: &SkyFrame, water: &WaterFrame, cloud_scroll: glam::Vec2, draw_distance: f32) -> Environment {
+        Self::build(sky, water, [cloud_scroll; 2], draw_distance)
+    }
+
+    // aurora-local-patch: env-texture-fade-env-scrolled
+    /// [`Self::from_eep`] with each cloud layer's own scroll position while
+    /// the clouds cross-fade (world/eep_fade.rs CloudScroll): the first
+    /// layer's, then the second's.
+    pub fn from_eep_scrolled(sky: &SkyFrame, water: &WaterFrame, cloud_scrolls: [glam::Vec2; 2], draw_distance: f32) -> Environment {
+        Self::build(sky, water, cloud_scrolls, draw_distance)
+    }'''
+
+[[patch]]
+id = "env-texture-fade-env-sig"
+why = "goes with env-texture-fade-env-scrolled"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = "fn build(sky: &SkyFrame, water: &WaterFrame, scroll: glam::Vec2, draw_distance: f32) -> Environment {"
+replace = '''fn build(sky: &SkyFrame, water: &WaterFrame, scrolls: [glam::Vec2; 2], draw_distance: f32) -> Environment {
+        // aurora-local-patch: env-texture-fade-env-sig
+        // (the first cloud layer's scroll position; the second's goes with
+        // its layer, `sky_texture_fade`)
+        let scroll = scrolls[0];'''
+
+[[patch]]
+id = "env-texture-fade-env-field"
+why = "the second textures the scene keeps resident, beside the first ones"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''    /// Texture ids the sky / water need (cloud, sun, moon, water normal map,
+    /// rainbow, halo).
+    pub textures: [uuid::Uuid; 6],'''
+replace = '''/// Texture ids the sky / water need (cloud, sun, moon, water normal map,
+    /// rainbow, halo).
+    pub textures: [uuid::Uuid; 6],
+    // aurora-local-patch: env-texture-fade-env-field
+    /// While the environment cross-fades (world/eep_fade.rs), each fading
+    /// element's second texture in the same order, `textures` holding the
+    /// first ones; nil for an element that does not fade or that fades to
+    /// its stand-in (no clouds, the procedural sun, no moon, the analytic
+    /// water, no rainbow or halo).
+    pub next_textures: [uuid::Uuid; 6],'''
+
+[[patch]]
+id = "env-texture-fade-env-build"
+why = "the textures as each element shows them: the first one in its own place, the second's beside it"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+fn = "build"
+find = "let sky_params = SkyParams {"
+replace = '''// aurora-local-patch: env-texture-fade-env-build
+        // What the texture elements show (world/eep_fade.rs): while the
+        // environment cross-fades, two textures each, the first one where
+        // its own offsets and waves put it (the second's are in `fade`),
+        // never one texture slid by the lerped values.
+        let sky_fade = sky.shown_textures();
+        let water_fade = water.shown_textures();
+        let cloud = sky_fade.cloud.first;
+        let sky_params = SkyParams {'''
+
+[[patch]]
+id = "env-texture-fade-env-clouds"
+why = "the cloud layer is drawn as its own sky draws it: the first layer's own scale, variance and offsets at its own scroll (identical to the frame's while nothing fades)"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+fn = "build"
+find = '''            cloud_scale: sky.cloud_scale,
+            cloud_variance: sky.cloud_variance,
+            // SL-13084: the x scroll is negated (custom cloud textures are flipped)
+            cloud_pos_density1: sky.cloud_pos_density1 + Vec3::new(-scroll.x, scroll.y, 0.0),
+            cloud_pos_density2: sky.cloud_pos_density2,'''
+replace = '''// aurora-local-patch: env-texture-fade-env-clouds
+            // (the first cloud layer as its own sky draws it: its scale,
+            // variance and offsets at its own scroll; the densities are the
+            // sky's, blended as numbers)
+            cloud_scale: cloud.scale,
+            cloud_variance: cloud.variance,
+            // SL-13084: the x scroll is negated (custom cloud textures are flipped)
+            cloud_pos_density1: cloud.offset1.extend(sky.cloud_pos_density1.z) + Vec3::new(-scroll.x, scroll.y, 0.0),
+            cloud_pos_density2: cloud.offset2.extend(sky.cloud_pos_density2.z),'''
+
+[[patch]]
+id = "env-texture-fade-env-sky-fade"
+why = "the sky's shares and the second cloud layer (its own place at its own scroll, its scale and variance) for the renderer"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+fn = "build"
+find = '''            studio_aurora: [[0.0; 4]; 4],
+        };'''
+replace = '''studio_aurora: [[0.0; 4]; 4],
+            // aurora-local-patch: env-texture-fade-env-sky-fade
+            // (the second textures' shares and the second cloud layer; their
+            // slots, as the first ones', are the caller's: `set_fade_slots`)
+            fade: sky_texture_fade(&sky_fade, scrolls),
+        };'''
+
+[[patch]]
+id = "env-texture-fade-env-water-fade"
+why = "the water's fade for the renderer, and the two sets of texture ids"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+fn = "build"
+find = '''            normal_texture: 0,
+        };
+        Environment {'''
+replace = '''normal_texture: 0,
+            fade: water_texture_fade(&water_fade), // aurora-local-patch: env-texture-fade-env-water-fade
+        };
+        let (textures, next_textures) = fade_textures(&sky_fade, &water_fade, &sky_params);
+        Environment {'''
+
+[[patch]]
+id = "env-texture-fade-env-textures"
+why = "goes with env-texture-fade-env-water-fade: the first textures (the frame's own while nothing fades) and the second ones"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+fn = "build"
+find = '''            textures: [
+                sky.cloud_id,
+                sky.sun_id,
+                sky.moon_id,
+                water.normal_map,
+                // fetched only while they show
+                if sky_params.moisture_level > 0.0 {
+                    sky.rainbow_id
+                } else {
+                    uuid::Uuid::nil()
+                },
+                if sky_params.ice_level > 0.0 {
+                    sky.halo_id
+                } else {
+                    uuid::Uuid::nil()
+                },
+            ],'''
+replace = '''// aurora-local-patch: env-texture-fade-env-textures
+            // (each element's first texture, and the second of those that
+            // fade: `fade_textures`)
+            textures,
+            next_textures,'''
+
+[[patch]]
+id = "env-texture-fade-env-fns"
+why = "the renderer's side of the fades, the two sets of ids (a layer waiting for its texture is asked for), and the slots' rule: a second texture still loading has no share yet, a nil one is its element's stand-in"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = "/// Throttles the log line describing the interpolated sky: at most every"
+replace = '''// aurora-local-patch: env-texture-fade-env-fns
+/// An element's share of its second texture for the renderer: its fade's
+/// blend while it fades, else 0. The slot is the caller's, once the texture
+/// is resident ([`Environment::set_fade_slots`]).
+fn texture_share<L: Copy + PartialEq>(f: &Fade<L>) -> aurora_render::TextureFade {
+    aurora_render::TextureFade {
+        texture: 0,
+        blend: if f.fading() { f.blend } else { 0.0 },
+    }
+}
+
+/// The sky's cross-fade for the renderer: the shares, and the second cloud
+/// layer as its own sky draws it: its offsets at its own scroll position
+/// (`scrolls[1]`, x negated as the first's, SL-13084), its scale and its
+/// variance.
+fn sky_texture_fade(f: &SkyFade, scrolls: [glam::Vec2; 2]) -> aurora_render::SkyTextureFade {
+    let (b, s) = (f.cloud.next, scrolls[1]);
+    let (cloud_next, cloud_next_shape) = if f.cloud.two() {
+        (
+            [b.offset1.x - s.x, b.offset1.y + s.y, b.offset2.x, b.offset2.y],
+            [b.scale, b.variance],
+        )
+    } else {
+        ([0.0; 4], [0.0; 2])
+    };
+    aurora_render::SkyTextureFade {
+        cloud: texture_share(&f.cloud),
+        cloud_next,
+        cloud_next_shape,
+        sun: texture_share(&f.sun),
+        moon: texture_share(&f.moon),
+        rainbow: texture_share(&f.rainbow),
+        halo: texture_share(&f.halo),
+    }
+}
+
+/// The water's cross-fade for the renderer: off while one normal map
+/// shows; on, each map's own waves and normal scale, the first keeping its
+/// own even before the second is in.
+fn water_texture_fade(f: &WaterFade) -> aurora_render::WaterTextureFade {
+    if !f.two() {
+        return aurora_render::WaterTextureFade::default();
+    }
+    aurora_render::WaterTextureFade {
+        on: true,
+        first_wave1: f.first.wave1,
+        first_wave2: f.first.wave2,
+        first_scale: f.first.scale,
+        next: texture_share(f),
+        next_wave1: f.next.wave1,
+        next_wave2: f.next.wave2,
+        next_scale: f.next.scale,
+    }
+}
+
+/// The textures the elements show (cloud, sun, moon, water normal map,
+/// rainbow, halo): the first ones, and the second ones of those with two
+/// layers, a layer waiting for its texture included (nil otherwise). The
+/// rainbow and the halo are fetched only while they show (`shown`, the
+/// frame's sky).
+fn fade_textures(sky: &SkyFade, water: &WaterFade, shown: &SkyParams) -> ([uuid::Uuid; 6], [uuid::Uuid; 6]) {
+    let (rainbow, halo) = (shown.moisture_level > 0.0, shown.ice_level > 0.0);
+    let nil = uuid::Uuid::nil();
+    let next = |two: bool, id: uuid::Uuid| if two { id } else { nil };
+    (
+        [
+            sky.cloud.first.id,
+            sky.sun.first,
+            sky.moon.first,
+            water.first.id,
+            if rainbow { sky.rainbow.first } else { nil },
+            if halo { sky.halo.first } else { nil },
+        ],
+        [
+            next(sky.cloud.two(), sky.cloud.next.id),
+            next(sky.sun.two(), sky.sun.next),
+            next(sky.moon.two(), sky.moon.next),
+            next(water.two(), water.next.id),
+            next(rainbow && sky.rainbow.two(), sky.rainbow.next),
+            next(halo && sky.halo.two(), sky.halo.next),
+        ],
+    )
+}
+
+impl Environment {
+    /// The second textures' slots (`Scene::env_fade_textures`, in the order
+    /// of `next_textures`; 0 until loaded). A nil second texture is its
+    /// element's stand-in and keeps its share; one still loading takes none
+    /// yet: the first texture shows alone, where it was, until it is in (the
+    /// selector itself waits for it, world/eep_fade.rs TextureClock; this
+    /// covers a texture that is not in where it cannot wait).
+    pub fn set_fade_slots(&mut self, slots: [u32; 6]) {
+        let next = self.next_textures;
+        let set = |f: &mut aurora_render::TextureFade, i: usize| {
+            f.texture = slots[i];
+            if !next[i].is_nil() && slots[i] == 0 {
+                f.blend = 0.0;
+            }
+        };
+        set(&mut self.sky.fade.cloud, 0);
+        set(&mut self.sky.fade.sun, 1);
+        set(&mut self.sky.fade.moon, 2);
+        set(&mut self.water.fade.next, 3);
+        set(&mut self.sky.fade.rainbow, 4);
+        set(&mut self.sky.fade.halo, 5);
+    }
+}
+
+/// Throttles the log line describing the interpolated sky: at most every'''
+
+[[patch]]
+id = "env-texture-fade-env-test"
+why = "each layer as its own sky draws it (offsets at its own scroll, scale, variance), the shares, the slots' rule, a waiting layer asked for, nothing changed without a fade"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''    #[test]
+    fn sky_log_throttle() {'''
+replace = '''#[test]
+    fn the_textures_fade_where_their_own_settings_put_them() {
+        // aurora-local-patch: env-texture-fade-env-test
+        use super::super::eep_fade::Share;
+        let other = uuid::Uuid::from_u128(7);
+        let a = SkyFrame {
+            cloud_pos_density1: Vec3::new(0.1, 0.2, 1.0),
+            moisture_level: 0.5,
+            ..SkyFrame::with_sun(midday_sun())
+        };
+        let b = SkyFrame {
+            cloud_id: other,
+            cloud_pos_density1: Vec3::new(0.6, 0.4, 0.8),
+            cloud_scale: 1.1,
+            cloud_variance: 0.3,
+            rainbow_id: other,
+            moon_id: uuid::Uuid::nil(),
+            ..a
+        };
+        let wa = WaterFrame::default();
+        let wb = WaterFrame {
+            normal_map: other,
+            wave1: glam::Vec2::new(-1.0, 0.5),
+            normal_scale: Vec3::splat(4.0),
+            ..wa
+        };
+        let scroll = glam::Vec2::new(0.25, 0.5);
+        let mut env = Environment::from_eep(&a.fade_to(&b, 0.3), &wa.fade_to(&wb, 0.3), scroll, 96.0);
+        // the first cloud layer as a's sky draws it, scrolled, the density
+        // lerped; the second one as b's draws it
+        assert_eq!((env.textures[0], env.next_textures[0]), (eep::DEFAULT_CLOUD_ID, other));
+        assert!((env.sky.cloud_pos_density1 - Vec3::new(0.1 - 0.25, 0.2 + 0.5, 0.94)).length() < 1e-5);
+        assert_eq!((env.sky.cloud_scale, env.sky.cloud_variance), (a.cloud_scale, a.cloud_variance));
+        let n = env.sky.fade.cloud_next;
+        let d2 = b.cloud_pos_density2;
+        assert!((n[0] - (0.6 - 0.25)).abs() < 1e-6 && (n[1] - (0.4 + 0.5)).abs() < 1e-6 && n[2] == d2.x && n[3] == d2.y);
+        assert_eq!(env.sky.fade.cloud_next_shape, [1.1, 0.3]);
+        assert!((env.sky.fade.cloud.blend - 0.3).abs() < 1e-6);
+        assert_eq!((env.textures[4], env.next_textures[4]), (eep::DEFAULT_RAINBOW_ID, other));
+        // each layer at its own scroll position
+        let own = Environment::from_eep_scrolled(&a.fade_to(&b, 0.3), &wa, [scroll, glam::Vec2::new(2.0, 1.0)], 96.0);
+        assert!((own.sky.cloud_pos_density1.x - (0.1 - 0.25)).abs() < 1e-6);
+        assert!((own.sky.fade.cloud_next[0] - (0.6 - 2.0)).abs() < 1e-6 && (own.sky.fade.cloud_next[1] - 1.4).abs() < 1e-6);
+        // the moon fades to none: its stand-in, a nil second texture
+        assert!(env.next_textures[2].is_nil() && env.sky.fade.moon.blend > 0.0);
+        // the water: the first map keeps its own waves, the second its own
+        let w = env.water.fade;
+        assert!(w.on && w.first_wave1 == wa.wave1 && w.next_wave1 == wb.wave1 && w.next_scale == Vec3::splat(4.0));
+        assert_eq!(env.next_textures[3], other);
+        // the cloud's second texture is in, the water's still loading
+        env.set_fade_slots([5, 0, 0, 0, 9, 0]);
+        assert_eq!((env.sky.fade.cloud.texture, env.sky.fade.rainbow.texture), (5, 9));
+        assert!((env.sky.fade.cloud.blend - 0.3).abs() < 1e-6);
+        assert_eq!(env.water.fade.next.blend, 0.0, "loading: the first map alone");
+        assert!(env.water.fade.on, "which keeps its own waves meanwhile");
+        assert!(env.sky.fade.moon.blend > 0.0, "a nil moon is its stand-in, no moon");
+        // a layer waiting for its texture: asked for, no share, the first
+        // one keeping its own place and waves
+        let wait = Share { t: 0.0, hold: true };
+        let held = Environment::from_eep(&a.fade_to_with(&b, 0.5, [wait; 5]), &wa.fade_to_with(&wb, 0.5, wait), scroll, 96.0);
+        assert_eq!((held.next_textures[0], held.next_textures[3]), (other, other));
+        assert_eq!((held.sky.fade.cloud.blend, held.water.fade.next.blend), (0.0, 0.0));
+        assert!((held.sky.cloud_pos_density1.x - (0.1 - 0.25)).abs() < 1e-6 && held.sky.cloud_scale == a.cloud_scale);
+        assert!(held.water.fade.on && held.water.fade.first_wave1 == wa.wave1);
+        // nothing fades: all as before
+        let still = Environment::from_eep(&a, &wa, scroll, 96.0);
+        assert!(still.next_textures.iter().all(uuid::Uuid::is_nil));
+        assert_eq!((still.sky.fade, still.water.fade), Default::default());
+        assert_eq!(still.sky.cloud_pos_density1, a.cloud_pos_density1 + Vec3::new(-0.25, 0.5, 0.0));
+    }
+
+    #[test]
+    fn sky_log_throttle() {'''
+
+# ------------------------------------------------------------ render types
+
+[[patch]]
+id = "env-texture-fade-types"
+why = "what the renderer gets of a cross-fade: each element's second slot and share, the second cloud layer (its place at its own scroll, its scale and variance), the two water layers"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "impl Default for WaterParams {"
+replace = '''// aurora-local-patch: env-texture-fade-types
+/// A texture element's second texture while the environment cross-fades
+/// (the viewer's world/eep_fade.rs): its bindless slot (0: none, the
+/// element's stand-in: no clouds, the procedural sun, no moon, no rainbow
+/// or halo, the analytic water) and its share of the result (0: no fade,
+/// the first texture alone and the shaders' earlier taps only).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TextureFade {
+    pub texture: u32,
+    pub blend: f32,
+}
+
+/// The sky's cross-fade (`SkyParams::fade`): all zero while nothing fades.
+/// The first cloud layer is the sky's own fields (`cloud_scale`,
+/// `cloud_variance`, `cloud_pos_density1` and 2 xy, at its own scroll).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SkyTextureFade {
+    pub cloud: TextureFade,
+    /// The second cloud layer as its own sky draws it: its
+    /// `cloud_pos_density1` xy at its own scroll (x negated, SL-13084),
+    /// then its `cloud_pos_density2` xy.
+    pub cloud_next: [f32; 4],
+    /// Its `cloud_scale` and `cloud_variance`.
+    pub cloud_next_shape: [f32; 2],
+    pub sun: TextureFade,
+    pub moon: TextureFade,
+    pub rainbow: TextureFade,
+    pub halo: TextureFade,
+}
+
+impl SkyTextureFade {
+    /// The second cloud layer's share for the shaders (common.wgsl
+    /// `sky_clouds`, clouds.rs `LayerFade`): 0 without a fade, the one layer
+    /// of before; a second slot of 0 is a layer of no clouds (the first
+    /// one's thin out).
+    pub fn cloud_share(&self) -> f32 {
+        let r = self.cloud.blend;
+        if r.is_nan() || r <= 0.0 { 0.0 } else { r.min(1.0) }
+    }
+}
+
+/// The water's cross-fade (`WaterParams::fade`): off while one normal map
+/// shows. On, the first map keeps its own waves and normal scale
+/// (`first_*`; the frame's `wave1`, `wave2` and `normal_scale` stay the
+/// lerped ones, which during a fade only the enhanced water's detail
+/// strength reads; the swell takes each layer's own wave1 and this share,
+/// patch 109), whether the second one shows yet or not.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WaterTextureFade {
+    pub on: bool,
+    pub first_wave1: glam::Vec2,
+    pub first_wave2: glam::Vec2,
+    pub first_scale: Vec3,
+    pub next: TextureFade,
+    pub next_wave1: glam::Vec2,
+    pub next_wave2: glam::Vec2,
+    pub next_scale: Vec3,
+}
+
+impl Default for WaterParams {'''
+
+[[patch]]
+id = "env-texture-fade-sky-params"
+why = "the sky parameters carry the sky's cross-fade"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    pub studio_aurora: [[f32; 4]; 4],
+}'''
+replace = '''pub studio_aurora: [[f32; 4]; 4],
+    // aurora-local-patch: env-texture-fade-sky-params
+    /// The texture elements' cross-fade (zero: none).
+    pub fade: SkyTextureFade,
+}'''
+
+[[patch]]
+id = "env-texture-fade-sky-params-default"
+why = "goes with env-texture-fade-sky-params: no fade"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "studio_aurora: [[0.0; 4]; 4],"
+replace = '''studio_aurora: [[0.0; 4]; 4],
+            fade: SkyTextureFade::default(), // aurora-local-patch: env-texture-fade-sky-params-default'''
+
+[[patch]]
+id = "env-texture-fade-water-params"
+why = "the water parameters carry the normal map's cross-fade"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    /// Bindless slot of the wave normal map (0 = analytic waves).
+    pub normal_texture: u32,
+}'''
+replace = '''/// Bindless slot of the wave normal map (0 = analytic waves).
+    pub normal_texture: u32,
+    // aurora-local-patch: env-texture-fade-water-params
+    /// The normal map's cross-fade (off: none).
+    pub fade: WaterTextureFade,
+}'''
+
+[[patch]]
+id = "env-texture-fade-water-params-default"
+why = "goes with env-texture-fade-water-params: no fade"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "normal_texture: 0,"
+replace = '''normal_texture: 0,
+            fade: WaterTextureFade::default(), // aurora-local-patch: env-texture-fade-water-params-default'''
+
+# ------------------------------------------------------------ frame uniform
+
+[[patch]]
+id = "env-texture-fade-frame-u"
+why = "nine vec4 at the end of the frame uniform, zero while nothing fades (common.wgsl Frame takes the same)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''    /// Planet curvature (`Curvature::uniform`): xy the main camera, z 1 / 2R.
+    curvature: [f32; 4],
+}'''
+replace = '''/// Planet curvature (`Curvature::uniform`): xy the main camera, z 1 / 2R.
+    curvature: [f32; 4],
+    // aurora-local-patch: env-texture-fade-frame-u
+    /// The environment's texture cross-fade (types.rs `SkyTextureFade`,
+    /// `WaterTextureFade`), zero while nothing fades: the second textures'
+    /// slots (0: none, the element's stand-in) of the cloud noise, the sun,
+    /// the moon and the water normal map, then of the rainbow and the halo.
+    env_fade_slots: [u32; 4],
+    env_fade_slots2: [u32; 4],
+    /// Their shares: the second cloud layer's, the sun's, the moon's, the
+    /// water's; then the rainbow's, the halo's, 0, and 1 while the water
+    /// cross-fades.
+    env_fade_share: [f32; 4],
+    env_fade_share2: [f32; 4],
+    /// The second cloud layer's `cloud_pos_density1` xy at its own scroll,
+    /// and its `cloud_pos_density2` xy.
+    env_fade_cloud_next: [f32; 4],
+    /// The second water normal map's waves (wave1 xy, wave2 zw), and the
+    /// two maps' own normal scales (xyz), the first's, then the second's.
+    env_fade_water_waves: [f32; 4],
+    env_fade_water_first: [f32; 4],
+    env_fade_water_next: [f32; 4],
+    /// The second cloud layer's `cloud_scale` and `cloud_variance`.
+    env_fade_cloud_shape: [f32; 4],
+}'''
+
+[[patch]]
+id = "env-texture-fade-uniform"
+why = "the cross-fade into the frame uniform; while the water fades its first map's own waves replace the lerped ones in water_waves"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "frame_uniforms"
+find = "u.sky_optics_tex = [s.rainbow_texture, s.halo_texture, 0, 0];"
+replace = '''u.sky_optics_tex = [s.rainbow_texture, s.halo_texture, 0, 0];
+        // aurora-local-patch: env-texture-fade-uniform
+        // the environment's texture cross-fade: zero while nothing fades, the
+        // shaders then take their earlier taps alone; the first water normal
+        // map keeps its own waves from the start of a fade (the enhanced
+        // water's detail strength keeps the lerped normal scale)
+        let (sf, wf) = (&s.fade, &w.fade);
+        u.env_fade_slots = [sf.cloud.texture, sf.sun.texture, sf.moon.texture, wf.next.texture];
+        u.env_fade_slots2 = [sf.rainbow.texture, sf.halo.texture, 0, 0];
+        u.env_fade_share = [sf.cloud_share(), sf.sun.blend, sf.moon.blend, wf.next.blend];
+        u.env_fade_share2 = [sf.rainbow.blend, sf.halo.blend, 0.0, f32::from(u8::from(wf.on))];
+        u.env_fade_cloud_next = sf.cloud_next;
+        u.env_fade_cloud_shape = [sf.cloud_next_shape[0], sf.cloud_next_shape[1], 0.0, 0.0];
+        if wf.on {
+            u.water_waves = [wf.first_wave1.x, wf.first_wave1.y, wf.first_wave2.x, wf.first_wave2.y];
+            u.env_fade_water_waves = [wf.next_wave1.x, wf.next_wave1.y, wf.next_wave2.x, wf.next_wave2.y];
+            u.env_fade_water_first = wf.first_scale.extend(0.0).to_array();
+            u.env_fade_water_next = wf.next_scale.extend(0.0).to_array();
+        }'''
+
+[[patch]]
+id = "env-texture-fade-frame-test"
+why = "FrameU and common.wgsl's Frame, byte for byte: the same size, the cross-fade's last field at the same offset (naga's layout)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''    fn frame_uniform_layout_is_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<FrameU>() % 16, 0);
+    }'''
+replace = '''fn frame_uniform_layout_is_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<FrameU>() % 16, 0);
+    }
+
+    /// FrameU and common.wgsl's Frame byte for byte: the same size, the
+    /// cross-fade's fields at the same offsets in both.
+    #[test]
+    fn the_frame_uniform_is_the_shaders_frame() {
+        // aurora-local-patch: env-texture-fade-frame-test
+        let src = format!(
+            "{}\n{}\n{}",
+            crate::COMMON_SHADER,
+            include_str!("shaders/object.wgsl"),
+            include_str!("shaders/env.wgsl")
+        );
+        let module = naga::front::wgsl::parse_str(&src).expect("the scene shader parses");
+        let frame = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("Frame"))
+            .expect("Frame");
+        let naga::TypeInner::Struct { members, span } = &frame.1.inner else {
+            panic!("Frame is a struct");
+        };
+        assert_eq!(*span as usize, std::mem::size_of::<FrameU>());
+        let last = members.last().expect("Frame's fields");
+        assert_eq!(last.name.as_deref(), Some("env_fade_cloud_shape"));
+        assert_eq!(last.offset as usize, std::mem::offset_of!(FrameU, env_fade_cloud_shape));
+        let offset = |name: &str| members.iter().find(|m| m.name.as_deref() == Some(name)).map(|m| m.offset as usize);
+        assert_eq!(
+            offset("env_fade_cloud_next"),
+            Some(std::mem::offset_of!(FrameU, env_fade_cloud_next))
+        );
+        assert_eq!(offset("env_fade_slots"), Some(std::mem::offset_of!(FrameU, env_fade_slots)));
+    }'''
+
+[[patch]]
+id = "env-texture-fade-weather-pipeline"
+why = "the pipeline that draws a cross-fade's second weather map (env.wgsl fs_cloud_weather_next)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''    clouds_weather: wgpu::RenderPipeline,'''
+replace = '''clouds_weather: wgpu::RenderPipeline,
+    /// A cross-fade's second weather map (env.wgsl `fs_cloud_weather_next`).
+    clouds_weather_next: wgpu::RenderPipeline, // aurora-local-patch: env-texture-fade-weather-pipeline'''
+
+[[patch]]
+id = "env-texture-fade-weather-pipeline-new"
+why = "goes with env-texture-fade-weather-pipeline"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            ..base("cloud weather", "vs_sky", "fs_cloud_weather")
+        });'''
+replace = '''..base("cloud weather", "vs_sky", "fs_cloud_weather")
+        });
+        // aurora-local-patch: env-texture-fade-weather-pipeline-new
+        let clouds_weather_next = pipe(PipeDesc {
+            vb: Vb::None,
+            cull: None,
+            depth_write: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            samples: 1,
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            depth_format: None,
+            write_mask: wgpu::ColorWrites::ALL,
+            ..base("cloud weather (cross-fade)", "vs_sky", "fs_cloud_weather_next")
+        });'''
+
+[[patch]]
+id = "env-texture-fade-weather-pipeline-resolve"
+why = "goes with env-texture-fade-weather-pipeline"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            clouds_weather: clouds_weather.resolve(&mut done),"
+replace = '''clouds_weather: clouds_weather.resolve(&mut done),
+            clouds_weather_next: clouds_weather_next.resolve(&mut done), // aurora-local-patch: env-texture-fade-weather-pipeline-resolve'''
+
+[[patch]]
+id = "env-texture-fade-weather-draw"
+why = "the second weather map is drawn with the first, only while a second cloud texture fades"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''                pass.set_pipeline(&self.pipelines.clouds_weather);
+                pass.set_bind_group(0, &self.groups.a, &[]);
+                pass.set_bind_group(1, &self.records_bind_group, &[]);
+                pass.set_bind_group(2, &scene.textures, &[]);
+                pass.draw(0..3, 0..1);
+                drop(pass);'''
+replace = '''pass.set_pipeline(&self.pipelines.clouds_weather);
+                pass.set_bind_group(0, &self.groups.a, &[]);
+                pass.set_bind_group(1, &self.records_bind_group, &[]);
+                pass.set_bind_group(2, &scene.textures, &[]);
+                pass.draw(0..3, 0..1);
+                drop(pass);
+                // aurora-local-patch: env-texture-fade-weather-draw
+                // (while the clouds cross-fade, the second texture's map, which
+                // the trace lays at that layer's own place and tile)
+                if p.fade.drawn() {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("cloud weather (cross-fade)"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: clouds.weather_next_target(),
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.pipelines.clouds_weather_next);
+                    pass.set_bind_group(0, &self.groups.a, &[]);
+                    pass.set_bind_group(1, &self.records_bind_group, &[]);
+                    pass.set_bind_group(2, &scene.textures, &[]);
+                    pass.draw(0..3, 0..1);
+                }'''
+
+# ------------------------------------------------------------ shaders
+
+[[patch]]
+id = "env-texture-fade-frame"
+why = "the frame uniform's nine vec4, the same as FrameU's"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    curvature: vec4<f32>,       // planet curvature (apply_curvature): xy the main camera (region m), z 1 / 2R (0: flat), w unused
+};'''
+replace = '''curvature: vec4<f32>,       // planet curvature (apply_curvature): xy the main camera (region m), z 1 / 2R (0: flat), w unused
+    // aurora-local-patch: env-texture-fade-frame
+    // the environment's texture cross-fade (renderer.rs FrameU env_fade_*),
+    // zero while nothing fades: the second textures' slots (0: none, the
+    // element's stand-in), cloud noise, sun, moon, water normal map; then
+    // rainbow, halo
+    env_fade_slots: vec4<u32>,
+    env_fade_slots2: vec4<u32>,
+    // their shares: the second cloud layer's, sun, moon, water; then
+    // rainbow, halo, z 0, w 1 while the water cross-fades (its first map
+    // keeps its own waves in water_waves)
+    env_fade_share: vec4<f32>,
+    env_fade_share2: vec4<f32>,
+    env_fade_cloud_next: vec4<f32>,  // the second cloud layer's cloud_pos_density1 xy at its own scroll, cloud_pos_density2 zw
+    env_fade_water_waves: vec4<f32>, // the second water normal map's waves: wave1 xy, wave2 zw
+    env_fade_water_first: vec4<f32>, // the first water normal map's own normal scale xyz
+    env_fade_water_next: vec4<f32>,  // the second's
+    env_fade_cloud_shape: vec4<f32>, // the second cloud layer's cloud scale x, cloud variance y
+};'''
+
+[[patch]]
+id = "env-texture-fade-cloud-noise"
+why = "the flat clouds' noise of a given texture and one cloud layer drawn as its own sky draws it (its texture, zoom, variance and offsets), shared by the first and the second layer"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''fn cloud_noise(uv: vec2<f32>) -> f32 {
+    return sample_tex_level(frame.tex_slots.x, uv, 0.0).x;
+}'''
+replace = '''fn cloud_noise(uv: vec2<f32>) -> f32 {
+    return sample_tex_level(frame.tex_slots.x, uv, 0.0).x;
+}
+
+// aurora-local-patch: env-texture-fade-cloud-noise
+// The cloud noise of the texture in `slot`.
+fn cloud_noise_in(slot: u32, uv: vec2<f32>) -> f32 {
+    return sample_tex_level(slot, uv, 0.0).x;
+}
+
+// One cloud layer of sky_clouds (cloudsF.glsl) as its own sky draws it: the
+// texture in `slot`, the dome's coordinates `dome` zoomed by its `scale`,
+// warped by its `variance` (the distortion taps), at its offsets `o1` and
+// `o2` (cloud_pos_density1 and 2 xy, its scroll in `o1`); `density0` the
+// sky's cut from its cover, the densities (cloud_pos_density1 and 2 z) the
+// sky's, blended as numbers. x: the cover before the altitude blend
+// (alpha1), y: the light term (alpha2). The terms of before, for one layer;
+// while the environment cross-fades each layer is drawn with its own.
+fn sky_cloud_layer(slot: u32, dome: vec2<f32>, ln: vec3<f32>, scale: f32, variance: f32, o1: vec2<f32>, o2: vec2<f32>, density0: f32) -> vec2<f32> {
+    let tc0 = (dome - vec2<f32>(0.5)) / scale + vec2<f32>(0.5);
+    let tc1 = tc0 + vec2<f32>(ln.y * 0.0125, ln.x * 0.0125);
+    let tc2 = tc0 * 16.0;
+    let tc3 = tc1 * 16.0;
+    let pd1 = frame.sky_cloud_pd1.xyz;
+    let pd2 = frame.sky_cloud_pd2.xyz;
+    var uv1 = tc0;
+    var uv2 = tc1;
+    var uv3 = tc2;
+    var uv4 = tc3;
+    let dist1 = vec2<f32>(cloud_noise_in(slot, uv1 / 8.0), cloud_noise_in(slot, (uv3 + uv1) / 16.0)) * variance * (1.0 - scale * 0.25);
+    let dist2 = vec2<f32>(cloud_noise_in(slot, (uv1 + uv3) / 4.0), cloud_noise_in(slot, (uv4 + uv2) / 8.0)) * variance * (1.0 - scale * 0.25);
+    uv1 += o1 + dist1 * 0.2;
+    uv2 += o1;
+    uv3 += o2;
+    uv4 += o2;
+    let dv = min(1.0, (dist1.x * 2.0 + dist1.y * 2.0 + dist2.x + dist2.y) * 4.0);
+    let density = density0 * (1.0 - dv * dv);
+    var alpha1 = (cloud_noise_in(slot, uv1) - 0.5) + (cloud_noise_in(slot, uv3) - 0.5) * pd2.z;
+    alpha1 = min(max(alpha1 + density, 0.0) * 10.0 * pd1.z, 1.0);
+    alpha1 = 1.0 - alpha1 * alpha1;
+    alpha1 = 1.0 - alpha1 * alpha1;
+    var alpha2 = cloud_noise_in(slot, uv2) - 0.5;
+    alpha2 = min(max(alpha2 + density, 0.0) * 2.5 * pd1.z, 1.0);
+    alpha2 = 1.0 - alpha2;
+    alpha2 = 1.0 - alpha2 * alpha2;
+    return vec2<f32>(alpha1, alpha2);
+}'''
+
+[[patch]]
+id = "env-texture-fade-clouds-none"
+why = "the flat clouds draw when either layer has a texture and a scale (the second one only while the environment cross-fades)"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "sky_clouds"
+find = "if (frame.tex_slots.x == 0u || cloud_scale < 0.001) {"
+replace = '''// aurora-local-patch: env-texture-fade-clouds-none
+    // (a layer draws with a texture and a scale: the first one, and while
+    // the environment cross-fades the second one, frame.env_fade_*)
+    let cloud_share = frame.env_fade_share.x;
+    let first_on = frame.tex_slots.x != 0u && cloud_scale >= 0.001 && cloud_share < 1.0;
+    let next_on = cloud_share > 0.0 && frame.env_fade_slots.x != 0u && frame.env_fade_cloud_shape.x >= 0.001;
+    if (!first_on && !next_on) {'''
+
+[[patch]]
+id = "env-texture-fade-clouds-tc"
+why = "each cloud layer zooms the dome's coordinates by its own scale (sky_cloud_layer)"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "sky_clouds"
+find = '''    tc0 = (tc0 - vec2<f32>(0.5)) / cloud_scale + vec2<f32>(0.5);
+    let ln = frame.sky_light.xyz;
+    let tc1 = tc0 + vec2<f32>(ln.y * 0.0125, ln.x * 0.0125);
+    let tc2 = tc0 * 16.0;
+    let tc3 = tc1 * 16.0;'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-tc
+    // (each layer zooms the dome's coordinates `tc0` by its own cloud scale
+    // and takes its taps itself: sky_cloud_layer)
+    let ln = frame.sky_light.xyz;'''
+
+[[patch]]
+id = "env-texture-fade-clouds"
+why = "the first cloud layer as before; while the environment cross-fades the second one too, each with its own texture, zoom, variance and place at its own scroll, the two images dissolved by the share"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "sky_clouds"
+find = '''    let pd1 = frame.sky_cloud_pd1.xyz;
+    let pd2 = frame.sky_cloud_pd2.xyz;
+    let variance = frame.sky_cloud_pd1.w;
+    var uv1 = tc0;
+    var uv2 = tc1;
+    var uv3 = tc2;
+    var uv4 = tc3;
+    let dist1 = vec2<f32>(cloud_noise(uv1 / 8.0), cloud_noise((uv3 + uv1) / 16.0)) * variance * (1.0 - cloud_scale * 0.25);
+    let dist2 = vec2<f32>(cloud_noise((uv1 + uv3) / 4.0), cloud_noise((uv4 + uv2) / 8.0)) * variance * (1.0 - cloud_scale * 0.25);
+    uv1 += pd1.xy + dist1 * 0.2;
+    uv2 += pd1.xy;
+    uv3 += pd2.xy;
+    uv4 += pd2.xy;
+    let dv = min(1.0, (dist1.x * 2.0 + dist1.y * 2.0 + dist2.x + dist2.y) * 4.0);
+    density *= 1.0 - dv * dv;
+    var alpha1 = (cloud_noise(uv1) - 0.5) + (cloud_noise(uv3) - 0.5) * pd2.z;
+    alpha1 = min(max(alpha1 + density, 0.0) * 10.0 * pd1.z, 1.0);
+    alpha1 = 1.0 - alpha1 * alpha1;
+    alpha1 = 1.0 - alpha1 * alpha1;
+    alpha1 = clamp(alpha1 * altitude_blend, 0.0, 1.0);
+    var alpha2 = cloud_noise(uv2) - 0.5;
+    alpha2 = min(max(alpha2 + density, 0.0) * 2.5 * pd1.z, 1.0);
+    alpha2 = 1.0 - alpha2;
+    alpha2 = 1.0 - alpha2 * alpha2;
+    var color = col_sun * (1.0 - alpha2) + col_amb;
+    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)) * 2.0;
+    return vec4<f32>(color, alpha1);'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds
+    // The first layer, its terms as before (sky_cloud_layer). While the
+    // environment cross-fades the second one too (frame.env_fade_*, the
+    // viewer's world/eep_fade.rs), with its own texture, scale, variance and
+    // offsets at its own scroll, the two images dissolved by the share as
+    // cloudsF.glsl mixes cloud_noise_texture and cloud_noise_texture_next by
+    // blend_factor (there one noise at one lerped place: both slide and
+    // zoom): their covers mixed, the colour weighted by each one's cover; a
+    // layer of no texture is no clouds. No fade: the one layer's taps.
+    var first = vec2<f32>(0.0);
+    if (first_on) {
+        first = sky_cloud_layer(frame.tex_slots.x, tc0, ln, cloud_scale, frame.sky_cloud_pd1.w, frame.sky_cloud_pd1.xy, frame.sky_cloud_pd2.xy, density);
+    }
+    let color1 = clamp(col_sun * (1.0 - first.y) + col_amb, vec3<f32>(0.0), vec3<f32>(1.0)) * 2.0;
+    if (cloud_share <= 0.0) {
+        return vec4<f32>(color1, clamp(first.x * altitude_blend, 0.0, 1.0));
+    }
+    var second = vec2<f32>(0.0);
+    if (next_on) {
+        let shape = frame.env_fade_cloud_shape;
+        let place = frame.env_fade_cloud_next;
+        second = sky_cloud_layer(frame.env_fade_slots.x, tc0, ln, shape.x, shape.y, place.xy, place.zw, density);
+    }
+    let color2 = clamp(col_sun * (1.0 - second.y) + col_amb, vec3<f32>(0.0), vec3<f32>(1.0)) * 2.0;
+    let w1 = first.x * (1.0 - cloud_share);
+    let w2 = second.x * cloud_share;
+    let cover = w1 + w2;
+    let color = (color1 * w1 + color2 * w2) / max(cover, 1e-6);
+    return vec4<f32>(color, clamp(cover * altitude_blend, 0.0, 1.0));'''
+
+[[patch]]
+id = "env-texture-fade-rainbow"
+why = "the rainbow's second texture mixed into its tap: better than the Legacy Viewer, which has no next rainbow and switches it at the end of a fade"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_rainbow"
+find = '''    let slot = frame.sky_optics_tex.x;
+    if (slot == 0u || moisture <= 0.0) {
+        return vec3<f32>(0.0);
+    }'''
+replace = '''let slot = frame.sky_optics_tex.x;
+    // aurora-local-patch: env-texture-fade-rainbow
+    // While the environment cross-fades, the second rainbow texture's tap is
+    // mixed in by its share (a nil or missing one is none: black). The
+    // Legacy Viewer has no next rainbow (renderSkyHazeDeferred binds the
+    // current sky's) and switches it at the end: fading it is better.
+    let rainbow_share = frame.env_fade_share2.x;
+    let rainbow_next = select(0u, frame.env_fade_slots2.x, rainbow_share > 0.0);
+    if ((slot == 0u && rainbow_next == 0u) || moisture <= 0.0) {
+        return vec3<f32>(0.0);
+    }'''
+
+[[patch]]
+id = "env-texture-fade-rainbow-tap"
+why = "goes with env-texture-fade-rainbow: the two taps at the same place (the texture's coordinates are the light's, not a layer's)"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_rainbow"
+find = '''    let t = sample_tex_level(slot, vec2<f32>(rad + 0.5, 1.0 - v), 0.0).rgb;'''
+replace = '''// aurora-local-patch: env-texture-fade-rainbow-tap
+    let tc = vec2<f32>(rad + 0.5, 1.0 - v);
+    var t = vec3<f32>(0.0);
+    if (slot != 0u) {
+        t = sample_tex_level(slot, tc, 0.0).rgb;
+    }
+    if (rainbow_share > 0.0) {
+        var b = vec3<f32>(0.0);
+        if (rainbow_next != 0u) {
+            b = sample_tex_level(rainbow_next, tc, 0.0).rgb;
+        }
+        t = mix(t, b, rainbow_share);
+    }'''
+
+[[patch]]
+id = "env-texture-fade-halo"
+why = "the 22° halo's second texture mixed into its tap: better than the Legacy Viewer, which has no next halo and switches it at the end of a fade"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_halo"
+find = '''    let slot = frame.sky_optics_tex.y;
+    if (slot == 0u || ice <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let c = clamp(d, 0.1, 1.0);
+    let v = sqrt(clamp(1.0 - c * c, 0.0, 1.0));
+    return sample_tex_level(slot, vec2<f32>(0.0, 1.0 - v), 0.0).rgb * ice;'''
+replace = '''let slot = frame.sky_optics_tex.y;
+    // aurora-local-patch: env-texture-fade-halo
+    // (the second halo texture's tap mixed in as the rainbow's)
+    let halo_share = frame.env_fade_share2.y;
+    let halo_next = select(0u, frame.env_fade_slots2.y, halo_share > 0.0);
+    if ((slot == 0u && halo_next == 0u) || ice <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let c = clamp(d, 0.1, 1.0);
+    let v = sqrt(clamp(1.0 - c * c, 0.0, 1.0));
+    let tc = vec2<f32>(0.0, 1.0 - v);
+    var t = vec3<f32>(0.0);
+    if (slot != 0u) {
+        t = sample_tex_level(slot, tc, 0.0).rgb;
+    }
+    if (halo_share > 0.0) {
+        var b = vec3<f32>(0.0);
+        if (halo_next != 0u) {
+            b = sample_tex_level(halo_next, tc, 0.0).rgb;
+        }
+        t = mix(t, b, halo_share);
+    }
+    return t * ice;'''
+
+[[patch]]
+id = "env-texture-fade-disc"
+why = "a heavenly body's texel with the second texture of a cross-fade mixed in"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = "// The sky seen along a ray whose own footprint is not known (bent by the"
+replace = '''// aurora-local-patch: env-texture-fade-disc
+// A heavenly body's texel `first` (from its texture, or none: `textured`)
+// with the second texture of a cross-fade mixed in by `share`, as
+// sunDiscF.glsl mixes sunDiscA and sunDiscB by blend_factor. Slot 0 (a nil
+// or missing second texture): the first's texel fades out, its colour kept.
+fn mix_disc(first: vec4<f32>, textured: bool, dir: vec3<f32>, body: vec3<f32>, radius: f32, scale: f32, slot: u32, share: f32) -> vec4<f32> {
+    if (slot == 0u) {
+        return vec4<f32>(first.rgb, first.a * (1.0 - share));
+    }
+    let b = body_disc(dir, body, radius, scale, slot);
+    if (!textured) {
+        return vec4<f32>(b.rgb, b.a * share);
+    }
+    return mix(first, b, share);
+}
+
+// The sky seen along a ray whose own footprint is not known (bent by the'''
+
+[[patch]]
+id = "env-texture-fade-sun"
+why = "the sun's two textures mixed; a nil or missing one's part is the procedural disc"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_full_at"
+find = '''    if (frame.tex_slots.y != 0u) {
+        let s = body_disc(d, sd, 0.5, frame.sky_sun.w, frame.tex_slots.y);
+        c = mix(c, s.rgb, s.a);'''
+replace = '''// aurora-local-patch: env-texture-fade-sun
+    // While the environment cross-fades (frame.env_fade_*, the viewer's
+    // world/eep_fade.rs) the second sun's texel is mixed with the first's
+    // (mix_disc); a nil or missing sun texture's part is the procedural disc
+    // below (`sun_textured`: how much of the sun is a texture). No fade: the
+    // one tap of before.
+    let sun_share = frame.env_fade_share.y;
+    var sun_textured = select(0.0, 1.0, frame.tex_slots.y != 0u);
+    if (sun_share > 0.0) {
+        sun_textured = mix(sun_textured, select(0.0, 1.0, frame.env_fade_slots.y != 0u), sun_share);
+    }
+    if (sun_textured > 0.0) {
+        var s = vec4<f32>(0.0);
+        if (frame.tex_slots.y != 0u) {
+            s = body_disc(d, sd, 0.5, frame.sky_sun.w, frame.tex_slots.y);
+        }
+        if (sun_share > 0.0) {
+            s = mix_disc(s, frame.tex_slots.y != 0u, d, sd, 0.5, frame.sky_sun.w, frame.env_fade_slots.y, sun_share);
+        }
+        c = mix(c, s.rgb, s.a);'''
+
+[[patch]]
+id = "env-texture-fade-moon"
+why = "the moon's two textures mixed, a nil or missing one being no moon: better than the Legacy Viewer, which keeps the first moon to the end of a fade and then switches"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_full_at"
+find = '''    if (frame.tex_slots.z != 0u) {
+        let md = normalize(frame.sky_moon.xyz);
+        let m = body_disc(d, md, 0.45, frame.sky_moon.w, frame.tex_slots.z);'''
+replace = '''// aurora-local-patch: env-texture-fade-moon
+    // (the second moon mixed in the same way, a nil or missing one being no
+    // moon; the Legacy Viewer keeps its first moon to the end of a fade,
+    // the moon's blend factor commented out in
+    // LLDrawPoolWLSky::renderHeavenlyBodies, lldrawpoolwlsky.cpp: fading it
+    // is better)
+    let moon_share = frame.env_fade_share.z;
+    let moon_next = select(0u, frame.env_fade_slots.z, moon_share > 0.0);
+    if (frame.tex_slots.z != 0u || moon_next != 0u) {
+        let md = normalize(frame.sky_moon.xyz);
+        var m = vec4<f32>(0.0);
+        if (frame.tex_slots.z != 0u) {
+            m = body_disc(d, md, 0.45, frame.sky_moon.w, frame.tex_slots.z);
+        }
+        if (moon_share > 0.0) {
+            m = mix_disc(m, frame.tex_slots.z != 0u, d, md, 0.45, frame.sky_moon.w, moon_next, moon_share);
+        }'''
+
+[[patch]]
+id = "env-texture-fade-sun-disc"
+why = "the procedural sun draws the part no texture draws (all of it without a texture, as before)"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "sky_full_at"
+find = '''    if (frame.tex_slots.y == 0u) {
+        let mu = dot(d, sd);
+        let disk = smoothstep(0.99955, 0.9997, mu) * clamp(sd.z * 10.0 + 1.0, 0.0, 1.0);
+        col += frame.sun_color.rgb * disk * 6.0 * cover;
+    }'''
+replace = '''// aurora-local-patch: env-texture-fade-sun-disc
+    // (the part of the sun no texture draws: all of it without one, the
+    // stand-in's share while a nil or missing one fades)
+    if (sun_textured < 1.0) {
+        let mu = dot(d, sd);
+        let disk = smoothstep(0.99955, 0.9997, mu) * clamp(sd.z * 10.0 + 1.0, 0.0, 1.0);
+        col += frame.sun_color.rgb * disk * 6.0 * cover * (1.0 - sun_textured);
+    }'''
+
+[[patch]]
+id = "env-texture-fade-weather"
+why = "the volumetric clouds' weather map of a given cloud texture; a second map of the second texture while the environment cross-fades, which the trace lays at that layer's own place and tile"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''@fragment
+fn fs_cloud_weather(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    if (frame.tex_slots.x == 0u) {
+        return vec4<f32>(0.0);
+    }
+    let uv = pos.xy / CLOUD_WEATHER_SIZE;
+    let pd2 = frame.sky_cloud_pd2.xyz;
+    let density = 2.0 * (frame.sky_sunlight.w - 0.25);
+    let n1 = cloud_noise(uv) - 0.5;
+    let detail = cloud_noise(uv * 8.0);'''
+replace = '''// aurora-local-patch: env-texture-fade-weather
+// The weather map of the volumetric clouds from the cloud texture in `slot`
+// (none: no cover). fs_cloud_weather draws the first texture's; while the
+// environment cross-fades, fs_cloud_weather_next the second texture's into
+// a map of its own, which the trace lays at the second layer's own place and
+// tile (clouds.rs LayerFade, clouds.wgsl cloud_density). The cover and the
+// densities are the sky's, blended as numbers; the placement is the trace's.
+@fragment
+fn fs_cloud_weather(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return cloud_weather(pos, frame.tex_slots.x);
+}
+
+@fragment
+fn fs_cloud_weather_next(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return cloud_weather(pos, frame.env_fade_slots.x);
+}
+
+fn cloud_weather(pos: vec4<f32>, slot: u32) -> vec4<f32> {
+    if (slot == 0u) {
+        return vec4<f32>(0.0);
+    }
+    let uv = pos.xy / CLOUD_WEATHER_SIZE;
+    let pd2 = frame.sky_cloud_pd2.xyz;
+    let density = 2.0 * (frame.sky_sunlight.w - 0.25);
+    let n1 = cloud_noise_in(slot, uv) - 0.5;
+    let detail = cloud_noise_in(slot, uv * 8.0);'''
+
+[[patch]]
+id = "env-texture-fade-water"
+why = "the second water normal map's three taps at its own waves, each map with its own scale; no fade, none of it"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "var wavef = (wave1 + wave2 * 0.4 + wave3 * 0.6) * 0.5;"
+replace = '''var wavef = (wave1 + wave2 * 0.4 + wave3 * 0.6) * 0.5;
+    // aurora-local-patch: env-texture-fade-water
+    // While the environment cross-fades (frame.env_fade_*, the viewer's
+    // world/eep_fade.rs), the second normal map's three taps at its own
+    // waves, mixed in by its share, as waterF.glsl's BlendNormal mixes
+    // normal_map and normal_map_next by blend_factor (there at the same
+    // lerped waves: both slide); each map with its own normal scale
+    // (`fade_n`: what the shared, lerped scale below misses). The first map
+    // keeps its own waves (frame.water_waves) from the start of the fade,
+    // while the second one loads too; a nil second map is the analytic
+    // water. No fade: none of this runs.
+    var fade_n = vec3<f32>(0.0);
+    if (frame.env_fade_share2.w > 0.5) {
+        let water_share = frame.env_fade_share.w;
+        var second = wavef;
+        if (water_share > 0.0) {
+            let second_slot = frame.env_fade_slots.w;
+            if (second_slot == 0u) {
+                second = analytic_wave(in.world_pos.xy, t * 2.0);
+            } else {
+                let n1d = frame.env_fade_water_waves.xy;
+                let n2d = frame.env_fade_water_waves.zw;
+                let b1 = sample_tex(second_slot, v * 0.04 + n1d * t * 0.055).xyz * 2.0 - vec3<f32>(1.0);
+                let b2 = sample_tex(second_slot, v * vec2<f32>(0.45, 0.9) + n2d * t * 0.13).xyz * 2.0 - vec3<f32>(1.0);
+                let b3 = sample_tex(second_slot, v * vec2<f32>(0.1, 0.2) + n1d * t * 0.1).xyz * 2.0 - vec3<f32>(1.0);
+                second = (b1 + b2 * 0.4 + b3 * 0.6) * 0.5;
+            }
+        }
+        let mixed = mix(wavef, second, water_share);
+        fade_n = mix(wavef * frame.env_fade_water_first.xyz, second * frame.env_fade_water_next.xyz, water_share) - mixed * frame.water_normal.xyz;
+        wavef = mixed;
+    }'''
+
+[[patch]]
+id = "env-texture-fade-water-n"
+why = "goes with env-texture-fade-water: the normal with each map's own scale"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "var n = wavef * frame.water_normal.xyz;"
+replace = "var n = wavef * frame.water_normal.xyz + fade_n; // aurora-local-patch: env-texture-fade-water-n"
+
+[[patch]]
+id = "env-texture-fade-water-ibl"
+why = "goes with env-texture-fade-water: the reflection's waves with each map's own scale"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "var wave_ibl = wavef * frame.water_normal.xyz;"
+replace = "var wave_ibl = wavef * frame.water_normal.xyz + fade_n; // aurora-local-patch: env-texture-fade-water-ibl"
+
+# ------------------------------------------------------------ volumetric clouds
+
+[[patch]]
+id = "env-texture-fade-clouds-drawn"
+why = "the volumetric layer is drawn while either cloud layer draws: the second one of a cross-fade too, at its own scale and place (LayerFade)"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''        if !layer_drawn(s.cloud_scale, s.cloud_texture, s.cloud_pos_density1.z) {
+            return None;
+        }'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-drawn
+        // (while the environment cross-fades, the second cloud layer draws
+        // too, at its own scale and place: LayerFade)
+        let first_drawn = layer_drawn(s.cloud_scale, s.cloud_texture, s.cloud_pos_density1.z);
+        let fade = LayerFade::of(s, first_drawn);
+        if !first_drawn && !fade.drawn() {
+            return None;
+        }'''
+
+[[patch]]
+id = "env-texture-fade-clouds-params"
+why = "goes with env-texture-fade-clouds-drawn: the frame's clouds carry the second layer"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''    pub sea_below_km: f32,
+    pub curved: bool,
+}'''
+replace = '''pub sea_below_km: f32,
+    pub curved: bool,
+    // aurora-local-patch: env-texture-fade-clouds-params
+    /// The second cloud layer of an environment cross-fade (none: off).
+    pub fade: LayerFade,
+}'''
+
+[[patch]]
+id = "env-texture-fade-clouds-params-new"
+why = "goes with env-texture-fade-clouds-params"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = "            extinction: extinction(s.cloud_pos_density1.z),"
+replace = '''extinction: extinction(s.cloud_pos_density1.z),
+            fade, // aurora-local-patch: env-texture-fade-clouds-params-new'''
+
+[[patch]]
+id = "env-texture-fade-clouds-key"
+why = "the weather maps are drawn again when a cross-fade's second texture comes or goes, not for its share (the trace weighs the two)"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''            weather_key: weather_key(
+                s.cloud_shadow,
+                s.cloud_pos_density1.z,
+                s.cloud_pos_density2.z,
+                s.cloud_texture,
+                c.texture_size,
+                c.texture_revision,
+            ),'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-key
+            weather_key: fade_weather_key(
+                weather_key(
+                    s.cloud_shadow,
+                    s.cloud_pos_density1.z,
+                    s.cloud_pos_density2.z,
+                    s.cloud_texture,
+                    c.texture_size,
+                    c.texture_revision,
+                ),
+                &fade,
+                s.fade.cloud.texture,
+            ),'''
+
+[[patch]]
+id = "env-texture-fade-clouds-fade-key"
+why = "goes with env-texture-fade-clouds-key: the second layer as the trace lays it, and the weather key with it"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = "fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {"
+replace = '''// aurora-local-patch: env-texture-fade-clouds-fade-key
+/// The second cloud layer of an environment cross-fade as the trace draws it
+/// (types.rs `SkyTextureFade`; the first is the sky's own fields): each
+/// layer's weight, the second one's weather map tile and the offset of its
+/// pattern (its scroll included), so that it is laid as its own sky lays it.
+/// Default: no fade, the one layer of before.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LayerFade {
+    pub on: bool,
+    /// The first layer's weight (1 - the share; 0 when it draws nothing).
+    pub first: f32,
+    /// The second layer's weight (the share; 0 when it draws nothing: no
+    /// texture, the stand-in of no clouds, or no scale).
+    pub share: f32,
+    pub tile_km: f32,
+    pub pattern_km: [f64; 2],
+}
+
+impl LayerFade {
+    pub fn of(s: &crate::types::SkyParams, first_drawn: bool) -> LayerFade {
+        let share = s.fade.cloud_share();
+        if share <= 0.0 {
+            return LayerFade::default();
+        }
+        let scale = s.fade.cloud_next_shape[0];
+        let tile = tile_km(scale);
+        let next_drawn = layer_drawn(scale, s.fade.cloud.texture, s.cloud_pos_density1.z);
+        LayerFade {
+            on: true,
+            first: if first_drawn { 1.0 - share } else { 0.0 },
+            share: if next_drawn { share } else { 0.0 },
+            tile_km: tile,
+            pattern_km: [0, 1].map(|i| f64::from(s.fade.cloud_next[i]) * f64::from(tile)),
+        }
+    }
+
+    /// Whether the second layer draws anything.
+    pub fn drawn(&self) -> bool {
+        self.share > 0.0
+    }
+}
+
+impl Params {
+    /// The offset of the second layer's pattern past the first's (km),
+    /// wrapped in the period the noises and the tiles repeat with.
+    pub fn fade_offset_km(&self) -> [f32; 2] {
+        [0, 1].map(|i| {
+            let first = self.camera_km[i] + self.pattern_km[i];
+            let next = self.camera_km[i] + self.fade.pattern_km[i];
+            (next - first).rem_euclid(PERIOD_KM) as f32
+        })
+    }
+}
+
+/// [`weather_key`] with the environment's cloud cross-fade folded in:
+/// unchanged while nothing fades; otherwise also whether a second texture's
+/// map is drawn and that texture's slot (its revision comes in
+/// `CloudsFrame`). The share and the places are the trace's: they draw
+/// nothing again.
+pub fn fade_weather_key(key: u64, fade: &LayerFade, next_texture: u32) -> u64 {
+    if !fade.on {
+        return key;
+    }
+    let mut h = key;
+    for v in [1, u32::from(fade.drawn()), if fade.drawn() { next_texture } else { 0 }] {
+        h = (h ^ u64::from(v)).wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {'''
+
+[[patch]]
+id = "env-texture-fade-clouds-uniform"
+why = "the trace's uniform carries the second layer: its offset past the first, its tile and both weights"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''    gen_z: [u32; 4],
+    planet: [f32; 4],
+}'''
+replace = '''gen_z: [u32; 4],
+    planet: [f32; 4],
+    // aurora-local-patch: env-texture-fade-clouds-uniform
+    /// The second cloud layer of a cross-fade (LayerFade): xy its pattern's
+    /// offset past the first's (km), z its tile (km), w its weight; and x
+    /// the first layer's weight, y 1 while the clouds cross-fade.
+    fade: [f32; 4],
+    fade_first: [f32; 4],
+}'''
+
+[[patch]]
+id = "env-texture-fade-clouds-uniform-set"
+why = "goes with env-texture-fade-clouds-uniform"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''            planet: [p.planet_km, p.sea_below_km, f32::from(u8::from(p.curved)), 0.0],
+        };'''
+replace = '''planet: [p.planet_km, p.sea_below_km, f32::from(u8::from(p.curved)), 0.0],
+            // aurora-local-patch: env-texture-fade-clouds-uniform-set
+            fade: {
+                let [dx, dy] = p.fade_offset_km();
+                [dx, dy, p.fade.tile_km, p.fade.share]
+            },
+            fade_first: [p.fade.first, f32::from(u8::from(p.fade.on)), 0.0, 0.0],
+        };'''
+
+[[patch]]
+id = "env-texture-fade-clouds-map"
+why = "the second weather map, beside the first"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''    weather: wgpu::TextureView,
+    weather_key: Option<u64>,'''
+replace = '''weather: wgpu::TextureView,
+    // aurora-local-patch: env-texture-fade-clouds-map
+    /// The weather map of a cross-fade's second cloud texture.
+    weather_next: wgpu::TextureView,
+    weather_key: Option<u64>,'''
+
+[[patch]]
+id = "env-texture-fade-clouds-map-new"
+why = "goes with env-texture-fade-clouds-map"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''        let weather_tex = texture(
+            device,
+            "cloud weather map",
+            [WEATHER_SIZE, WEATHER_SIZE, 1],
+            D2,
+            Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );'''
+replace = '''let weather_tex = texture(
+            device,
+            "cloud weather map",
+            [WEATHER_SIZE, WEATHER_SIZE, 1],
+            D2,
+            Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        // aurora-local-patch: env-texture-fade-clouds-map-new
+        let weather_next_tex = texture(
+            device,
+            "cloud weather map (cross-fade)",
+            [WEATHER_SIZE, WEATHER_SIZE, 1],
+            D2,
+            Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );'''
+
+[[patch]]
+id = "env-texture-fade-clouds-map-view"
+why = "goes with env-texture-fade-clouds-map"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = "            weather: view(&weather_tex),"
+replace = '''weather: view(&weather_tex),
+            weather_next: view(&weather_next_tex), // aurora-local-patch: env-texture-fade-clouds-map-view'''
+
+[[patch]]
+id = "env-texture-fade-clouds-map-target"
+why = "goes with env-texture-fade-clouds-map: the renderer draws into it"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''    pub fn weather_target(&self) -> &wgpu::TextureView {
+        &self.weather
+    }'''
+replace = '''pub fn weather_target(&self) -> &wgpu::TextureView {
+        &self.weather
+    }
+
+    // aurora-local-patch: env-texture-fade-clouds-map-target
+    /// The second weather map, drawn with the first while the clouds
+    /// cross-fade ([`LayerFade::drawn`]).
+    pub fn weather_next_target(&self) -> &wgpu::TextureView {
+        &self.weather_next
+    }'''
+
+[[patch]]
+id = "env-texture-fade-clouds-bind"
+why = "the trace and the still trace read the second weather map"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "regex"
+expect = 2
+pattern = '''(?m)^([ \t]*)entry\(8, tv\(&self\.weather\)\),\n'''
+replace = '''\1entry(8, tv(&self.weather)),
+\1// aurora-local-patch: env-texture-fade-clouds-bind
+\1entry(20, tv(&self.weather_next)),
+'''
+
+[[patch]]
+id = "env-texture-fade-clouds-test"
+why = "the second layer as the trace lays it (weights, tile, place, a layer of no texture weighing 0), the weather key's rule, the uniform's size"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''    #[test]
+    fn the_weather_map_is_drawn_again_only_for_a_change() {'''
+replace = '''#[test]
+    fn the_second_cloud_layer_is_laid_as_its_own_sky_lays_it() {
+        // aurora-local-patch: env-texture-fade-clouds-test
+        use crate::types::{SkyParams, SkyTextureFade, TextureFade};
+        let sky = |texture: u32, blend: f32, scale: f32| SkyParams {
+            fade: SkyTextureFade {
+                cloud: TextureFade { texture, blend },
+                cloud_next: [0.25, 0.5, 0.0, 0.0],
+                cloud_next_shape: [scale, 0.0],
+                ..Default::default()
+            },
+            ..SkyParams::default()
+        };
+        assert_eq!(LayerFade::of(&SkyParams::default(), true), LayerFade::default(), "no fade");
+        let f = LayerFade::of(&sky(13, 0.3, 0.84), true);
+        assert!(f.on && (f.first - 0.7).abs() < 1e-6 && (f.share - 0.3).abs() < 1e-6);
+        assert_eq!(f.tile_km, tile_km(0.84), "its own scale's tile");
+        assert!((f.pattern_km[0] - 0.25 * f64::from(f.tile_km)).abs() < 1e-9);
+        // to no clouds: the first thins out, the second weighs nothing
+        let gone = LayerFade::of(&sky(0, 0.3, 0.84), true);
+        assert!(gone.on && !gone.drawn() && (gone.first - 0.7).abs() < 1e-6);
+        // from no clouds: only the second draws
+        let from_none = LayerFade::of(&sky(13, 0.3, 0.84), false);
+        assert!(from_none.drawn() && from_none.first == 0.0);
+        // the weather maps are drawn again when the second texture comes or
+        // goes, not for the share
+        let key = weather_key(0.27, 1.0, 1.0, 12, (256, 256), 5);
+        assert_eq!(fade_weather_key(key, &LayerFade::default(), 13), key, "no fade: the key of before");
+        let k = fade_weather_key(key, &f, 13);
+        assert_ne!(k, key);
+        assert_eq!(k, fade_weather_key(key, &LayerFade::of(&sky(13, 0.6, 0.84), true), 13));
+        assert_ne!(k, fade_weather_key(key, &f, 14));
+        assert_ne!(k, fade_weather_key(key, &gone, 13));
+        // the second pattern's offset past the first, wrapped in the period
+        let p = Params {
+            vp: Mat4::IDENTITY,
+            inv_vp: Mat4::IDENTITY,
+            light: Vec3::Z,
+            sun_col: Vec3::ONE,
+            amb_col: Vec3::ONE,
+            haze: Vec3::ONE,
+            haze_km: 40.0,
+            camera_km: [1000.0 * PERIOD_KM + 3.0, -2.0],
+            pattern_km: [0.5, 0.0],
+            layer: (1.2, 3.0),
+            kind: 1.0,
+            tile_km: 26.25,
+            extinction: 1.0,
+            weather_key: 0,
+            planet_km: EARTH_KM,
+            sea_below_km: 0.0,
+            curved: false,
+            fade: LayerFade {
+                pattern_km: [0.25, PERIOD_KM + 1.0],
+                ..f
+            },
+        };
+        let [x, y] = p.fade_offset_km();
+        assert!((x - (PERIOD_KM as f32 - 0.25)).abs() < 1e-3 && (y - 1.0).abs() < 1e-3, "{x} {y}");
+    }
+
+    #[test]
+    fn the_weather_map_is_drawn_again_only_for_a_change() {'''
+
+[[patch]]
+id = "env-texture-fade-clouds-test-params"
+why = "goes with env-texture-fade-clouds-params: the tests' frame clouds, no fade"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''            weather_key: 0,
+            planet_km: EARTH_KM,
+            sea_below_km: 0.0,
+            curved: false,
+        };'''
+replace = '''weather_key: 0,
+            planet_km: EARTH_KM,
+            sea_below_km: 0.0,
+            curved: false,
+            fade: LayerFade::default(), // aurora-local-patch: env-texture-fade-clouds-test-params
+        };'''
+
+[[patch]]
+id = "env-texture-fade-clouds-test-size"
+why = "goes with env-texture-fade-clouds-uniform"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''        assert_eq!(std::mem::size_of::<CloudU>(), 2 * 64 + 8 * 16 + 3 * 16 + 16);'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-test-size
+        // (and the cross-fade's two vec4, `fade` and `fade_first`)
+        assert_eq!(std::mem::size_of::<CloudU>(), 2 * 64 + 8 * 16 + 3 * 16 + 16 + 2 * 16);
+        assert!(include_str!("shaders/clouds.wgsl").contains("fade_first: vec4f"));'''
+
+[[patch]]
+id = "env-texture-fade-clouds-wgsl-uniform"
+why = "the trace's uniform: the second cloud layer of a cross-fade (clouds.rs CloudU)"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+find = '''    planet: vec4f,         // x: the planet's radius (km), y: the camera's height above the sea (km), z: 1 = the world is drawn curved (curvature.rs)
+}'''
+replace = '''planet: vec4f,         // x: the planet's radius (km), y: the camera's height above the sea (km), z: 1 = the world is drawn curved (curvature.rs)
+    // aurora-local-patch: env-texture-fade-clouds-wgsl-uniform
+    fade: vec4f,           // a cross-fade's second cloud layer: xy its pattern's offset past the first's (km), z its tile (km), w its weight
+    fade_first: vec4f,     // x the first layer's weight, y 1 while the clouds cross-fade
+}'''
+
+[[patch]]
+id = "env-texture-fade-clouds-wgsl-map"
+why = "goes with env-texture-fade-clouds-wgsl-uniform: the second weather map"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+find = "@group(0) @binding(19) var depth_t: texture_depth_2d;"
+replace = '''@group(0) @binding(19) var depth_t: texture_depth_2d;
+// aurora-local-patch: env-texture-fade-clouds-wgsl-map
+@group(0) @binding(20) var weather_next_t: texture_2d<f32>;'''
+
+[[patch]]
+id = "env-texture-fade-clouds-density"
+why = "the density of the two cloud layers of a cross-fade, each from its own weather map at its own place and tile, its 3D noise anchored to its own pattern, weighted by the shares; no fade, the one density of before"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+find = '''// ---------------------------------------------------------------- lighting
+fn hg(c: f32, g: f32) -> f32 {'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-density
+// The density at `p`, `off` the first layer's offset (the camera and its
+// pattern). While the environment cross-fades (u.fade_first.y) the two
+// layers' densities weighted by their shares, each as its own sky lays it:
+// from its own weather map, at its own tile (the second's u.fade.z) and
+// place (the second's offset u.fade.xy past the first's), its 3D noise
+// anchored to its own pattern; a layer that draws nothing weighs 0. The
+// layer heights and the cover are the sky's, blended as numbers. No fade:
+// the one density of before.
+fn cloud_density(p: vec3f, off: vec2f, full: bool) -> f32 {
+    let d = density(p, weather_at(p, off), off, full);
+    if u.fade_first.y < 0.5 { return d; }
+    var mixed = d * u.fade_first.x;
+    if u.fade.w > 0.0 {
+        let off2 = off + u.fade.xy;
+        let w2 = textureSampleLevel(weather_next_t, samp, (p.xz + off2) / u.fade.z, 0.0);
+        mixed += density(p, w2, off2, full) * u.fade.w;
+    }
+    return mixed;
+}
+
+// The base noise's slow light and dark of a sheet at `p` (march), each
+// layer's at its own pattern while the clouds cross-fade.
+fn cloud_sheet_noise(p: vec3f, off: vec2f) -> f32 {
+    let nb = textureSampleLevel(base_t, samp, vec3f(p.x + off.x, height_of(p) * BASE_Y, p.z + off.y) / BASE_KM, 0.0).g;
+    if u.fade_first.y < 0.5 || u.fade.w <= 0.0 { return nb; }
+    let off2 = off + u.fade.xy;
+    let nb2 = textureSampleLevel(base_t, samp, vec3f(p.x + off2.x, height_of(p) * BASE_Y, p.z + off2.y) / BASE_KM, 0.0).g;
+    return mix(nb, nb2, u.fade.w / max(u.fade.w + u.fade_first.x, 1e-6));
+}
+
+// ---------------------------------------------------------------- lighting
+fn hg(c: f32, g: f32) -> f32 {'''
+
+[[patch]]
+id = "env-texture-fade-clouds-march-search"
+why = "goes with env-texture-fade-clouds-density: the edge search of both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = "if density(pm, weather_at(pm, off), off, false) > 0.002 { hi = mid; } else { lo = mid; }"
+replace = "if cloud_density(pm, off, false) > 0.002 { hi = mid; } else { lo = mid; } // aurora-local-patch: env-texture-fade-clouds-march-search"
+
+[[patch]]
+id = "env-texture-fade-clouds-march-light"
+why = "goes with env-texture-fade-clouds-density: the light march of both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = "od += density(lp, weather_at(lp, off), off, false) * ls;"
+replace = "od += cloud_density(lp, off, false) * ls; // aurora-local-patch: env-texture-fade-clouds-march-light"
+
+[[patch]]
+id = "env-texture-fade-clouds-march-far"
+why = "goes with env-texture-fade-clouds-density: the light march's far tap of both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = "od += density(fp, weather_at(fp, off), off, false);"
+replace = "od += cloud_density(fp, off, false); // aurora-local-patch: env-texture-fade-clouds-march-far"
+
+[[patch]]
+id = "env-texture-fade-clouds-march-sky"
+why = "goes with env-texture-fade-clouds-density: the sky light through both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = '''let sky_od = (density(ap, weather_at(ap, off), off, false) * 0.3 + density(bp, weather_at(bp, off), off, false) * 0.4
+                + density(cp, weather_at(cp, off), off, false) * 0.4) * SIGMA * u.drift.w;'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-march-sky
+            let sky_od = (cloud_density(ap, off, false) * 0.3 + cloud_density(bp, off, false) * 0.4 + cloud_density(cp, off, false) * 0.4)
+                * SIGMA
+                * u.drift.w;'''
+
+[[patch]]
+id = "env-texture-fade-clouds-march-step"
+why = "goes with env-texture-fade-clouds-density: the march's step of both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = '''        var w = weather_at(p, off);
+        var dens = density(p, w, off, true);'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-march-step
+        // (both layers of a cross-fade: cloud_density)
+        var dens = cloud_density(p, off, true);'''
+
+[[patch]]
+id = "env-texture-fade-clouds-march-edge"
+why = "goes with env-texture-fade-clouds-density: the step found at a cloud's edge"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = '''            w = weather_at(p, off);
+            dens = density(p, w, off, true);'''
+replace = '''dens = cloud_density(p, off, true); // aurora-local-patch: env-texture-fade-clouds-march-edge'''
+
+[[patch]]
+id = "env-texture-fade-clouds-march-sheet"
+why = "goes with env-texture-fade-clouds-density: a sheet's light and dark of both layers"
+paths = ["crates/aurora-render/src/shaders/clouds.wgsl"]
+op = "literal"
+fn = "march"
+find = "let nb = textureSampleLevel(base_t, samp, vec3f(p.x + off.x, height_of(p) * BASE_Y, p.z + off.y) / BASE_KM, 0.0).g;"
+replace = "let nb = cloud_sheet_noise(p, off); // aurora-local-patch: env-texture-fade-clouds-march-sheet"
+
+# ------------------------------------------------------------ scene and frame
+
+[[patch]]
+id = "env-texture-fade-scene-field"
+why = "the scene keeps the cross-fade's second textures resident beside the first ones"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''    /// Sky / water textures: (id, slot).
+    env_tex: [(Uuid, u32); 6],'''
+replace = '''/// Sky / water textures: (id, slot).
+    env_tex: [(Uuid, u32); 6],
+    // aurora-local-patch: env-texture-fade-scene-field
+    /// The second textures of an environment cross-fade
+    /// (world/eep_fade.rs), in the same order: (id, slot).
+    env_fade_tex: [(Uuid, u32); 6],'''
+
+[[patch]]
+id = "env-texture-fade-scene-init"
+why = "goes with env-texture-fade-scene-field"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "env_tex: [(Uuid::nil(), 0); 6],"
+replace = '''env_tex: [(Uuid::nil(), 0); 6],
+            env_fade_tex: [(Uuid::nil(), 0); 6], // aurora-local-patch: env-texture-fade-scene-init'''
+
+[[patch]]
+id = "env-texture-fade-scene-forget"
+why = "a lost GPU releases the second textures with the first ones"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "forget_gpu"
+find = "for (id, _) in std::mem::take(&mut self.env_tex) {"
+replace = '''// aurora-local-patch: env-texture-fade-scene-forget
+        let fade = std::mem::take(&mut self.env_fade_tex);
+        for (id, _) in std::mem::take(&mut self.env_tex).into_iter().chain(fade) {'''
+
+[[patch]]
+id = "env-texture-fade-scene-textures"
+why = "the second textures asked for and kept as the first ones are, after them: a texture passing from one set to the other is never released in between; and which of them are in, for the selector"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "/// Keep the sky / water textures resident; returns their slots (0 until loaded)."
+replace = '''// aurora-local-patch: env-texture-fade-scene-textures
+    /// The second textures of an environment cross-fade (world/eep_fade.rs;
+    /// nil: none), kept resident as [`Self::env_textures`] keeps the first
+    /// ones, and called after it: a texture moving from one set to the
+    /// other stays held. Their slots, 0 until loaded.
+    pub fn env_fade_textures(&mut self, renderer: &mut Renderer, ids: [Uuid; 6]) -> [u32; 6] {
+        std::mem::swap(&mut self.env_tex, &mut self.env_fade_tex);
+        let slots = self.env_textures(renderer, ids);
+        std::mem::swap(&mut self.env_tex, &mut self.env_fade_tex);
+        slots
+    }
+
+    /// The environment textures held that are in (the first ones, then the
+    /// second ones; nil for the others), as [`Self::env_textures`] gives
+    /// their slots: what an environment change waits for
+    /// (`EnvSelector::set_ready_textures`).
+    pub fn env_ready_textures(&self) -> [Uuid; 12] {
+        let mut out = [Uuid::nil(); 12];
+        for (o, (id, _)) in out.iter_mut().zip(self.env_tex.iter().chain(self.env_fade_tex.iter())) {
+            if !id.is_nil() && (self.textures.is_loaded(id) || self.textures.is_local(id)) {
+                *o = *id;
+            }
+        }
+        out
+    }
+
+    /// Keep the sky / water textures resident; returns their slots (0 until loaded).'''
+
+[[patch]]
+id = "env-texture-fade-app"
+why = "each frame, after the first textures' slots: the second ones', a texture still loading taking no share yet"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "env.sky.halo_texture = slots[5];"
+replace = '''env.sky.halo_texture = slots[5];
+        // aurora-local-patch: env-texture-fade-app
+        // the environment's cross-fade: the second textures, after the first
+        // ones (world/eep_fade.rs)
+        let fade_slots = self.scene.env_fade_textures(&mut gfx.renderer, env.next_textures);
+        env.set_fade_slots(fade_slots);'''
+
+[[patch]]
+id = "env-texture-fade-clouds-revision"
+why = "the weather map follows the second cloud texture's texels too while it fades in (a frozen fade's share no longer moves)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''                Some(env.sky.cloud_texture)
+                    .and_then(|slot| gfx.renderer.textures.revision_of(slot))
+                    .unwrap_or(0),'''
+replace = '''// aurora-local-patch: env-texture-fade-clouds-revision
+                Some(env.sky.cloud_texture)
+                    .and_then(|slot| gfx.renderer.textures.revision_of(slot))
+                    .unwrap_or(0)
+                    ^ Some(env.sky.fade.cloud)
+                        .filter(|f| f.texture != 0 && f.blend > 0.0)
+                        .and_then(|f| gfx.renderer.textures.revision_of(f.texture))
+                        .map_or(0, |r| r.rotate_left(32)),'''
+
+[[patch]]
+id = "env-texture-fade-app-ready"
+why = "the selector learns which environment textures are in (last frame's), for the textures a change waits for"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.world.eep.set_manual_transition(self.settings.env_manual_transition);"
+replace = '''self.world.eep.set_manual_transition(self.settings.env_manual_transition);
+        // aurora-local-patch: env-texture-fade-app-ready
+        // (the environment textures in, last frame's: a change keeps a texture
+        // that is not at share 0 until it is, world/eep_fade.rs)
+        self.world.eep.set_ready_textures(self.scene.env_ready_textures());'''
+
+[[patch]]
+id = "env-texture-fade-app-scroll"
+why = "each cloud layer shown scrolls at its own rate from its own position (one accumulated scroll for a still sky, as before)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''        if !self.photo_clouds_paused() {
+            self.world.cloud_scroll += sky_frame.cloud_scroll_rate * world_dt / 100.0;
+        }
+        self.world.cloud_scroll = glam::Vec2::new(
+            self.world.cloud_scroll.x.rem_euclid(1024.0),
+            self.world.cloud_scroll.y.rem_euclid(1024.0),
+        );
+        let mut env = Environment::from_eep(&sky_frame, &water_frame, self.world.cloud_scroll, self.settings.draw_distance)'''
+replace = '''// aurora-local-patch: env-texture-fade-app-scroll
+        // (one scroll position for each cloud layer shown, advanced at its own
+        // rate: while the clouds cross-fade each layer moves as its own sky
+        // moves it, and the one that remains goes on from its place; a still
+        // sky keeps the one accumulated scroll of before; world/eep_fade.rs
+        // CloudScroll)
+        let scroll_dt = if self.photo_clouds_paused() { 0.0 } else { world_dt };
+        let cloud_scrolls = self.world.cloud_scrolls.advance(&sky_frame.shown_textures().cloud, scroll_dt);
+        self.world.cloud_scroll = cloud_scrolls[0];
+        let mut env = Environment::from_eep_scrolled(&sky_frame, &water_frame, cloud_scrolls, self.settings.draw_distance)'''
+
+[[patch]]
+id = "env-texture-fade-app-hidden"
+why = "the Clouds rendering type hidden hides a cross-fade's second cloud layer too"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''                cloud_scale: if self.settings.debug.hidden_types.clouds {
+                    0.0
+                } else {
+                    env.sky.cloud_scale
+                },
+                ..env.sky'''
+replace = '''cloud_scale: if self.settings.debug.hidden_types.clouds {
+                    0.0
+                } else {
+                    env.sky.cloud_scale
+                },
+                // aurora-local-patch: env-texture-fade-app-hidden
+                // (and a cross-fade's second cloud layer)
+                fade: if self.settings.debug.hidden_types.clouds {
+                    aurora_render::SkyTextureFade {
+                        cloud_next_shape: [0.0; 2],
+                        ..env.sky.fade
+                    }
+                } else {
+                    env.sky.fade
+                },
+                ..env.sky'''
+
+[[patch]]
+id = "env-texture-fade-world-scroll"
+why = "the world keeps each cloud layer's scroll position (world/eep_fade.rs CloudScroll)"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "    pub cloud_scroll: glam::Vec2,"
+replace = '''pub cloud_scroll: glam::Vec2,
+    // aurora-local-patch: env-texture-fade-world-scroll
+    /// The scroll positions of the cloud layers shown, each advanced at its
+    /// own rate (`cloud_scroll` is the first one's).
+    pub cloud_scrolls: eep_fade::CloudScroll,'''
+
+[[patch]]
+id = "env-texture-fade-world-scroll-new"
+why = "goes with env-texture-fade-world-scroll"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "            cloud_scroll: glam::Vec2::ZERO,"
+replace = '''cloud_scroll: glam::Vec2::ZERO,
+            cloud_scrolls: eep_fade::CloudScroll::default(), // aurora-local-patch: env-texture-fade-world-scroll-new'''

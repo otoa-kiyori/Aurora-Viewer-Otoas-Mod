@@ -1,0 +1,678 @@
+# A change between a modern sky and a classic one moves the sky's
+# presentation with the change's own progress, with no step at its start
+# or at its end. No setting, no interface, nothing sent.
+#
+# A modern sky (a reflection probe ambiance) is tone mapped, exposed
+# automatically and drawn at its HDR brightness scale; a classic one (no
+# probe ambiance key, or a key at 0) gets none of these. The blended frame
+# used to keep the modern presentation as long as either side was modern
+# and flip in one frame where the probe ambiance reached 0: at the end of a
+# change to a classic sky (the brightness scale from 2 sqrt(gamma) to 1, the
+# tone curve from RenderTonemapMix to none, the exposure range from
+# [1 / scale, scale] to [1, 1]; the darkened night clouds came out brighter
+# at once, then the exposure drifted), at the start of one from it. The
+# Legacy Viewer takes the next sky's canAutoAdjust at once (LLSettingsSky::
+# blend, indra/llinventory/llsettingssky.cpp): it steps too.
+#
+# Now (files/sky-mode-blend/sky_kind.rs and sky_mode.rs, module docs):
+# - The blended frame (SkyFrame::lerp: the selector's fade, through
+#   SkyFrame::fade_to_with, and a day cycle between two keyframes) carries
+#   the share of each kind, lerped from each side's (1 or 0; a side that is
+#   itself a blend gives its shares): modern, linear (a key at 0), the rest
+#   classic. A sky that is not blending has exactly 1 or 0; two skies of
+#   the same kind carry nothing. The shares hold while the frame keeps the
+#   probe ambiance and the classic flag it was blended to (an editor
+#   changing them gives it its own kind). SkyParams::modern takes the modern
+#   share to the renderer.
+# - Following it, strictly between 0 and 1: the brightness scale goes from
+#   1 to the modern one geometrically (modern ^ share: the displayed
+#   brightness is the scale times the exposure, whose range follows the
+#   scale, and a blend in log units moves both at an even pace; a linear one
+#   leaves a bump of about 5 % in the dark values near the classic end, where
+#   the tone curve fading out brightens them, the geometric one under half a
+#   percent); the tone curve chosen in Preferences at RenderTonemapMix x the
+#   share (Khronos PBR Neutral and ACES at mix 0 are both the classic clamp,
+#   post.wgsl tonemap: a test compares them); the legacy gamma from the sky's
+#   gamma to 1, linearly; the automatic exposure's range [1 / scale, scale],
+#   and its dark scene term (Aurora's, exposure.wgsl, which was on above a
+#   range of 1 and off at 1) weighted by the share, so the eased exposure has
+#   no target to lurch to at either end. The volumetric clouds, the sky, the
+#   haze and the fullbright faces read the brightness scale: they follow it.
+#   Preferences' tone mapper choice is not greyed out while the curve shows.
+# - The frame's light and hemisphere colours, which each lighting model
+#   makes its own way (world/env.rs: the modern one from the objects' light
+#   attenuated along the light, x 3, and a grey ambient; the classic one at
+#   its sRGB scale), are blended at the modern share (sky_kind.rs
+#   `mix_light`), and so is the coloured ambient of the probes: what reads
+#   them outside the shaders' branch (the sun's disc, the volumetric clouds,
+#   the water, the rain, the sky rays) moves with the change. The sky rays'
+#   moon factor (patch 114, env.wgsl: the HDR lighting's moon colour lacks
+#   the moon's brightness the classic one holds) weighs the share.
+# - The lighting model itself, a branch of every surface shader (objects,
+#   terrain, water, grass, the air fog, the sun's shadow lift: common.wgsl,
+#   object.wgsl, env.wgsl, `sky_ll.x`), the probes' irradiance capture and the
+#   panorama's look (patch 90), is not mixed: evaluating both models doubles
+#   the heaviest shaders (the Metal compiler already fails on a duplicated
+#   part of them). It takes the classic side's model as soon as the modern
+#   share is below 1 and the modern one at 1: its step falls at the start of
+#   a change from a modern sky and at the end of one to it, where the
+#   automatic exposure has its whole range to take the change of level up
+#   within about a second, never where the presentation is already the
+#   classic one's (exposure fixed at 1), as before at the end of a change to
+#   a classic sky. Between the classic and the linear lighting (a change
+#   between a classic sky and one with a key at 0) nothing changes.
+# - Its level is carried across the switch by two gains (sky_mode.rs
+#   `classic_gains`): while a change between the kinds runs, the classic
+#   and linear branches (common.wgsl ll_atmos_core, after the haze term)
+#   multiply their sun and their ambient light by (hdr / classic) ^ share,
+#   where hdr / classic is the gain that makes a white surface lit by the
+#   frame's light as bright under the classic lighting as under the HDR one
+#   (a face without a PBR material): the ambient gain for a face edge-on to
+#   the light, the sun gain the one whose largest difference over the faces
+#   from the one facing up to the one facing the light is the least. Both
+#   are exactly 1 at a share of 0 and on every sky that is not blending
+#   between the kinds (the uniform lanes hold the gain less 1, as f32 bits:
+#   0). Measured on the CPU (world/env_change_tests.rs, simulated, nothing
+#   drawn): where the branch switches the level of those faces steps by
+#   0.03 stop for a classic night and a modern day taken from a viewer's
+#   log, 0.12 to 0.16 stop for the synthetic pairs (their sun 40 degrees
+#   up); displayed (a PBR face through the tone curve and the eased
+#   exposure, simulated), 0.63 to 0.10 stop for the log's skies and 1.14 to
+#   0.29 stop for the synthetic pairs.
+# - What the gains do not cover (the two lightings differ in shape, two
+#   numbers match a level): faces between edge-on and facing up (walls
+#   under a high sun), where the classic sun's pow 1.2 through the sRGB
+#   curve rises steeply and the HDR n.l does not, up to about 0.5 stop off
+#   at the switch (sky_mode.rs test); faces turned away from the light,
+#   whose classic ambient falls to 0.75 of itself in sRGB (about 1 stop in
+#   linear, against a constant hemisphere; the probes' irradiance also
+#   darkens away from the sky, by an amount not measured here); the colour
+#   (sRGB sum against linear sum: the chromaticity moves by 0.006 for the
+#   log's skies, up to 0.09 for the synthetic ones); PBR faces (the HDR sun
+#   over pi rather than 3: 0.07 stop); and, switching with the branch as
+#   before, the specular shape, the probes' irradiance capture and their
+#   reflections, the panorama's look, the HDR branch's shadow lift, the air
+#   fog on surfaces, the screen-space occlusion's indirect term and the
+#   local lights' scale. Of these, the shaded sides and the reflections on
+#   shiny surfaces can show as a visible step at the switch, smaller than
+#   before for the shaded sides; the others stay within a few percent. The
+#   automatic exposure is not part of the gains: it eases after the switch
+#   as before (its numbers are in the measurements, not in a test).
+# - A day cycle whose neighbouring keyframes are of different kinds now
+#   moves the presentation with its position the same way (its keyframes
+#   blend with lerp); its lighting is the classic side's between them. A day
+#   cycle still has no texture fade (patch 998).
+#
+# Cost: while no sky blends between the kinds, the same values on the GPU,
+# to the bit, and the same paths, plus the gains: two lanes of a uniform
+# vec4 the frame already has, read and multiplied into the sun and the
+# ambient light once per ll_atmos_core call (a multiply by exactly 1). The
+# exposure pass reads one more uniform vec4 and the post pass evaluates the
+# tone curve while the share is between 0 and 1. On the CPU, a few
+# comparisons a frame; while a change between the kinds runs, the gains'
+# two searches (a bisection and a ternary search over 17 faces, a few
+# thousand float operations). The sky log line says the modern share while
+# it is between 0 and 1.
+#
+# Tests: world/sky_kind.rs (29 s manual changes through the selector from a
+# modern sky to a classic and a linear one and back: the share is the
+# progress, the brightness scale, the tone map mix, the legacy gamma, the
+# exposure range and its dark term, and the displayed colours at both ends
+# of the range move by no more than the frame's progress allows, the first
+# and the last frames are each sky's own; same-kind changes keep the values
+# of before; the blend on lerped, nested and edited frames; a day cycle),
+# aurora-render sky_mode.rs (the curves at mix 0, the scale, the post values
+# of one kind to the bit and between them, the exposure target); the
+# exposure and post shaders through naga (lib.rs shader tests). The
+# references of "to the bit" are upstream's formulas written out in the
+# tests (sky_kind.rs `upstream_sky`, `upstream_post`; sky_mode.rs
+# `upstream`), not this patch's code; sky_mode.rs also checks the gains (1
+# on a sky of one kind, the levels they meet just below a share of 1, their
+# pace with the share). world/env_change_tests.rs, whole
+# frames: every leaf of the Debug forms of the frame's environment (the
+# sky's and the water's render parameters, light, fog, hemisphere, probe
+# ambiance, texture slots and shares) and of what the renderer derives from
+# them (tone mapping, legacy gamma, exposure range and dark term, the sky
+# rays' moon factor, the lighting mode, the level of a white surface lit
+# edge-on, facing the light and facing up), so that a field added later is
+# checked too, for changes dark to bright and bright to dark between each
+# pair of kinds (all values different) and for each discrete field alone
+# (each texture id, a texture to none, the rainbow and the halo coming and
+# going, the kind, the linear kind), over 5 s and 29 s: the first frame is
+# the source as it showed, the first frame at full progress the target as
+# it shows on the next tick (both against the selector's own frames: a
+# continuity check, not an identity with upstream), and no value moves
+# between two frames by more than pi / 2 the linear pace allows against its
+# whole excursion; what may switch is named with its reason (patch 998's
+# layer values, shown at their checked shares, and a share falling from
+# within one frame's pace of 1 to 0 as its layer becomes the only one; the
+# lighting model's flags, whose lit level is held to 0.2 stop at the switch
+# and to the pace elsewhere; the tone curve's id, at a mix of 0); a change
+# begun over another starts from the picture shown; between the kinds,
+# through the selector over 5 s and 29 s both ways (the synthetic pairs and
+# the log's night and day), the lit level steps by no more than 0.2 stop
+# where the lighting switches, and neither the surface facing up nor the
+# sky, before the exposure, passes the brighter end or falls below the
+# darker one by more than 0.15 of the distance between them. They need nothing of patches 124 and 999.
+#
+# Switching it off (moving this file out) needs nothing else: patches 124
+# and 999 apply and build without it.
+
+# ------------------------------------------------------------ renderer
+
+[[patch]]
+id = "sky-mode-blend-render-module"
+why = "the presentation of a sky between the two kinds: the brightness scale, the tone mapping inputs, the exposure's range and dark term, a copy of the post pass's tone mapping for the tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/sky_mode.rs"]
+source = "files/sky-mode-blend/sky_mode.rs"
+
+[[patch]]
+id = "sky-mode-blend-render-mod"
+why = "the renderer's module, public for the viewer's frames and tests"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = '''mod shadow_merge;
+mod soft_shadows;'''
+replace = '''mod shadow_merge;
+pub mod sky_mode; // aurora-local-patch: sky-mode-blend-render-mod
+mod soft_shadows;'''
+
+[[patch]]
+id = "sky-mode-blend-params"
+why = "the sky carries its modern share to the renderer"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    /// Reflection probe ambiance is 0: no tone mapping (Firestorm no_post).
+    pub no_post: bool,'''
+replace = '''/// Reflection probe ambiance is 0: no tone mapping (Firestorm no_post).
+    pub no_post: bool,
+    // aurora-local-patch: sky-mode-blend-params
+    /// The modern share: 1 a sky with a reflection probe ambiance, 0 one
+    /// without, between the two while a blend goes from one kind to the
+    /// other (sky_mode.rs); `classic` and `no_post` then give the lighting
+    /// model's side.
+    pub modern: f32,'''
+
+[[patch]]
+id = "sky-mode-blend-params-default"
+why = "goes with sky-mode-blend-params: the default sky is classic"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''            classic: true,
+            no_post: true,'''
+replace = '''classic: true,
+            no_post: true,
+            modern: 0.0, // aurora-local-patch: sky-mode-blend-params-default'''
+
+[[patch]]
+id = "sky-mode-blend-post"
+why = "the tone mapper, the legacy gamma and the tone map mix follow the modern share between the kinds (sky_mode::post); a sky of one kind keeps its values"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''        let post = PostU {
+            exposure: if hdr { f.exposure } else { 1.0 },'''
+replace = '''// aurora-local-patch: sky-mode-blend-post
+        // (between the two kinds of sky, the tone curve, the legacy gamma
+        // and the mix follow the modern share: sky_mode.rs)
+        let sky_post = crate::sky_mode::post(&f.sky, hdr, self.settings.tonemapper, f.tonemap_mix);
+        let post = PostU {
+            exposure: if hdr { f.exposure } else { 1.0 },'''
+
+[[patch]]
+id = "sky-mode-blend-post-tonemapper"
+why = "goes with sky-mode-blend-post"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            // classic skies are not tone mapped (Firestorm: no_post + legacy gamma)
+            tonemapper: if f.sky.no_post || !hdr {
+                2.0
+            } else {
+                match self.settings.tonemapper {
+                    Tonemapper::KhronosNeutral => 0.0,
+                    Tonemapper::Aces => 1.0,
+                }
+            },'''
+replace = '''// classic skies are not tone mapped (Firestorm: no_post + legacy gamma)
+            tonemapper: sky_post.tonemapper, // aurora-local-patch: sky-mode-blend-post-tonemapper'''
+
+[[patch]]
+id = "sky-mode-blend-post-gamma"
+why = "goes with sky-mode-blend-post"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            legacy_gamma: if f.sky.no_post && f.sky.gamma.is_finite() {
+                f.sky.gamma.max(0.0)
+            } else {
+                1.0
+            },'''
+replace = '''legacy_gamma: sky_post.legacy_gamma, // aurora-local-patch: sky-mode-blend-post-gamma'''
+
+[[patch]]
+id = "sky-mode-blend-post-mix"
+why = "goes with sky-mode-blend-post"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            tonemap_mix: if f.sky.classic || !hdr {
+                0.0
+            } else {
+                f.tonemap_mix.clamp(0.0, 1.0)
+            },'''
+replace = '''tonemap_mix: sky_post.tonemap_mix, // aurora-local-patch: sky-mode-blend-post-mix'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-frame"
+why = "the automatic exposure has its range while a sky blends between the kinds, and its dark scene term at the modern share"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''tone_mapped: !f.sky.no_post && self.settings.hdr,'''
+replace = '''tone_mapped: crate::sky_mode::tone_mapped(&f.sky) && self.settings.hdr,
+                // aurora-local-patch: sky-mode-blend-exposure-frame
+                dark: crate::sky_mode::exposure_dark(&f.sky),'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-target"
+why = "the CPU copy of the exposure target with the dark scene term's weight, for the tests"
+paths = ["crates/aurora-render/src/exposure.rs"]
+op = "literal"
+find = '''#[cfg(test)]
+fn target(average: f32, (lo, hi): (f32, f32)) -> f32 {
+    let l = average.clamp(0.0, COEFFICIENT) / COEFFICIENT;
+    let t = ((average - 0.003) / (0.015 - 0.003)).clamp(0.0, 1.0);
+    let dark = if hi > 1.0 { 0.4 + 0.6 * t * t * (3.0 - 2.0 * t) } else { 1.0 };
+    (hi + (lo - hi) * l * l) * dark
+}'''
+replace = '''#[cfg(test)]
+pub(crate) fn target(average: f32, range: (f32, f32)) -> f32 {
+    target_with(average, range, 1.0)
+}
+
+// aurora-local-patch: sky-mode-blend-exposure-target
+/// [`target`] with the dark scene term at the weight `dark_weight`
+/// (FrameExposure::dark), mixed as the shader mixes it.
+#[cfg(test)]
+pub(crate) fn target_with(average: f32, (lo, hi): (f32, f32), dark_weight: f32) -> f32 {
+    let l = average.clamp(0.0, COEFFICIENT) / COEFFICIENT;
+    let t = ((average - 0.003) / (0.015 - 0.003)).clamp(0.0, 1.0);
+    let mut dark = if hi > 1.0 { 0.4 + 0.6 * t * t * (3.0 - 2.0 * t) } else { 1.0 };
+    if hi > 1.0 && dark_weight < 1.0 {
+        dark = (1.0 - dark_weight) + dark * dark_weight;
+    }
+    (hi + (lo - hi) * l * l) * dark
+}'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-u"
+why = "the exposure pass's uniforms carry the dark scene term's weight"
+paths = ["crates/aurora-render/src/exposure.rs"]
+op = "literal"
+find = '''struct ExposureU {
+    a: [f32; 4],
+    b: [f32; 4],
+}'''
+replace = '''struct ExposureU {
+    a: [f32; 4],
+    b: [f32; 4],
+    // aurora-local-patch: sky-mode-blend-exposure-u
+    /// x: the dark scene term's weight (FrameExposure::dark)
+    c: [f32; 4],
+}'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-field"
+why = "goes with sky-mode-blend-exposure-u: what the frame asks"
+paths = ["crates/aurora-render/src/exposure.rs"]
+op = "literal"
+find = '''    /// The glow of the last frame is there to add (RenderGlow).
+    pub(crate) glow: bool,
+}'''
+replace = '''/// The glow of the last frame is there to add (RenderGlow).
+    pub(crate) glow: bool,
+    // aurora-local-patch: sky-mode-blend-exposure-field
+    /// The weight of the dark scene term: 1, the modern share while the sky
+    /// blends between the two kinds (sky_mode::exposure_dark).
+    pub(crate) dark: f32,
+}'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-set"
+why = "goes with sky-mode-blend-exposure-u"
+paths = ["crates/aurora-render/src/exposure.rs"]
+op = "literal"
+find = '''            b: [COEFFICIENT, lo, hi, if f.hold { -1.0 } else { -SPEED_ERROR.ln() / SPEED_TARGET }],
+        };'''
+replace = '''b: [COEFFICIENT, lo, hi, if f.hold { -1.0 } else { -SPEED_ERROR.ln() / SPEED_TARGET }],
+            c: [f.dark, 0.0, 0.0, 0.0], // aurora-local-patch: sky-mode-blend-exposure-set
+        };'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-wgsl-params"
+why = "goes with sky-mode-blend-exposure-u"
+paths = ["crates/aurora-render/src/shaders/exposure.wgsl"]
+op = "literal"
+find = '''    // speed (1/s); w < 0: hold the last exposure (photos)
+    b: vec4<f32>,
+};'''
+replace = '''// speed (1/s); w < 0: hold the last exposure (photos)
+    b: vec4<f32>,
+    // aurora-local-patch: sky-mode-blend-exposure-wgsl-params
+    // x the dark scene term's weight: 1, the modern share while the sky
+    // blends between the two kinds (sky_mode.rs)
+    c: vec4<f32>,
+};'''
+
+[[patch]]
+id = "sky-mode-blend-exposure-wgsl-dark"
+why = "the dark scene term fades in and out with the range between the kinds of sky, instead of switching where the range leaves 1; at weight 1 it is the same value"
+paths = ["crates/aurora-render/src/shaders/exposure.wgsl"]
+op = "literal"
+find = '''    if (p.b.z > 1.0) {
+        goal *= mix(0.4, 1.0, smoothstep(0.003, 0.015, average));
+    }'''
+replace = '''if (p.b.z > 1.0) {
+        // aurora-local-patch: sky-mode-blend-exposure-wgsl-dark
+        // (at its weight while the sky blends between the kinds)
+        let dark = mix(0.4, 1.0, smoothstep(0.003, 0.015, average));
+        goal *= select(mix(1.0, dark, p.c.x), dark, p.c.x >= 1.0);
+    }'''
+
+# ------------------------------------------------------------ frames
+
+[[patch]]
+id = "sky-mode-blend-module"
+why = "the kind shares of a blended sky frame, what it is lit and presented as, its brightness scale, the tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/world/sky_kind.rs"]
+source = "files/sky-mode-blend/sky_kind.rs"
+
+[[patch]]
+id = "sky-mode-blend-mod"
+why = "the world's module beside the EEP ones"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''pub mod sim_console;
+pub mod social;'''
+replace = '''pub mod sim_console;
+pub mod sky_kind; // aurora-local-patch: sky-mode-blend-mod
+pub mod social;'''
+
+[[patch]]
+id = "sky-mode-blend-sky-field"
+why = "a sky frame blended from two skies of different kinds carries the share of each kind"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''    /// No reflection_probe_ambiance key: a "classic" sky (LLSettingsSky::canAutoAdjust).
+    pub can_auto_adjust: bool,'''
+replace = '''/// No reflection_probe_ambiance key: a "classic" sky (LLSettingsSky::canAutoAdjust).
+    pub can_auto_adjust: bool,
+    // aurora-local-patch: sky-mode-blend-sky-field
+    /// While this frame blends skies of different kinds, the share of each
+    /// kind (world/sky_kind.rs), with the probe ambiance and classic flag
+    /// it was blended to; None for a sky of one kind.
+    pub kind: Option<super::sky_kind::KindBlend>,'''
+
+[[patch]]
+id = "sky-mode-blend-sky-default"
+why = "goes with sky-mode-blend-sky-field: a sky of its own kind"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''            probe_ambiance: 0.0,
+            can_auto_adjust: true,'''
+replace = '''probe_ambiance: 0.0,
+            can_auto_adjust: true,
+            kind: None, // aurora-local-patch: sky-mode-blend-sky-default'''
+
+[[patch]]
+id = "sky-mode-blend-sky-parse"
+why = "goes with sky-mode-blend-sky-field: a parsed sky is of its own kind"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''can_auto_adjust: !s.has("reflection_probe_ambiance"),'''
+replace = '''can_auto_adjust: !s.has("reflection_probe_ambiance"),
+        kind: None, // aurora-local-patch: sky-mode-blend-sky-parse'''
+
+[[patch]]
+id = "sky-mode-blend-sky-lerp"
+why = "goes with sky-mode-blend-sky-field: the blend of two skies lerps their kind shares (an environment change and a day cycle's keyframes alike); the flags keep their blend"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''            can_auto_adjust: a.can_auto_adjust && b.can_auto_adjust,'''
+replace = '''can_auto_adjust: a.can_auto_adjust && b.can_auto_adjust,
+            kind: super::sky_kind::lerp_kind(a, b, t), // aurora-local-patch: sky-mode-blend-sky-lerp'''
+
+[[patch]]
+id = "sky-mode-blend-env-ambient"
+why = "the colored ambient's HDR hemisphere goes with the HDR lighting's side, and with its share of the hemisphere between the kinds"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        if on && tone_mapped(sky.probe_ambiance) {
+            let amblit = srgb_to_linear(sky_tmp_ambient(sky).max(Vec3::ZERO) * 0.7);
+            (self.zenith, self.horizon, self.ground) = (amblit, amblit, amblit);
+        }'''
+replace = '''// aurora-local-patch: sky-mode-blend-env-ambient
+        // (the HDR lighting's hemisphere; between the kinds, its share of the
+        // blended hemisphere, world/sky_kind.rs)
+        let kind = sky.kind();
+        if on && kind.lit_modern {
+            let amblit = srgb_to_linear(sky_tmp_ambient(sky).max(Vec3::ZERO) * 0.7);
+            (self.zenith, self.horizon, self.ground) = (amblit, amblit, amblit);
+        } else if on && kind.modern > 0.0 {
+            let amblit = srgb_to_linear(sky_tmp_ambient(sky).max(Vec3::ZERO) * 0.7);
+            let d = (amblit - hdr_grey(sky)) * kind.modern;
+            (self.zenith, self.horizon, self.ground) = (self.zenith + d, self.horizon + d, self.ground + d);
+        }'''
+
+[[patch]]
+id = "sky-mode-blend-env-light"
+why = "each lighting model's light and hemisphere colours as a closure, so that a sky between the kinds can blend them"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        let (sun_color, zenith, horizon, ground) = if tone_mapped(sky.probe_ambiance) {'''
+replace = '''// aurora-local-patch: sky-mode-blend-env-light
+        // (each lighting model's colours: a sky of one kind takes its own, one
+        // between the kinds their blend at its modern share, so that what reads
+        // them outside the shaders' lighting branch, the sun's disc, the
+        // volumetric clouds, the water, the rain, the sky rays, moves with the
+        // change; world/sky_kind.rs)
+        let modern_light = || {'''
+
+[[patch]]
+id = "sky-mode-blend-env-light-classic"
+why = "goes with sky-mode-blend-env-light"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            (sunlit * 3.0, grey, grey, grey)
+        } else {'''
+replace = '''(sunlit * 3.0, grey, grey, grey)
+        };
+        let classic_light = || {
+            // aurora-local-patch: sky-mode-blend-env-light-classic'''
+
+[[patch]]
+id = "sky-mode-blend-env-light-pick"
+why = "goes with sky-mode-blend-env-light: the lighting model's own colours for a sky of one kind, their blend at the modern share between the kinds"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''                amb * 0.45 + night_amb * 0.5,
+            )
+        };'''
+replace = '''amb * 0.45 + night_amb * 0.5,
+            )
+        };
+        // aurora-local-patch: sky-mode-blend-env-light-pick
+        let (sun_color, zenith, horizon, ground) = {
+            let k = sky.kind();
+            if k.modern > 0.0 && k.modern < 1.0 {
+                super::sky_kind::mix_light(classic_light(), modern_light(), k.modern)
+            } else if k.lit_modern {
+                modern_light()
+            } else {
+                classic_light()
+            }
+        };'''
+
+[[patch]]
+id = "sky-mode-blend-env-grey"
+why = "the HDR lighting's grey hemisphere of a sky alone, for the colored ambient between the kinds"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''fn sky_tmp_ambient(sky: &SkyFrame) -> Vec3 {
+    sky.ambient + (Vec3::ONE - sky.ambient) * sky.cloud_shadow * 0.5
+}'''
+replace = '''fn sky_tmp_ambient(sky: &SkyFrame) -> Vec3 {
+    sky.ambient + (Vec3::ONE - sky.ambient) * sky.cloud_shadow * 0.5
+}
+
+// aurora-local-patch: sky-mode-blend-env-grey
+/// The HDR lighting's hemisphere colour (`build`: amblit's grey luminance).
+fn hdr_grey(sky: &SkyFrame) -> Vec3 {
+    let amblit = srgb_to_linear(sky_tmp_ambient(sky).max(Vec3::ZERO).powf(0.9) * 0.57);
+    Vec3::splat(amblit.dot(Vec3::new(0.2126, 0.7152, 0.0722)))
+}'''
+
+[[patch]]
+id = "sky-mode-blend-env-hdr-scale"
+why = "the brightness scale follows the modern share between the kinds; a sky of one kind keeps its own"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        let hdr_scale = if sky.probe_ambiance != 0.0 {
+            sky.gamma.max(0.0).sqrt() * 2.0
+        } else {
+            1.0
+        };'''
+replace = '''// aurora-local-patch: sky-mode-blend-env-hdr-scale
+        // (blended between the kinds of sky, world/sky_kind.rs)
+        let hdr_scale = sky.hdr_scale();
+        let kind = sky.kind();'''
+
+[[patch]]
+id = "sky-mode-blend-env-flags"
+why = "the renderer gets the modern share, and the lighting model's side in classic and no_post"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            classic: sky.can_auto_adjust,
+            no_post: !tone_mapped(sky.probe_ambiance),'''
+replace = '''classic: kind.classic, // aurora-local-patch: sky-mode-blend-env-flags
+            no_post: kind.no_post,
+            modern: kind.modern,'''
+
+[[patch]]
+id = "sky-mode-blend-env-describe"
+why = "the sky log line says the modern share while the sky blends between the kinds"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            eep::LEGACY_DOME_OFFSET,
+            eep::LEGACY_DOME_RADIUS,
+        )
+    }'''
+replace = '''eep::LEGACY_DOME_OFFSET,
+            eep::LEGACY_DOME_RADIUS,
+        ) + &sky.kind_note() // aurora-local-patch: sky-mode-blend-env-describe
+    }'''
+
+[[patch]]
+id = "sky-mode-blend-app-tone-mapped"
+why = "Preferences' tone mapper choice is not greyed out while the tone curve shows"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''        self.options_ui.sky_tone_mapped = !env.sky.no_post;'''
+replace = '''// aurora-local-patch: sky-mode-blend-app-tone-mapped
+        // (also while the sky blends between the kinds, aurora-render sky_mode.rs)
+        self.options_ui.sky_tone_mapped = aurora_render::sky_mode::tone_mapped(&env.sky);'''
+
+[[patch]]
+id = "sky-mode-blend-rays-uniform"
+why = "the sky rays' moon factor (patch 114) follows the modern share between the kinds instead of the lighting model's switch"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''u.sky_optics = [s.moisture_level, s.droplet_radius, s.ice_level, 0.0];'''
+replace = '''// aurora-local-patch: sky-mode-blend-rays-uniform
+        // (w: the weight of the HDR lighting's moon factor in the sky rays,
+        // sky_mode::rays_moon)
+        u.sky_optics = [
+            s.moisture_level,
+            s.droplet_radius,
+            s.ice_level,
+            crate::sky_mode::rays_moon(s, ll_mode),
+        ];'''
+
+[[patch]]
+id = "sky-mode-blend-rays-frame"
+why = "goes with sky-mode-blend-rays-uniform"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    sky_optics: vec4<f32>,      // x moisture level (rainbow), y droplet radius, z ice level (22° halo)'''
+replace = '''sky_optics: vec4<f32>,      // x moisture level (rainbow), y droplet radius, z ice level (22° halo), w the sky rays' HDR moon factor weight // aurora-local-patch: sky-mode-blend-rays-frame'''
+
+[[patch]]
+id = "sky-mode-blend-rays"
+why = "goes with sky-mode-blend-rays-uniform: at weight 1 or 0 the same light as before"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''    let moon = frame.sky_sun.z < 0.0;
+    let light = select(frame.sun_color.rgb, frame.sun_color.rgb * frame.sky_misc.z, moon && frame.sky_ll.x == 0.0);'''
+replace = '''// aurora-local-patch: sky-mode-blend-rays
+    // (the moon factor's weight: 1 under the HDR lighting with the moon as the
+    // light, 0 otherwise, the modern share while the sky blends between the
+    // kinds; sky_mode.rs rays_moon)
+    let moon = frame.sky_optics.w;
+    let light = select(frame.sun_color.rgb, frame.sun_color.rgb * select(mix(1.0, frame.sky_misc.z, moon), frame.sky_misc.z, moon >= 1.0), moon > 0.0);'''
+
+# ------------------------------------------------------------ classic gains
+
+[[patch]]
+id = "sky-mode-blend-classic-gain-uniform"
+why = "the classic lighting's gains on its sun and ambient light (sky_mode::classic_gains) reach the shaders in the two free lanes of sky_optics_tex, as the f32 bits of the gain less 1: 0, no gain, on a sky of one kind and in any pass that leaves the lanes at 0"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''u.sky_stars = s.stars.uniform();'''
+replace = '''// aurora-local-patch: sky-mode-blend-classic-gain-uniform
+        // (sky_optics_tex z, w: the classic lighting's sun and ambient gains
+        // less 1, as f32 bits; 0 on a sky of one kind, sky_mode::classic_gains)
+        let gain = crate::sky_mode::classic_gains(s);
+        u.sky_optics_tex[2] = (gain[0] - 1.0).to_bits();
+        u.sky_optics_tex[3] = (gain[1] - 1.0).to_bits();
+        u.sky_stars = s.stars.uniform();'''
+
+[[patch]]
+id = "sky-mode-blend-classic-gain-frame"
+why = "goes with sky-mode-blend-classic-gain-uniform"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    sky_optics_tex: vec4<u32>,  // x rainbow texture slot, y halo texture slot (0: none)'''
+replace = '''sky_optics_tex: vec4<u32>,  // x rainbow texture slot, y halo texture slot (0: none), z w the classic lighting's sun and ambient gains less 1, f32 bits (sky_mode.rs classic_gains) // aurora-local-patch: sky-mode-blend-classic-gain-frame'''
+
+[[patch]]
+id = "sky-mode-blend-classic-gain"
+why = "the classic lighting's sun and ambient light take their gains while the sky blends between the kinds, after the haze (which keeps its own light), so that a lit surface keeps its level where the lighting model switches; times exactly 1 otherwise"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    o.additive = min(additive * (vec3<f32>(1.0) - atten), vec3<f32>(10.0));
+    o.atten = atten;'''
+replace = '''o.additive = min(additive * (vec3<f32>(1.0) - atten), vec3<f32>(10.0));
+    // aurora-local-patch: sky-mode-blend-classic-gain
+    // (between the kinds of sky, the gains that bring the classic lighting's
+    // level to the HDR lighting's as the share rises, sky_mode.rs
+    // classic_gains; 1 + 0 on a sky of one kind)
+    o.sunlit *= 1.0 + bitcast<f32>(frame.sky_optics_tex.z);
+    o.amblit *= 1.0 + bitcast<f32>(frame.sky_optics_tex.w);
+    o.atten = atten;'''
+
+# ------------------------------------------------------------ whole-frame tests
+
+[[patch]]
+id = "sky-mode-blend-tests-mod"
+why = "the whole-frame tests of an environment change"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''pub mod env_apply;'''
+replace = '''pub mod env_apply;
+#[cfg(test)]
+mod env_change_tests; // aurora-local-patch: sky-mode-blend-tests-mod'''
+
+[[patch]]
+id = "sky-mode-blend-tests"
+why = "the whole-frame tests of an environment change: every field the frame hands to the renderer, and what the renderer derives from its sky, with no step and both ends met"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/world/env_change_tests.rs"]
+source = "files/sky-mode-blend/env_change_tests.rs"

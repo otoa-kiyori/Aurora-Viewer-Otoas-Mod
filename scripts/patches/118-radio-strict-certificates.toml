@@ -1,0 +1,653 @@
+# Parcel music: a station whose certificate fails verification is refused
+# again, never played.
+#
+# Upstream made the radio play an `https` station whose certificate is
+# expired, not valid yet, self-signed, from an untrusted issuer, for another
+# name or revoked, with a red warning. This patch set refuses such a
+# connection, as Aurora did before: a certificate that cannot be verified
+# says nothing about who sends the stream, and the parcel picks the URL, not
+# the resident. There is no setting to turn the refusal off.
+#
+# The cut is at the root: `tls.rs` builds the one certificate verifier of
+# every radio connection (`client_config`, called by `http::connect`, which
+# serves the first connection, each redirect, each reconnect and each `.m3u`
+# / `.pls` hop; the ICY metadata comes in the same stream). Its verifier
+# (`Lenient` upstream, `Strict` here) now returns the platform verifier's
+# verdict unchanged: a certificate failure stays an error and the handshake
+# stops. It only keeps the reason, classified as upstream does
+# (`CertificateIssue`), for the viewer. `http::open_with_origin` turns a
+# handshake that failed so into `HttpError::Certificate`, and refuses a reply
+# if the slot is ever filled anyway; `StreamError::Certificate` carries the
+# reason to the interface. `StreamStatus::Playing { certificate }` stays in
+# the types but is always `None`.
+#
+# What the user still sees for a refused station: upstream's red sign on the
+# radio button, its tooltip "Can't play: Secure connection failed" and, in
+# red, the reason, for example "This radio's security certificate has
+# expired. The radio was refused because its certificate could not be
+# verified." (an expiry with its date, in local time); the same in both bar
+# styles; and that sentence once per station and session in the nearby chat
+# as a Warning notice (the plain error notice stays quiet for it, so it is
+# said once). Upstream's "The radio plays, but its connection is not secure"
+# is reworded in English, French and Japanese; the community catalogues
+# lose their translation of it and show the English. Other TLS failures and plain `http`
+# stations keep upstream's behaviour; the media filter (84, 85) still
+# decides before any connection.
+#
+# Guards (both "fail", like 76's and 85's tripwires): no `ServerCertVerified`
+# assertion anywhere in the audio crate (a verifier that says yes on its own
+# is exactly a lenient one), and no new file of the audio crate that builds
+# a client configuration or a certificate verifier of its own (`.dangerous()`,
+# `rustls::client::danger`, `ServerCertVerifier`, `ClientConfig::builder`,
+# `danger_accept_invalid_*`, `NoCertificateVerification`) besides `tls.rs`.
+#
+# Tests: tls.rs `strict_tests` (pure: the verifier fed by a real WebPKI
+# verifier over a local test root, no socket): expired, self-signed,
+# untrusted issuer and wrong name are refused with their kind kept, a valid
+# certificate passes with nothing kept; stream.rs (the refusal's error
+# class); ui/audio.rs (the refused station's status, red sign and texts);
+# parcel_music.rs (the plain error notice stays quiet). http.rs's loopback
+# test now expects the refusal of a self-signed local station; it needs a
+# local TCP server. Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------- the verifier
+
+[[patch]]
+id = "radio-strict-cert-doc"
+why = "the module's description: a failed certificate is refused"
+paths = ["crates/aurora-audio/src/tls.rs"]
+op = "regex"
+dotall = true
+pattern = '''\A//! TLS of internet radio: a station whose certificate fails the platform\n//! check still plays, and the viewer is told why\..*?failure stays an error\.\n'''
+replace = '''//! TLS of internet radio: a station whose certificate fails the platform
+//! check is refused, and the viewer is told why.
+//!
+//! // aurora-local-patch: radio-strict-cert-doc
+//! Local patch set (118-radio-strict-certificates): the certificate of an
+//! `https` station is checked by the platform verifier (#1628) and a failure
+//! (expired, not valid yet, self-signed or untrusted, another name, revoked)
+//! ends the handshake, as every other TLS failure does. The verifier only
+//! keeps the reason (`CertificateIssue`), so the viewer can say why the
+//! station stays silent. The Legacy Viewer hands the URL to
+//! FMOD::System::createStream (LLStreamingAudio_FMODSTUDIO::startInternetStream,
+//! indra/llaudio/llstreamingaudio_fmodstudio.cpp); this is stricter on
+//! purpose.
+'''
+
+[[patch]]
+id = "radio-strict-cert-struct"
+why = "the radio's verifier wraps any verifier (the platform's, or a test's) and is no longer lenient"
+paths = ["crates/aurora-audio/src/tls.rs"]
+op = "literal"
+find = '''/// The platform verifier, a certificate failure turned into a reported issue.
+#[derive(Debug)]
+struct Lenient {
+    inner: Arc<rustls_platform_verifier::Verifier>,
+    issue: IssueSlot,
+}
+
+impl ServerCertVerifier for Lenient {'''
+replace = '''/// The platform verifier, its verdict unchanged; the reason of a refused
+/// certificate is kept for the viewer. // aurora-local-patch: radio-strict-cert-struct
+#[derive(Debug)]
+struct Strict {
+    inner: Arc<dyn ServerCertVerifier>,
+    issue: IssueSlot,
+}
+
+impl ServerCertVerifier for Strict {'''
+
+[[patch]]
+id = "radio-strict-cert-verifier"
+why = "the root cut: a certificate failure stays an error, nothing says yes in its place"
+paths = ["crates/aurora-audio/src/tls.rs"]
+op = "replace_fn_body"
+fn = "verify_server_cert"
+impl = "ServerCertVerifier for Strict"
+expect_sig = 'fn verify_server_cert\( &self, end_entity: &CertificateDer<._>, intermediates: &\[CertificateDer<._>\], server_name: &ServerName<._>, ocsp_response: &\[u8\], now: UnixTime, \) -> Result<ServerCertVerified, rustls::Error>'
+body = '''
+// Local patch set (118): the verdict is returned as it is; a refused
+// certificate only leaves its reason in the slot.
+let verdict = self
+    .inner
+    .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+if let Err(rustls::Error::InvalidCertificate(error)) = &verdict {
+    let issue = classify(error, end_entity, now);
+    log::warn!("music stream: {server_name:?} certificate refused by the system ({error}), station not played: {issue:?}");
+    *self.issue.lock() = Some(issue);
+}
+verdict
+'''
+
+[[patch]]
+id = "radio-strict-cert-config"
+why = "goes with radio-strict-cert-struct: every radio connection gets the strict verifier"
+paths = ["crates/aurora-audio/src/tls.rs"]
+op = "literal"
+fn = "client_config"
+find = '''let verifier = Lenient {'''
+replace = '''// aurora-local-patch: radio-strict-cert-config
+    let verifier = Strict {'''
+
+[[patch]]
+id = "radio-strict-cert-tests"
+why = "the verifier's decision for each failure kind, and a valid certificate, with no socket"
+paths = ["crates/aurora-audio/src/tls.rs"]
+op = "literal"
+find = '''        assert_eq!(classify(&CertificateError::BadEncoding, &unreadable, NOW), CertificateIssue::Other);
+    }
+}'''
+replace = '''assert_eq!(classify(&CertificateError::BadEncoding, &unreadable, NOW), CertificateIssue::Other);
+    }
+}
+
+/// Local patch set (118): the radio's verifier refuses every certificate
+/// failure and keeps its kind; a valid certificate passes. A real WebPKI
+/// verifier over a test root stands for the platform's: no socket, no
+/// system store.
+#[cfg(test)]
+mod strict_tests {
+    // aurora-local-patch: radio-strict-cert-tests
+    use super::*;
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};
+
+    /// 2026-11-19 00:00:00 UTC.
+    const NOW: UnixTime = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_795_046_400));
+
+    fn authority() -> (CertificateParams, KeyPair, CertificateDer<'static>) {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2040, 1, 1);
+        let key = KeyPair::generate().unwrap();
+        let der = params.self_signed(&key).unwrap().der().clone();
+        (params, key, der)
+    }
+
+    fn station_params(not_after: (i32, u8, u8)) -> CertificateParams {
+        let mut params = CertificateParams::new(vec!["radio.example".to_string()]).unwrap();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(not_after.0, not_after.1, not_after.2);
+        params
+    }
+
+    fn station(authority: &(CertificateParams, KeyPair, CertificateDer<'static>), not_after: (i32, u8, u8)) -> CertificateDer<'static> {
+        let key = KeyPair::generate().unwrap();
+        let issuer = Issuer::from_params(&authority.0, &authority.1);
+        station_params(not_after).signed_by(&key, &issuer).unwrap().der().clone()
+    }
+
+    /// The strict verifier's verdict on `leaf` for `name`, trusting `root`,
+    /// and the reason it kept.
+    fn verdict(root: &CertificateDer<'static>, leaf: &CertificateDer<'_>, name: &str) -> (bool, Option<CertificateIssue>) {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(root.clone()).unwrap();
+        let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
+            .build()
+            .unwrap();
+        let issue = IssueSlot::default();
+        let strict = Strict {
+            inner,
+            issue: issue.clone(),
+        };
+        let name = ServerName::try_from(name.to_string()).unwrap();
+        let result = strict.verify_server_cert(leaf, &[], &name, &[], NOW);
+        if let Err(error) = &result {
+            assert!(matches!(error, rustls::Error::InvalidCertificate(_)), "{error:?}");
+        }
+        let kept = *issue.lock();
+        (result.is_ok(), kept)
+    }
+
+    #[test]
+    fn a_valid_certificate_still_plays() {
+        let ca = authority();
+        let leaf = station(&ca, (2030, 1, 1));
+        assert_eq!(verdict(&ca.2, &leaf, "radio.example"), (true, None));
+    }
+
+    #[test]
+    fn an_expired_certificate_is_refused() {
+        let ca = authority();
+        // ends 2026-11-18 00:00:00 UTC, the day before NOW
+        let leaf = station(&ca, (2026, 11, 18));
+        assert_eq!(
+            verdict(&ca.2, &leaf, "radio.example"),
+            (
+                false,
+                Some(CertificateIssue::Expired {
+                    not_after: Some(1_794_960_000)
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn a_self_signed_certificate_is_refused() {
+        let ca = authority();
+        let key = KeyPair::generate().unwrap();
+        let leaf = station_params((2030, 1, 1)).self_signed(&key).unwrap().der().clone();
+        assert_eq!(verdict(&ca.2, &leaf, "radio.example"), (false, Some(CertificateIssue::Untrusted)));
+    }
+
+    #[test]
+    fn a_certificate_from_an_untrusted_issuer_is_refused() {
+        let trusted = authority();
+        let other = authority();
+        let leaf = station(&other, (2030, 1, 1));
+        assert_eq!(
+            verdict(&trusted.2, &leaf, "radio.example"),
+            (false, Some(CertificateIssue::Untrusted))
+        );
+    }
+
+    #[test]
+    fn a_certificate_for_another_name_is_refused() {
+        let ca = authority();
+        let leaf = station(&ca, (2030, 1, 1));
+        assert_eq!(verdict(&ca.2, &leaf, "other.example"), (false, Some(CertificateIssue::WrongName)));
+    }
+}'''
+
+# ----------------------------------------------------------------- the HTTP
+
+[[patch]]
+id = "radio-strict-cert-http-error"
+why = "a connection refused for its certificate, with the reason"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+find = '''    #[error("stopped")]
+    Stopped,
+}'''
+replace = '''#[error("stopped")]
+    Stopped,
+    // aurora-local-patch: radio-strict-cert-http-error
+    /// The station's certificate failed verification: refused (`tls.rs`).
+    #[error("certificate refused: {0:?}")]
+    Certificate(CertificateIssue),
+}'''
+
+[[patch]]
+id = "radio-strict-cert-http-field"
+why = "the reply's certificate issue can no longer be set"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+find = '''    /// The certificate failure of an `https` station played anyway
+    /// (`tls.rs`); `None` over plain HTTP and for a valid certificate.'''
+replace = '''/// Always `None`: a station whose certificate fails is refused
+    /// (`tls.rs`, local patch set 118). // aurora-local-patch: radio-strict-cert-http-field'''
+
+[[patch]]
+id = "radio-strict-cert-http-none"
+why = "goes with radio-strict-cert-http-exchange: no issue follows a redirect chain, the chain stops"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+fn = "open_with_origin"
+find = '''    // A redirect given by a station whose certificate failed leads where
+    // that server chose: its issue follows the chain.
+    let mut certificate = None;'''
+replace = '''// aurora-local-patch: radio-strict-cert-http-none
+    // A certificate that fails is refused at its hop: nothing to carry.
+    let certificate = None;'''
+
+[[patch]]
+id = "radio-strict-cert-http-exchange"
+why = "a handshake the verifier refused ends in HttpError::Certificate, and a reply is never read under a refused certificate"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+fn = "open_with_origin"
+find = '''        conn.write_all(req.as_bytes())?;
+        conn.flush()?;'''
+replace = '''// aurora-local-patch: radio-strict-cert-http-exchange
+        conn.write_all(req.as_bytes()).map_err(|e| refused(issue.as_ref(), e.into()))?;
+        conn.flush().map_err(|e| refused(issue.as_ref(), e.into()))?;'''
+
+[[patch]]
+id = "radio-strict-cert-http-reply"
+why = "goes with radio-strict-cert-http-exchange: the reply's head, and a filled slot refuses even then"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+fn = "open_with_origin"
+find = '''        let head = read_head(&mut reader)?;
+        // the handshake is over once a reply came back
+        certificate = issue.and_then(|slot| *slot.lock()).or(certificate);'''
+replace = '''let head = read_head(&mut reader).map_err(|e| refused(issue.as_ref(), e))?;
+        // aurora-local-patch: radio-strict-cert-http-reply
+        // the verifier refuses a failed certificate, so no reply comes under
+        // one; should one ever come, it is refused all the same
+        if let Some(issue) = issue.as_ref().and_then(|slot| *slot.lock()) {
+            return Err(HttpError::Certificate(issue));
+        }'''
+
+[[patch]]
+id = "radio-strict-cert-refused-fn"
+why = "goes with radio-strict-cert-http-exchange: the error of a connection whose certificate was refused"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "literal"
+find = '''fn request_target(url: &Url) -> String {'''
+replace = '''// aurora-local-patch: radio-strict-cert-refused-fn
+/// `error`, or the refusal of the certificate when the verifier refused it
+/// during this connection's handshake (`tls.rs`).
+fn refused(issue: Option<&IssueSlot>, error: HttpError) -> HttpError {
+    match issue.and_then(|slot| *slot.lock()) {
+        Some(issue) => HttpError::Certificate(issue),
+        None => error,
+    }
+}
+
+fn request_target(url: &Url) -> String {'''
+
+[[patch]]
+id = "radio-strict-cert-http-test"
+why = "upstream's loopback test played a self-signed station: it is refused, with its kind (needs a local TCP server)"
+paths = ["crates/aurora-audio/src/http.rs"]
+op = "regex"
+dotall = true
+pattern = '''    #\[test\]\n    fn https_plays_a_self_signed_station_and_says_so\(\) \{\n.*?\n    \}\n'''
+replace = '''    #[test]
+    fn https_refuses_a_self_signed_station_and_says_why() {
+        // aurora-local-patch: radio-strict-cert-http-test
+        let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/stream", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut tls = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let _ = tls.complete_io(&mut sock);
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let error = open(&url, &stop).err().expect("a self-signed station must be refused");
+        server.join().unwrap();
+        assert!(matches!(error, HttpError::Certificate(CertificateIssue::Untrusted)), "{error:?}");
+    }
+'''
+
+# --------------------------------------------------------------- the stream
+
+[[patch]]
+id = "radio-strict-cert-stream-error"
+why = "the refusal reaches the viewer with its reason"
+paths = ["crates/aurora-audio/src/stream.rs"]
+op = "literal"
+find = '''    #[error("audio worker could not start")]
+    Worker,
+}'''
+replace = '''#[error("audio worker could not start")]
+    Worker,
+    // aurora-local-patch: radio-strict-cert-stream-error
+    /// The station's certificate failed verification: refused, with why.
+    #[error("certificate refused: {0:?}")]
+    Certificate(CertificateIssue),
+}'''
+
+[[patch]]
+id = "radio-strict-cert-stream-from"
+why = "goes with radio-strict-cert-stream-error"
+paths = ["crates/aurora-audio/src/stream.rs"]
+op = "literal"
+find = '''            http::HttpError::Tls(_) => Self::Tls,'''
+replace = '''http::HttpError::Certificate(issue) => Self::Certificate(issue), // aurora-local-patch: radio-strict-cert-stream-from
+            http::HttpError::Tls(_) => Self::Tls,'''
+
+[[patch]]
+id = "radio-strict-cert-stream-doc"
+why = "the playing state never carries a failed certificate"
+paths = ["crates/aurora-audio/src/stream.rs"]
+op = "literal"
+find = '''    /// Ogg comment title), when the station sends one. `certificate`: the
+    /// failed certificate of an `https` station played anyway (`tls.rs`).'''
+replace = '''/// Ogg comment title), when the station sends one. `certificate`:
+    /// always `None`, a failed certificate is refused (local patch set 118,
+    /// `StreamError::Certificate`). // aurora-local-patch: radio-strict-cert-stream-doc'''
+
+[[patch]]
+id = "radio-strict-cert-stream-test"
+why = "the refusal's error class"
+paths = ["crates/aurora-audio/src/stream.rs"]
+op = "literal"
+find = '''        assert_eq!(StreamError::from(http::HttpError::PlaylistOrigin), StreamError::Address);'''
+replace = '''assert_eq!(StreamError::from(http::HttpError::PlaylistOrigin), StreamError::Address);
+        // aurora-local-patch: radio-strict-cert-stream-test
+        for issue in [
+            CertificateIssue::Expired { not_after: None },
+            CertificateIssue::Untrusted,
+            CertificateIssue::WrongName,
+        ] {
+            assert_eq!(
+                StreamError::from(http::HttpError::Certificate(issue)),
+                StreamError::Certificate(issue)
+            );
+        }'''
+
+# ------------------------------------------------------------ the interface
+
+[[patch]]
+id = "radio-strict-cert-ui-reason"
+why = "the status line of a refused station: a secure connection that failed"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+fn = "error_reason"
+find = '''        StreamError::Tls => aurora_i18n::tr!("music-error-tls").to_owned(),'''
+replace = '''StreamError::Tls => aurora_i18n::tr!("music-error-tls").to_owned(),
+        // aurora-local-patch: radio-strict-cert-ui-reason
+        // the reason itself is the red line (certificate_warning)
+        StreamError::Certificate(_) => aurora_i18n::tr!("music-error-tls").to_owned(),'''
+
+[[patch]]
+id = "radio-strict-cert-ui-certificate"
+why = "the red sign and line follow the refused station (a playing one never has a failed certificate)"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "replace_fn_body"
+fn = "certificate"
+impl = "MusicStatus"
+expect_sig = 'pub fn certificate\(self\) -> Option<aurora_audio::CertificateIssue>'
+body = '''
+// Local patch set (118): the station refused for its certificate.
+match self {
+    Self::Error(aurora_audio::StreamError::Certificate(issue)) => Some(issue),
+    _ => None,
+}
+'''
+
+[[patch]]
+id = "radio-strict-cert-ui-docs"
+why = "the descriptions say what is shown: a refusal"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "literal"
+find = '''/// What is wrong with the certificate of a station played anyway, and that
+/// its connection is not secure. An expiry says when, in local time.'''
+replace = '''/// What is wrong with the certificate of a refused station, and that it was
+/// refused for it (local patch set 118). An expiry says when, in local time.
+/// // aurora-local-patch: radio-strict-cert-ui-docs'''
+
+[[patch]]
+id = "radio-strict-cert-ui-test"
+why = "upstream's test played a station under a failed certificate: it is refused, its status and red line say why"
+paths = ["crates/aurora-viewer/src/ui/audio.rs"]
+op = "regex"
+dotall = true
+pattern = '''    #\[test\]\n    fn a_station_under_a_failed_certificate_plays_with_its_warning\(\) \{\n.*?\n    \}\n'''
+replace = '''    #[test]
+    fn a_station_refused_for_its_certificate_says_why_in_red() {
+        // aurora-local-patch: radio-strict-cert-ui-test
+        use crate::media::filter::Verdict;
+        use aurora_audio::{CertificateIssue, StreamError, StreamStatus};
+        let audio = AudioSettings::default();
+        // 2026-11-18 12:00 UTC: the same year in every time zone
+        let expired = CertificateIssue::Expired {
+            not_after: Some(1_795_003_200),
+        };
+        let refused = StreamStatus::Error(StreamError::Certificate(expired));
+        let status = MusicStatus::read(true, true, &audio, false, Verdict::Allow, Some(&refused));
+        assert_eq!(status, MusicStatus::Error(StreamError::Certificate(expired)));
+        assert_eq!(status.certificate(), Some(expired), "the red sign and line");
+        assert_eq!(status.text(), MusicStatus::Error(StreamError::Tls).text(), "it does not play");
+        // nothing that plays carries a certificate warning
+        assert_eq!(MusicStatus::Playing(Some(expired)).certificate(), None);
+        assert_eq!(MusicStatus::Playing(None).certificate(), None);
+        assert_eq!(MusicStatus::Error(StreamError::Tls).certificate(), None);
+        assert_eq!(MusicStatus::Connecting.certificate(), None);
+        // the date of the expiry, once readable
+        assert!(certificate_warning(expired).contains("2026"), "{}", certificate_warning(expired));
+        let issues = [
+            expired,
+            CertificateIssue::Expired { not_after: None },
+            CertificateIssue::NotYetValid,
+            CertificateIssue::Untrusted,
+            CertificateIssue::WrongName,
+            CertificateIssue::Revoked,
+            CertificateIssue::Other,
+        ];
+        let texts: std::collections::HashSet<_> = issues.iter().map(|issue| certificate_warning(*issue)).collect();
+        assert_eq!(texts.len(), issues.len(), "each issue has its own words: {texts:?}");
+        // every one ends saying the station was refused
+        let refusal = aurora_i18n::tr!("music-certificate-warning", reason = "");
+        assert!(!refusal.trim().is_empty());
+        for text in &texts {
+            assert!(text.ends_with(&refusal), "{text}");
+        }
+    }
+'''
+
+[[patch]]
+id = "radio-strict-cert-told-once"
+why = "a refused station is told once, by the certificate's Warning notice, not also by the plain error notice"
+paths = ["crates/aurora-viewer/src/app/parcel_music.rs"]
+op = "replace_fn_body"
+fn = "error_is_told"
+expect_sig = 'pub\(super\) fn error_is_told\(error: &aurora_audio::StreamError\) -> bool'
+body = '''
+// Local patch set (118): a station refused for its certificate is told by
+// tell_music_error's Warning notice, with the reason (app.rs).
+!matches!(
+    error,
+    aurora_audio::StreamError::Interrupted | aurora_audio::StreamError::Certificate(_)
+)
+'''
+
+[[patch]]
+id = "radio-strict-cert-told-once-test"
+why = "goes with radio-strict-cert-told-once"
+paths = ["crates/aurora-viewer/src/app/parcel_music.rs"]
+op = "literal"
+find = '''        assert!(!error_is_told(&aurora_audio::StreamError::Interrupted));'''
+replace = '''assert!(!error_is_told(&aurora_audio::StreamError::Interrupted));
+        // aurora-local-patch: radio-strict-cert-told-once-test
+        assert!(!error_is_told(&aurora_audio::StreamError::Certificate(
+            aurora_audio::CertificateIssue::Untrusted
+        )));
+        assert!(error_is_told(&aurora_audio::StreamError::Tls));'''
+
+[[patch]]
+id = "radio-strict-cert-app-comment"
+why = "the notice is about a refused station"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "tell_music_error"
+find = '''        // A station played under a failed certificate says so once, as a
+        // warning; the radio's tooltip keeps it while it plays.'''
+replace = '''// aurora-local-patch: radio-strict-cert-app-comment
+        // A station refused for its certificate says why once, as a warning
+        // (local patch set 118); the radio's tooltip keeps it.'''
+
+# ----------------------------------------------------------------- the text
+
+[[patch]]
+id = "radio-strict-cert-text-en"
+why = "the warning says the station was refused, never that it plays (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^music-certificate-warning = \{ \$reason \}\. The radio plays, but its connection is not secure\.$'
+replace = '''# // aurora-local-patch: radio-strict-cert-text-en
+music-certificate-warning = { $reason }. The radio was refused because its certificate could not be verified.'''
+
+[[patch]]
+id = "radio-strict-cert-text-fr"
+why = "goes with radio-strict-cert-text-en (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^music-certificate-warning = \{ \$reason \}\. La radio joue, mais sa connexion n’est pas sécurisée\.$'
+replace = '''# // aurora-local-patch: radio-strict-cert-text-fr
+music-certificate-warning = { $reason }. La radio a été refusée, car son certificat n’a pas pu être vérifié.'''
+
+[[patch]]
+id = "radio-strict-cert-text-ja"
+why = "goes with radio-strict-cert-text-en (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^music-certificate-warning = \{ \$reason \}。ラジオは再生されますが、接続は安全ではありません。$'
+replace = '''# // aurora-local-patch: radio-strict-cert-text-ja
+music-certificate-warning = { $reason }。証明書を確認できなかったため、このラジオは拒否されました。'''
+
+[[patch]]
+id = "radio-strict-cert-text-community"
+why = "the community catalogues' translation says the radio plays: removed, so that they show the English refusal (upstream's rule for a message whose meaning changes: English until the catalogue catches up)"
+paths = ["crates/aurora-i18n/locales/de.ftl", "crates/aurora-i18n/locales/es.ftl", "crates/aurora-i18n/locales/it.ftl", "crates/aurora-i18n/locales/nb.ftl", "crates/aurora-i18n/locales/pl.ftl", "crates/aurora-i18n/locales/pt-BR.ftl", "crates/aurora-i18n/locales/pt-PT.ftl", "crates/aurora-i18n/locales/ru.ftl", "crates/aurora-i18n/locales/tr.ftl", "crates/aurora-i18n/locales/uk.ftl", "crates/aurora-i18n/locales/zh-Hans.ftl", "crates/aurora-i18n/locales/zh-Hant.ftl"]
+op = "regex"
+pattern = '^music-certificate-warning = [^\n]*\n'
+replace = '''# // aurora-local-patch: radio-strict-cert-text-community
+'''
+expect = 12
+
+# ----------------------------------------------------------------- the docs
+
+[[patch]]
+id = "radio-strict-cert-testing-doc"
+why = "what to look for: a refused station"
+paths = ["docs/TESTING.md"]
+op = "literal"
+required = false
+find = '''  A station whose certificate fails that check (expired, self-signed, for
+  another name) still plays: the radio button carries a red warning sign,
+  its tooltip says in red what is wrong (an expiry with its date, in local
+  time), and the nearby chat says it once per station and session. The log
+  gives `certificate refused by the system (…), playing anyway`. Any
+  `https://` station whose certificate has expired shows it.'''
+replace = '''A station whose certificate fails that check (expired, self-signed, for
+  another name) is refused (local patch set): it stays silent, the radio
+  button carries a red warning sign, its tooltip says in red what is wrong
+  and that the station was refused (an expiry with its date, in local
+  time), and the nearby chat says it once per station and session. The log
+  gives `certificate refused by the system (…), station not played`. Any
+  `https://` station whose certificate has expired shows it.
+  <!-- // aurora-local-patch: radio-strict-cert-testing-doc -->'''
+
+[[patch]]
+id = "radio-strict-cert-architecture"
+why = "the aurora-audio row: tls.rs refuses"
+paths = ["ARCHITECTURE.md"]
+op = "literal"
+required = false
+find = '''`tls.rs` turns a failed certificate (expired, self-signed, another name…) into a `CertificateIssue` carried by `StreamStatus::Playing`, so the station plays and the viewer warns in red, the handshake signatures still checked.'''
+replace = '''`tls.rs` refuses a failed certificate (expired, self-signed, another name…) and keeps its `CertificateIssue`, carried by `StreamError::Certificate`, so the viewer says in red why the station stays silent (local patch set) <!-- // aurora-local-patch: radio-strict-cert-architecture -->.'''
+
+# --------------------------------------------------------------------- guards
+
+[[guard]]
+id = "radio-cert-assertion"
+why = "a certificate verifier of the audio code says yes on its own: a lenient radio verifier came back (118-radio-strict-certificates)"
+paths = ["crates/aurora-audio/**/*.rs"]
+level = "fail"
+pattern = 'ServerCertVerified::assertion\s*\('
+
+[[guard]]
+id = "radio-cert-new-verifier"
+why = "a file of the audio code other than the patched tls.rs builds its own TLS client or verifier: it may accept a failing certificate (reported as file:1)"
+paths = ["crates/aurora-audio/**/*.rs"]
+level = "fail"
+# Whole-file match: the lookahead skips the file that carries the strict
+# verifier's marker (tls.rs once radio-strict-cert-verifier applied).
+pattern = '''\A(?![\s\S]*?aurora-local-patch: radio-strict-cert-verifier\b)[\s\S]*?(?:\.dangerous\s*\(\s*\)|client::danger\b|\bServerCertVerifier\b|ClientConfig::builder|danger_accept_invalid|NoCertificateVerification)'''

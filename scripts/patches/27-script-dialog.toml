@@ -1,0 +1,700 @@
+# Choose where the script menus (llDialog) and text boxes (llTextBox) appear.
+#
+# Upstream shows them as notification cards fixed at the top right, under the
+# bell (Aurora's center) or in the Legacy toast stack. The Legacy Viewer has a
+# ScriptDialogsPosition setting (indra/newview/app_settings/settings.xml).
+#
+# New saved setting `script_dialog_position`, the friends' toasts enum
+# (`PresencePosition`, six places, same labels), TopRight by default: nothing
+# changes until it is picked. Preferences > Chat > Toasts has the dropdown
+# right under the one of the online / offline toasts.
+#
+# Only the script menus and text boxes move (`dnd_shows` picks them: the same
+# two kinds that already show in do not disturb). They stand in the room the
+# bars leave (`presence::room`), above the nearby chat lines, and at the
+# bottom the stack grows upwards, exactly as the friends' toasts do. Every
+# other notification, the bell's list, expiry, answers and do not disturb are
+# untouched, and with TopRight no code path differs from upstream:
+#  - Aurora's center: the moved cards leave the bell's panel for a panel of
+#    their own (`script_dialogs`, drawn by the same `rolled_out`), and the
+#    bell's panel only unrolls for what is left in it;
+#  - Legacy toasts: the moved toasts leave the stack under the bell for an
+#    area of their own (`script_toasts`).
+# The place reaches both through `CenterUi::script_at`, set by the app from
+# the setting each frame (so no `ToastEnv` field has to be added).
+#
+# Wherever they stand, the cards keep the top right's layout. In Aurora's
+# center the panel under the bell takes the islands' column (the system and
+# bell islands, often wider than `WIDTH`); the panel aside takes that same
+# width through the same rule (`bell_panel`, upstream's own lines moved into
+# a function), narrowed only when the room the bars leave is narrower
+# (`script_inner`). The Legacy toasts have one fixed width in both places.
+#
+# Texts (label and hint) are added to the English, French and Japanese catalogues. The idempotence marker
+# of the Fluent files is a Fluent comment line.
+
+# ----------------------------------------------------------------- setting
+
+[[patch]]
+id = "script-dialog-setting-field"
+why = "the saved choice; older settings files get the default through the struct's serde(default)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "pub presence_position: PresencePosition,"
+replace = '''pub presence_position: PresencePosition,
+    /// Where the script menus (llDialog) and text boxes (llTextBox) stand;
+    /// top right, under the bell, until a place is chosen (the Legacy
+    /// Viewer's ScriptDialogsPosition).
+    pub script_dialog_position: PresencePosition, // aurora-local-patch: script-dialog-setting-field'''
+
+[[patch]]
+id = "script-dialog-setting-default"
+why = "top right by default: nothing moves until the user picks a place"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "presence_position: PresencePosition::TopRight,"
+replace = '''presence_position: PresencePosition::TopRight,
+            script_dialog_position: PresencePosition::TopRight, // aurora-local-patch: script-dialog-setting-default'''
+
+[[patch]]
+id = "script-dialog-setting-known"
+why = "the options test lists the settings fields it knows"
+paths = ["crates/aurora-viewer/src/ui/options/**/*.rs"]
+op = "literal"
+find = '"presence_position",'
+replace = '''"presence_position",
+    "script_dialog_position", // aurora-local-patch: script-dialog-setting-known'''
+
+[[patch]]
+id = "script-dialog-app"
+why = "the notification center and the Legacy toasts read the place from the saved setting"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+find = "let classic_bars = self.bars_look().0;"
+replace = '''let classic_bars = self.bars_look().0;
+                self.notif_ui.center.script_at = self.settings.script_dialog_position; // aurora-local-patch: script-dialog-app'''
+
+# ------------------------------------------------------------- preferences
+
+[[patch]]
+id = "script-dialog-options-row"
+why = "the dropdown, under the one of the online / offline toasts, enabled in both notification styles"
+paths = ["crates/aurora-viewer/src/ui/options/**/*.rs"]
+op = "literal"
+find = "// OnlineOfflinetoNearbyChat, beside its toast"
+replace = '''// where the script menus and text boxes stand, with both styles
+        // aurora-local-patch: script-dialog-options-row
+        cx.row(
+            tr!("ui-options-script-dialog-position"),
+            tr!("ui-options-script-dialog-position-hint"),
+            &field!(script_dialog_position),
+            |ui, s| {
+                let mut changed = false;
+                egui::ComboBox::from_id_salt(ui.scope_id().with("script-dialog-position"))
+                    .width(COMBO_W)
+                    .selected_text(s.script_dialog_position.label())
+                    .show_ui(ui, |ui| {
+                        for at in crate::settings::PresencePosition::ALL {
+                            changed |= ui.selectable_value(&mut s.script_dialog_position, at, at.label()).changed();
+                        }
+                    });
+                changed
+            },
+        );
+        // OnlineOfflinetoNearbyChat, beside its toast'''
+
+# -------------------------------------------------------------------- texts
+
+[[patch]]
+id = "script-dialog-ftl-en"
+why = "label and hint of the dropdown (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "ui-options-toast-friends-position ="
+replace = '''# // aurora-local-patch: script-dialog-ftl-en
+ui-options-script-dialog-position = Place of the script dialogs
+ui-options-script-dialog-position-hint = Script menus (llDialog) and text boxes (llTextBox). Beside the bars, never over them; at the top right they stay under the bell
+ui-options-toast-friends-position ='''
+
+[[patch]]
+id = "script-dialog-ftl-fr"
+why = "label and hint of the dropdown (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "ui-options-toast-friends-position ="
+replace = '''# // aurora-local-patch: script-dialog-ftl-fr
+ui-options-script-dialog-position = Place des dialogues de script
+ui-options-script-dialog-position-hint = Menus (llDialog) et zones de texte (llTextBox) des objets scriptés. À côté des barres, jamais dessus ; en haut à droite, ils restent sous la cloche
+ui-options-toast-friends-position ='''
+
+[[patch]]
+id = "script-dialog-ftl-ja"
+why = "label and hint of the dropdown (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "ui-options-toast-friends-position ="
+replace = '''# // aurora-local-patch: script-dialog-ftl-ja
+ui-options-script-dialog-position = スクリプトダイアログの位置
+ui-options-script-dialog-position-hint = スクリプトのメニュー（llDialog）とテキストボックス（llTextBox）です。バーの横に表示し、バーには重ねません。右上の場合はベルの下に表示されます。
+ui-options-toast-friends-position ='''
+
+# ------------------------------------------------- Aurora's notification center
+
+[[patch]]
+id = "script-dialog-center-state"
+why = "the place the app gives, and the cards that stand aside while it is not the top right"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = '''/// The width of the panel's content this frame.
+    inner_width: f32,'''
+replace = '''/// The width of the panel's content this frame.
+    inner_width: f32,
+    /// Where the script menus and text boxes stand (set by the app from
+    /// `Settings::script_dialog_position`).
+    pub script_at: PresencePosition, // aurora-local-patch: script-dialog-center-state
+    /// The rolled-out cards that are script menus or text boxes, while they
+    /// stand apart from the bell's panel (`is_aside`).
+    aside: Vec<u64>,'''
+
+[[patch]]
+id = "script-dialog-center-visible"
+why = "one selection of the cards shown (the newest three, script windows first), over all of them or over one side"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs", "crates/aurora-viewer/src/ui/notification_center/**/*.rs"]
+op = "replace_fn_body"
+fn = "visible"
+expect_sig = 'fn visible\(c: &CenterUi\) -> \(Vec<Peek>, usize\)'
+body = '''
+visible_part(c, None)
+'''
+
+[[patch]]
+id = "script-dialog-center-rolled-sig"
+why = "rolled_out draws the cards under the bell, or only the script cards standing aside"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = "fn rolled_out("
+replace = '''fn rolled_out(
+    aside: bool, // aurora-local-patch: script-dialog-center-rolled-sig'''
+
+[[patch]]
+id = "script-dialog-center-rolled-visible"
+why = "at the top right the selection is upstream's own; elsewhere each side shows its own newest three"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+fn = "rolled_out"
+find = "let (shown, behind) = visible(&nui.center);"
+replace = '''let (shown, behind) = if nui.center.script_at == PresencePosition::TopRight {
+        visible(&nui.center)
+    } else {
+        visible_part(&nui.center, Some(aside))
+    }; // aurora-local-patch: script-dialog-center-rolled-visible'''
+
+[[patch]]
+id = "script-dialog-center-call"
+why = "the bell's panel draws the cards that did not move"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = "rolled_out(ui, p, icons, world, list, nui, env, now, &mut answers);"
+replace = "rolled_out(false, ui, p, icons, world, list, nui, env, now, &mut answers); // aurora-local-patch: script-dialog-center-call"
+
+[[patch]]
+id = "script-dialog-center-show"
+why = "the script cards get their own panel before the bell's"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = "presence_toasts(ctx, p, list, nui, env, column, now, &mut answers);"
+replace = '''presence_toasts(ctx, p, list, nui, env, column, now, &mut answers);
+    // aurora-local-patch: script-dialog-center-show
+    sync_aside(list, &mut nui.center);
+    let wide = bell_panel(column, bell, ctx.content_rect()).1;
+    script_dialogs(ctx, p, icons, world, list, nui, env, wide, now, &mut answers);'''
+
+[[patch]]
+id = "script-dialog-center-column"
+why = "the panel under the bell's place and width in a function, so the script cards aside take the same width"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = '''let (x, inner) = match column {
+        Some(c) => (c.left(), c.width() - PANEL_FRAME),
+        None => (
+            ((bell.right() + 4.0).min(screen.right() - 6.0) - WIDTH).max(screen.left() + 6.0),
+            WIDTH - 12.0,
+        ),
+    };'''
+replace = "let (x, inner) = bell_panel(column, bell, screen); // aurora-local-patch: script-dialog-center-column"
+
+[[patch]]
+id = "script-dialog-center-unroll"
+why = "the bell's panel only unrolls for the cards left in it"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = "nui.open || !nui.center.peek.is_empty(),"
+replace = "nui.open || nui.center.peek.iter().any(|k| !is_aside(&nui.center, k.id)), // aurora-local-patch: script-dialog-center-unroll"
+
+[[patch]]
+id = "script-dialog-center-paused"
+why = "the 'paused' hint is for the bell's panel only"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = "if hovered && !nui.open && !nui.center.peek.is_empty() {"
+replace = """if hovered && !nui.open && nui.center.peek.iter().any(|k| !is_aside(&nui.center, k.id)) {
+        // aurora-local-patch: script-dialog-center-paused"""
+
+[[patch]]
+id = "script-dialog-center-helpers"
+why = "the panel of the script cards, where it stands, and the selection they share (with tests)"
+paths = ["crates/aurora-viewer/src/ui/notification_center.rs"]
+op = "literal"
+find = '''pub mod presence;
+
+#[cfg(test)]
+pub(super) mod tests;'''
+replace = '''// aurora-local-patch: script-dialog-center-helpers
+/// Whether the card `id` is a script menu or text box standing apart from
+/// the bell's panel (the place is not the top right).
+pub fn is_aside(c: &CenterUi, id: u64) -> bool {
+    c.script_at != PresencePosition::TopRight && c.aside.contains(&id)
+}
+
+/// Note the rolled-out script menus and text boxes, while they stand apart:
+/// one that is answered keeps its side until its card is gone.
+fn sync_aside(list: &Notifications, c: &mut CenterUi) {
+    if c.script_at == PresencePosition::TopRight {
+        c.aside.clear();
+        return;
+    }
+    let new: Vec<u64> = list
+        .list
+        .iter()
+        .filter(|n| dnd_shows(n) && !c.aside.contains(&n.id))
+        .map(|n| n.id)
+        .collect();
+    c.aside.extend(new);
+    let peek = &c.peek;
+    c.aside.retain(|id| peek.iter().any(|k| k.id == *id));
+}
+
+/// `visible` over the cards under the bell (`Some(false)`), those standing
+/// aside (`Some(true)`), or all of them (`None`).
+fn visible_part(c: &CenterUi, aside: Option<bool>) -> (Vec<Peek>, usize) {
+    let part: Vec<&Peek> = c.peek.iter().filter(|k| aside.is_none_or(|a| is_aside(c, k.id) == a)).collect();
+    let mut keep: Vec<usize> = (0..part.len()).rev().filter(|i| part[*i].pinned).take(MAX_PEEK).collect();
+    let room = MAX_PEEK - keep.len();
+    keep.extend((0..part.len()).rev().filter(|i| !part[*i].pinned).take(room));
+    keep.sort_unstable();
+    let shown: Vec<Peek> = keep.iter().map(|i| part[*i].clone()).collect();
+    let behind = part.len() - shown.len();
+    (shown, behind)
+}
+
+/// The left edge and the content width of the panel under the bell: with
+/// the islands, exactly under the system and bell islands (`column`), the
+/// overlay's margins and border within that width; with the Legacy bars its
+/// own width, ending under the bell. The script cards standing aside take
+/// the same width (`script_inner`).
+fn bell_panel(column: Option<Rect>, bell: Rect, screen: Rect) -> (f32, f32) {
+    match column {
+        Some(c) => (c.left(), c.width() - PANEL_FRAME),
+        None => (
+            ((bell.right() + 4.0).min(screen.right() - 6.0) - WIDTH).max(screen.left() + 6.0),
+            WIDTH - 12.0,
+        ),
+    }
+}
+
+/// The content width of the script cards standing aside: `wide`, the panel
+/// under the bell's own (`bell_panel`), at every place, so the card, its
+/// text box and its buttons are laid out as at the top right; narrowed only
+/// when the room the bars leave is narrower than that panel.
+pub fn script_inner(room: Rect, wide: f32) -> f32 {
+    ((wide + PANEL_FRAME).min(room.width()) - PANEL_FRAME).max(0.0)
+}
+
+/// The room the bars leave this frame (both styles of notifications).
+pub fn script_room(ctx: &egui::Context, classic_bars: bool) -> Rect {
+    presence::room(super::layout::work_area(ctx), classic_bars)
+}
+
+/// The corner a column of `width` hangs from at `at` in `room`, above the
+/// rectangles of `avoid` across it, `gap` (ToastGap) away from them: the
+/// pivot of the area and its point. At the bottom the area grows upwards,
+/// as the friends' toasts do.
+pub fn script_anchor(room: Rect, at: PresencePosition, width: f32, avoid: &[Rect], gap: f32) -> (egui::Align2, egui::Pos2) {
+    use egui::Align;
+    // the edge a toast of that width and no height would stand against
+    let edge = presence::stack(room, at, &[Vec2::new(width, 0.0)], avoid, gap)
+        .pop()
+        .flatten()
+        .unwrap_or_else(|| Rect::from_min_size(room.min, Vec2::new(width, 0.0)));
+    let (x, side) = match at {
+        PresencePosition::TopLeft | PresencePosition::BottomLeft => (edge.left(), Align::Min),
+        PresencePosition::TopRight | PresencePosition::BottomRight => (edge.right(), Align::Max),
+        PresencePosition::TopCenter | PresencePosition::BottomCenter => (edge.center().x, Align::Center),
+    };
+    if at.top() {
+        (egui::Align2([side, Align::Min]), egui::pos2(x, edge.top()))
+    } else {
+        (egui::Align2([side, Align::Max]), egui::pos2(x, edge.bottom()))
+    }
+}
+
+/// `script_anchor` in the room the bars leave this frame, above the nearby
+/// chat lines (both styles of notifications).
+pub fn script_place(ctx: &egui::Context, at: PresencePosition, classic_bars: bool, width: f32, gap: f32) -> (egui::Align2, egui::Pos2) {
+    let room = script_room(ctx, classic_bars);
+    let avoid: Vec<Rect> = chat_lines(ctx).into_iter().collect();
+    script_anchor(room, at, width, &avoid, gap)
+}
+
+/// The script menus and text boxes rolled out away from the bell's panel:
+/// the same cards, in a panel of their own at the chosen place, as wide as
+/// the panel under the bell (`wide`, its content width).
+#[allow(clippy::too_many_arguments)]
+fn script_dialogs(
+    ctx: &egui::Context,
+    p: &Palette,
+    icons: &Icons,
+    world: &World,
+    list: &mut Notifications,
+    nui: &mut NotifUi,
+    env: &mut ToastEnv<'_>,
+    wide: f32,
+    now: f64,
+    answers: &mut Vec<(u64, Response)>,
+) {
+    let at = nui.center.script_at;
+    if at == PresencePosition::TopRight || nui.open || env.hidden || visible_part(&nui.center, Some(true)).0.is_empty() {
+        return;
+    }
+    let inner = script_inner(script_room(ctx, env.classic_bars), wide);
+    let (pivot, pos) = script_place(ctx, at, env.classic_bars, inner + PANEL_FRAME, env.toast_gap);
+    nui.center.inner_width = inner;
+    egui::Area::new(egui::Id::unique("notification_script_dialogs"))
+        .fade_in(false)
+        .order(egui::Order::Foreground)
+        .pivot(pivot)
+        .fixed_pos(pos)
+        .constrain(false)
+        .show(ctx, |ui| {
+            super::widgets::overlay(ui, p, egui::Margin::same(6), |ui| {
+                ui.set_width(inner);
+                rolled_out(true, ui, p, icons, world, list, nui, env, now, answers);
+            });
+        });
+}
+
+pub mod presence;
+
+#[cfg(test)]
+pub(super) mod tests;
+
+#[cfg(test)]
+mod script_dialog_tests {
+    use super::*;
+    use crate::world::notifications::Kind;
+    use uuid::Uuid;
+
+    const ROOM: Rect = Rect::from_min_max(egui::pos2(0.0, 40.0), egui::pos2(1000.0, 700.0));
+
+    fn dialog(list: &mut Notifications) -> u64 {
+        list.push(
+            Kind::Script,
+            "HUD",
+            "Choose a button",
+            Data::Dialog {
+                sender: ([127, 0, 0, 1], 13000).into(),
+                object: Uuid::from_u128(3),
+                object_name: "HUD".into(),
+                own_object: false,
+                channel: -42,
+                buttons: vec!["Yes".into(), "No".into()],
+            },
+        )
+    }
+
+    /// Each place hangs the column from its own corner of the room, the
+    /// bottom ones growing upwards.
+    #[test]
+    fn script_anchor_hangs_the_column_from_the_chosen_corner() {
+        use egui::{Align, Align2};
+        let expect = [
+            (PresencePosition::TopLeft, Align2([Align::Min, Align::Min]), egui::pos2(0.0, 40.0)),
+            (
+                PresencePosition::TopCenter,
+                Align2([Align::Center, Align::Min]),
+                egui::pos2(500.0, 40.0),
+            ),
+            (
+                PresencePosition::TopRight,
+                Align2([Align::Max, Align::Min]),
+                egui::pos2(1000.0, 40.0),
+            ),
+            (
+                PresencePosition::BottomLeft,
+                Align2([Align::Min, Align::Max]),
+                egui::pos2(0.0, 700.0),
+            ),
+            (
+                PresencePosition::BottomCenter,
+                Align2([Align::Center, Align::Max]),
+                egui::pos2(500.0, 700.0),
+            ),
+            (
+                PresencePosition::BottomRight,
+                Align2([Align::Max, Align::Max]),
+                egui::pos2(1000.0, 700.0),
+            ),
+        ];
+        for (at, pivot, pos) in expect {
+            assert_eq!(script_anchor(ROOM, at, 360.0, &[], 7.0), (pivot, pos), "{at:?}");
+        }
+    }
+
+    /// The nearby chat lines over the chat bar keep the bottom stack above
+    /// them only where they cross its column.
+    #[test]
+    fn script_anchor_stays_above_the_chat_lines() {
+        let chat = Rect::from_min_max(egui::pos2(0.0, 600.0), egui::pos2(400.0, 700.0));
+        // ToastGap (7 by default) above the chat lines
+        let (_, pos) = script_anchor(ROOM, PresencePosition::BottomLeft, 360.0, &[chat], 7.0);
+        assert_eq!(pos, egui::pos2(0.0, 600.0 - 7.0));
+        let (_, pos) = script_anchor(ROOM, PresencePosition::BottomLeft, 360.0, &[chat], 0.0);
+        assert_eq!(pos, egui::pos2(0.0, 600.0));
+        let (_, pos) = script_anchor(ROOM, PresencePosition::BottomRight, 360.0, &[chat], 7.0);
+        assert_eq!(pos, egui::pos2(1000.0, 700.0));
+        let (_, pos) = script_anchor(ROOM, PresencePosition::TopLeft, 360.0, &[chat], 7.0);
+        assert_eq!(pos, egui::pos2(0.0, 40.0));
+    }
+
+    /// Away from the top right the script cards keep the width of the panel
+    /// under the bell (the islands' column, or the Legacy bars' own) at
+    /// every place, and stand inside the room; a room narrower than that
+    /// panel narrows them to fit.
+    #[test]
+    fn the_cards_aside_keep_the_width_under_the_bell() {
+        let bell = Rect::from_min_max(egui::pos2(960.0, 4.0), egui::pos2(996.0, 36.0));
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 720.0));
+        let column = Rect::from_min_max(egui::pos2(560.0, 4.0), bell.max);
+        let narrow = Rect::from_min_max(egui::pos2(0.0, 40.0), egui::pos2(300.0, 700.0));
+        for (col, wide) in [(Some(column), 436.0 - PANEL_FRAME), (None, WIDTH - 12.0)] {
+            let (_, inner) = bell_panel(col, bell, screen);
+            assert_eq!(inner, wide);
+            assert_eq!(script_inner(ROOM, inner), inner);
+            assert_eq!(script_inner(narrow, inner), 300.0 - PANEL_FRAME);
+            for room in [ROOM, narrow] {
+                let w = script_inner(room, inner) + PANEL_FRAME;
+                for at in PresencePosition::ALL {
+                    let (pivot, pos) = script_anchor(room, at, w, &[], 7.0);
+                    let card = pivot.anchor_size(pos, Vec2::new(w, 100.0));
+                    assert!(room.contains_rect(card), "{at:?} {card:?} in {room:?}");
+                }
+            }
+        }
+    }
+
+    /// Away from the top right the script menu is a card of its own side;
+    /// the rest stays under the bell, and at the top right nothing is aside.
+    #[test]
+    fn only_the_script_cards_stand_aside() {
+        for (at, aside) in [(PresencePosition::BottomLeft, true), (PresencePosition::TopRight, false)] {
+            let mut list = Notifications::default();
+            let mut c = CenterUi {
+                script_at: at,
+                ..CenterUi::default()
+            };
+            let script = dialog(&mut list);
+            let info = list.push(Kind::Info, "Lune paid you L$50", "", Data::None);
+            update(&list, &mut c, Moment::default(), 30.0);
+            sync_aside(&list, &mut c);
+            assert_eq!(is_aside(&c, script), aside);
+            assert!(!is_aside(&c, info));
+            let ids = |part| visible_part(&c, part).0.iter().map(|k| k.id).collect::<Vec<_>>();
+            if aside {
+                assert_eq!(ids(Some(true)), vec![script]);
+                assert_eq!(ids(Some(false)), vec![info]);
+            } else {
+                assert!(ids(Some(true)).is_empty());
+                assert_eq!(ids(Some(false)), vec![script, info]);
+            }
+            assert_eq!(ids(None), vec![script, info]);
+            assert_eq!(ids(None), visible(&c).0.iter().map(|k| k.id).collect::<Vec<_>>());
+        }
+    }
+
+    /// A card keeps its side until it is gone, whatever the place becomes.
+    #[test]
+    fn a_card_keeps_its_side_until_gone() {
+        let mut list = Notifications::default();
+        let mut c = CenterUi {
+            script_at: PresencePosition::TopLeft,
+            ..CenterUi::default()
+        };
+        let script = dialog(&mut list);
+        update(&list, &mut c, Moment::default(), 30.0);
+        sync_aside(&list, &mut c);
+        assert!(is_aside(&c, script));
+        c.peek.clear();
+        sync_aside(&list, &mut c);
+        assert!(!is_aside(&c, script));
+        c.script_at = PresencePosition::TopRight;
+        assert!(!is_aside(&c, script));
+    }
+
+    /// The place is saved; a settings file from before it was added gets the
+    /// top right, and the reset of Preferences > Chat puts it back.
+    #[test]
+    fn the_place_is_saved_and_defaults_to_the_top_right() {
+        use crate::settings::Settings;
+        assert_eq!(Settings::default().script_dialog_position, PresencePosition::TopRight);
+        let old: Settings = serde_json::from_str("{}").expect("empty settings");
+        assert_eq!(old.script_dialog_position, PresencePosition::TopRight);
+        let s = Settings {
+            script_dialog_position: PresencePosition::BottomLeft,
+            ..Settings::default()
+        };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).expect("serialize")).expect("read back");
+        assert_eq!(back.script_dialog_position, PresencePosition::BottomLeft);
+        let mut s = back;
+        crate::ui::options::reset_page_settings(crate::ui::options::Page::Chat, &mut s);
+        assert_eq!(s.script_dialog_position, PresencePosition::TopRight);
+    }
+}'''
+
+# ------------------------------------------------------ the Legacy toasts
+
+[[patch]]
+id = "script-dialog-toasts-ids"
+why = "the stack under the bell only keeps the toasts that did not move"
+paths = ["crates/aurora-viewer/src/ui/notifications.rs"]
+op = "literal"
+find = "let (ids, behind) = shown_toasts(list, nui, dnd);"
+replace = '''let (ids, behind) = shown_toasts(list, nui, dnd);
+                let ids = main_toasts(list, nui.center.script_at, ids); // aurora-local-patch: script-dialog-toasts-ids'''
+
+[[patch]]
+id = "script-dialog-toasts-call"
+why = "the moved script toasts get their own area after the stack under the bell"
+paths = ["crates/aurora-viewer/src/ui/notifications.rs"]
+op = "literal"
+find = "// keep toasts expiring without input"
+replace = '''script_toasts(ctx, p, icons, world, list, nui, env, dnd, &mut answers); // aurora-local-patch: script-dialog-toasts-call
+        // keep toasts expiring without input'''
+
+[[patch]]
+id = "script-dialog-toasts-helpers"
+why = "the area of the moved script toasts, and the toasts that stay in the stack under the bell"
+paths = ["crates/aurora-viewer/src/ui/notifications.rs"]
+op = "literal"
+find = "fn script_rows(count: usize)"
+replace = '''// aurora-local-patch: script-dialog-toasts-helpers
+/// The toasts of the stack under the bell: without the script menus and
+/// text boxes once they stand elsewhere (`script_toasts`).
+fn main_toasts(list: &Notifications, at: crate::settings::PresencePosition, ids: Vec<u64>) -> Vec<u64> {
+    if at == crate::settings::PresencePosition::TopRight {
+        return ids;
+    }
+    ids.into_iter()
+        .filter(|id| !list.list.iter().any(|n| n.id == *id && super::notification_center::dnd_shows(n)))
+        .collect()
+}
+
+/// The script menus and text boxes away from the top right: the same toasts
+/// and answers as in the stack under the bell, in an area of their own at the
+/// chosen place (in the room the bars leave, above the nearby chat lines).
+#[allow(clippy::too_many_arguments)]
+fn script_toasts(
+    ctx: &egui::Context,
+    p: &Palette,
+    icons: &Icons,
+    world: &World,
+    list: &mut Notifications,
+    nui: &mut NotifUi,
+    env: &mut ToastEnv<'_>,
+    dnd: bool,
+    answers: &mut Vec<(u64, Response)>,
+) {
+    let at = nui.center.script_at;
+    if at == crate::settings::PresencePosition::TopRight {
+        return;
+    }
+    let (ids, _) = shown_toasts(list, nui, dnd);
+    let ids: Vec<u64> = ids
+        .into_iter()
+        .filter(|id| list.list.iter().any(|n| n.id == *id && super::notification_center::dnd_shows(n)))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let (pivot, pos) = super::notification_center::script_place(ctx, at, env.classic_bars, WIDTH, env.toast_gap);
+    egui::Area::new(egui::Id::unique("notification_script_toasts"))
+        .fade_in(false)
+        .order(egui::Order::Foreground)
+        .pivot(pivot)
+        .fixed_pos(pos)
+        .constrain(false)
+        .show(ctx, |ui| {
+            // ToastGap, as between the Legacy toasts (LLScreenChannel::redrawToasts)
+            ui.spacing_mut().item_spacing.y = env.toast_gap;
+            for id in ids.into_iter().rev() {
+                if let Some(n) = list.list.iter_mut().find(|n| n.id == id) {
+                    // Close All Windows (upstream #2766) and Close Window
+                    // (upstream #3171): shown toasts, as in the stack
+                    if close_script_prompt(ctx, n, true) {
+                        answers.push((id, Response::Dismiss));
+                        nui.toasts.retain(|(t, _)| *t != id);
+                        continue;
+                    }
+                    match card(ui, p, icons, world, env.images, &mut nui.wanted_images, n, true, false) {
+                        // as in the stack: the cross of a text box only hides
+                        // it (a menu stays until answered)
+                        Some(Response::Dismiss) if !matches!(n.data, Data::Dialog { .. }) => {
+                            nui.toasts.retain(|(t, _)| *t != id);
+                            nui.hidden.insert(id);
+                        }
+                        Some(r) => answers.push((id, r)),
+                        None => {}
+                    }
+                }
+            }
+        });
+}
+
+fn script_rows(count: usize)'''
+
+[[patch]]
+id = "script-dialog-toasts-test"
+why = "the toasts left under the bell are the ones that did not move"
+paths = ["crates/aurora-viewer/src/ui/notifications.rs"]
+op = "literal"
+find = '''#[test]
+    fn script_rows_keep_original_indices_in_bottom_up_groups_of_three() {'''
+replace = '''// aurora-local-patch: script-dialog-toasts-test
+    #[test]
+    fn only_the_script_toasts_leave_the_stack_under_the_bell() {
+        use crate::settings::PresencePosition;
+        let mut list = Notifications::default();
+        let script = list.push(
+            Kind::Script,
+            "HUD",
+            "Choose a button",
+            Data::Dialog {
+                sender: ([127, 0, 0, 1], 13000).into(),
+                object: Uuid::from_u128(3),
+                object_name: "HUD".into(),
+                own_object: false,
+                channel: -42,
+                buttons: vec!["Yes".into()],
+            },
+        );
+        let info = list.push(Kind::Info, "Lune paid you L$50", "", Data::None);
+        assert_eq!(
+            main_toasts(&list, PresencePosition::TopRight, vec![script, info]),
+            vec![script, info]
+        );
+        for at in PresencePosition::ALL.into_iter().filter(|at| *at != PresencePosition::TopRight) {
+            assert_eq!(main_toasts(&list, at, vec![script, info]), vec![info], "{at:?}");
+        }
+    }
+
+    #[test]
+    fn script_rows_keep_original_indices_in_bottom_up_groups_of_three() {'''

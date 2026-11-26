@@ -53,6 +53,7 @@ Thumbs.db
 # shared settings (.claude/settings.json) and hook (.claude/hooks/) are in git.
 /.claude/settings.local.json
 /.claude/worktrees/
+.claude
 
 # Python's bytecode caches (scripts/*.py)
 __pycache__/

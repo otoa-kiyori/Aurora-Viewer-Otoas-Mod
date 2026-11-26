@@ -1,0 +1,760 @@
+# Reflection probes during an environment change: the sky probe follows
+# the change instead of stepping every 2 s, and the local probes cross-fade
+# into each new capture instead of switching to it in one frame.
+#
+# What: while the environment cross-fades (a sky picked in World >
+# Environment, a parcel or region change, a teleport):
+# - the default probe (the sky-only cube that lights and reflects what no
+#   local probe covers) is captured again after every two local probe
+#   captures, instead of every 2 s (RenderDefaultProbeUpdatePeriod): about
+#   every 0.3 s at the paced 60 faces a second. Its cube, radiance and
+#   irradiance were replaced in one go every 2 s: the light it gives moved
+#   in steps of 2 s of the change;
+# - the farthest two probes the slots keep give their cubes up while the
+#   change runs (and the round after it): they fade out as a probe past the
+#   slots does (its cubed fade over 1 s; the edge of the field and the
+#   other probes' weights stay where all the slots put them), so that two
+#   cube slots are free in a built-up region too, where every slot is taken;
+#   they come back, captured again and fading in, once the change is over;
+# - a local probe's new capture goes into a free cube slot, and the probe
+#   is listed twice for 0.5 s, its previous cube at weight (1 - t) and the
+#   new one at t: the shaders sum the weighted probes and divide by the
+#   weights (sample_probes_pair, sample_probes_ex), so the pair shows the
+#   mix of the two at the probe's own weight, with no shader change. A box
+#   probe (its weight is not its fade), a probe not captured yet, or no
+#   free slot (both spare slots taken by cross-fades, or so few slots that
+#   none is spared: 4 or fewer): the capture replaces the cube in place, as
+#   before. The
+#   default probe is not cross-faded (the shaders treat the first entry of
+#   the list apart).
+#
+# How (scene/probes.rs): the face budget is unchanged (60 faces a second,
+# one face a frame at most): only the order of the captures and the cube
+# they are filtered into change. When the change ends every probe is
+# captured once more, the default probe first then the closest, a face a
+# frame as after a settings change (`refresh`), still cross-fading: what
+# was captured during the change saw a sky between the two. Without a
+# change, and once that round is done, nothing differs from before: the
+# same period, budget, order, slots and list, and every probe the slots
+# can keep.
+#
+# At every probe level: level 0 has the default probe only, levels 1 and 2
+# add the manual probes, which take their turns (and cross-fade, spheres
+# only) as the local ones do at 3.
+#
+# Test variables (app.rs apply_test_overrides, docs/TESTING.md):
+# AURORA_PROBES=<level>[,<count>[,<range>]], AURORA_MIRRORS=0..4 and
+# AURORA_WATER_REFLECTIONS=0..4 set those settings for a launch, as the
+# other overrides do; AURORA_PROBE_CHANGE_PACING=0 gives the probes as
+# before during a change, for a comparison with the same build.
+
+[[patch]]
+id = "probe-change-pacing-period"
+why = "how the probes are paced while the environment changes"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """const DEFAULT_PERIOD: Duration = Duration::from_secs(2);"""
+replace = """const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
+// aurora-local-patch: probe-change-pacing-period
+/// Local probe captures between two of the default probe's while the
+/// environment changes ([`ProbeManager::set_changing`]), instead of
+/// [`DEFAULT_PERIOD`]: its cube replaces the previous one in one go, and
+/// every 2 s a change showed in the light in steps of 2 s of the change. A
+/// count, not a period: at a low frame rate a period would take the other
+/// probes' turns.
+const CHANGE_LOCALS_PER_DEFAULT: u32 = 2;
+/// How long a probe captured during a change cross-fades from its previous
+/// cube into the new one (`ProbeManager::fades`).
+const CHANGE_BLEND: Duration = Duration::from_millis(500);
+/// Cube slots the probes give up while the environment changes (and in the
+/// round after it), so that the cross-fades have a free cube even where
+/// every slot is taken: the farthest probes kept fade out as a probe past
+/// the slots does. Two: at the paced rate a local capture ends about every
+/// 0.15 s, so about three cross-fades of 0.5 s run at once, one of them
+/// ending as the next begins.
+const CHANGE_SPARE_SLOTS: usize = 2;
+
+/// AURORA_PROBE_CHANGE_PACING=0: the probes as before during an environment
+/// change (a comparison with the same build).
+pub fn change_pacing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AURORA_PROBE_CHANGE_PACING").ok().is_none_or(|v| v.trim() != "0"))
+}"""
+
+[[patch]]
+id = "probe-change-pacing-target-field"
+why = "the cube a capture in progress goes into"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """struct Updating {
+    /// None: the default probe.
+    key: Option<Key>,
+    face: u32,
+}"""
+replace = """struct Updating {
+    /// None: the default probe.
+    key: Option<Key>,
+    face: u32,
+    // aurora-local-patch: probe-change-pacing-target-field
+    /// The free cube slot the capture goes into instead of the probe's own,
+    /// to cross-fade into it (`ProbeManager::fades`).
+    target: Option<u32>,
+}"""
+
+[[patch]]
+id = "probe-change-pacing-field"
+why = "whether the environment is changing, and the cross-fades"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """refresh_budget: f32,
+    last_scan: Option<Instant>,"""
+replace = """refresh_budget: f32,
+    // aurora-local-patch: probe-change-pacing-field
+    /// The environment is changing ([`Self::set_changing`]).
+    changing: bool,
+    /// The round of captures after a change is not done yet.
+    settling: bool,
+    /// Local probe captures since the default probe's last.
+    locals_since_default: u32,
+    /// Probes cross-fading from a previous cube: (its slot, since when).
+    /// The previous cube's slot stays taken until the fade ends.
+    fades: HashMap<Key, (u32, Instant)>,
+    last_scan: Option<Instant>,"""
+
+[[patch]]
+id = "probe-change-pacing-default"
+why = "no change at first"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """refresh_budget: 0.0,
+            last_scan: None,"""
+replace = """refresh_budget: 0.0,
+            // aurora-local-patch: probe-change-pacing-default
+            changing: false,
+            settling: false,
+            locals_since_default: 0,
+            fades: HashMap::new(),
+            last_scan: None,"""
+
+[[patch]]
+id = "probe-change-pacing-reset"
+why = "a reset forgets the cross-fades"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """pub fn reset(&mut self) {
+        self.probes.clear();"""
+replace = """pub fn reset(&mut self) {
+        self.probes.clear();
+        // aurora-local-patch: probe-change-pacing-reset
+        self.fades.clear();
+        self.settling = false;
+        self.locals_since_default = 0;"""
+
+[[patch]]
+id = "probe-change-pacing-set"
+why = "the change's start and end, the round after it, the free cube of a capture"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """pub fn refresh(&mut self) {
+        for p in self.probes.values_mut() {
+            p.last_update = None;
+        }
+        self.default_last = None;
+        self.updating = None;
+    }"""
+replace = """pub fn refresh(&mut self) {
+        for p in self.probes.values_mut() {
+            p.last_update = None;
+        }
+        self.default_last = None;
+        self.updating = None;
+    }
+
+    // aurora-local-patch: probe-change-pacing-set
+    /// Whether the environment is changing (a cross-fade of the sky), each
+    /// frame: while it does, the default probe is captured after every
+    /// [`CHANGE_LOCALS_PER_DEFAULT`] local captures, and the local probes
+    /// cross-fade into their new captures. When it ends, every probe is
+    /// captured once more, the default probe first then the closest
+    /// (`refresh`), still cross-fading: the captures made during the change
+    /// saw a sky between the two.
+    pub fn set_changing(&mut self, changing: bool) {
+        if self.changing && !changing {
+            self.refresh();
+            self.settling = true;
+        }
+        self.changing = changing;
+    }
+
+    /// The free cube slot a local probe's next capture goes into, to
+    /// cross-fade from the one it shows: during a change or the round after
+    /// it only, for a captured sphere probe (a box probe's weight is not its
+    /// fade), when a slot is free of every probe and fade.
+    fn fade_target(&self, k: Key) -> Option<u32> {
+        if !(self.changing || self.settling) {
+            return None;
+        }
+        self.probes.get(&k).filter(|p| p.kind >= 0.0 && p.complete && p.slot.is_some())?;
+        let mut used = vec![false; self.slots as usize];
+        let taken = self.probes.values().filter_map(|q| q.slot).chain(self.fades.values().map(|f| f.0));
+        for s in std::iter::once(0).chain(taken) {
+            if let Some(u) = used.get_mut(s as usize) {
+                *u = true;
+            }
+        }
+        used.iter().position(|u| !u).map(|s| s as u32)
+    }
+
+    /// How many probes the slots keep besides the default one: all of them
+    /// but [`CHANGE_SPARE_SLOTS`] while the environment changes and in the
+    /// round after it, when there are enough (more than twice as many).
+    fn keep(&self) -> usize {
+        let all = self.slots.saturating_sub(1) as usize;
+        if (self.changing || self.settling) && all > 2 * CHANGE_SPARE_SLOTS {
+            all - CHANGE_SPARE_SLOTS
+        } else {
+            all
+        }
+    }"""
+
+[[patch]]
+id = "probe-change-pacing-fades"
+why = "a fading probe's previous cube stays taken, and the cube a capture goes into"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """for k in order.iter().take(keep) {
+            if let Some(p) = self.probes.get_mut(k)
+                && p.slot.is_none()"""
+replace = """// aurora-local-patch: probe-change-pacing-fades
+        // (a cross-fade ends after CHANGE_BLEND, or when its probe lost its
+        // cube or its capture; its previous cube stays taken until then, as
+        // the cube a capture in progress goes into)
+        let probes = &self.probes;
+        self.fades.retain(|k, (old, at)| {
+            now.duration_since(*at) < CHANGE_BLEND && probes.get(k).is_some_and(|p| p.complete && p.slot.is_some_and(|s| s != *old))
+        });
+        let held = self.fades.values().map(|f| f.0).chain(self.updating.and_then(|u| u.target));
+        for s in held {
+            if let Some(u) = used.get_mut(s as usize) {
+                *u = true;
+            }
+        }
+        for k in order.iter().take(keep) {
+            if let Some(p) = self.probes.get_mut(k)
+                && p.slot.is_none()"""
+
+[[patch]]
+id = "probe-change-pacing-list"
+why = "a fading probe listed twice, its previous cube and its new one"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """list.push(ProbeGpu {
+                center_radius: [p.origin.x, p.origin.y, p.origin.z, p.radius],
+                params: [p.ambiance.max(sky_ambiance), 1.0, weight, p.kind],"""
+replace = """// aurora-local-patch: probe-change-pacing-list
+            // (a probe cross-fading from its previous cube is listed twice,
+            // the previous one at (1 - t) of its weight and the new one at
+            // t: the shaders sum the weighted probes and divide by their
+            // weights, so the pair is the mix of the two at the probe's
+            // weight; without room for both, the new one alone)
+            let fade = self
+                .fades
+                .get(k)
+                .filter(|_| list.len() + 1 < self.slots as usize)
+                .map(|&(old, at)| {
+                    (
+                        old,
+                        (now.duration_since(at).as_secs_f32() / CHANGE_BLEND.as_secs_f32()).clamp(0.0, 1.0),
+                    )
+                });
+            if let Some((old, t)) = fade {
+                list.push(ProbeGpu {
+                    center_radius: [p.origin.x, p.origin.y, p.origin.z, p.radius],
+                    params: [p.ambiance.max(sky_ambiance), 1.0, weight * (1.0 - t), p.kind],
+                    slot: [old, 0, 0, 0],
+                    box_inv: p.box_inv.to_cols_array_2d(),
+                });
+            }
+            let weight = fade.map_or(weight, |(_, t)| weight * t);
+            list.push(ProbeGpu {
+                center_radius: [p.origin.x, p.origin.y, p.origin.z, p.radius],
+                params: [p.ambiance.max(sky_ambiance), 1.0, weight, p.kind],"""
+
+[[patch]]
+id = "probe-change-pacing-settled"
+why = "the round after a change is done once no probe waits"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """self.refresh_budget = (self.refresh_budget + dt * REFRESH_FACES_PER_SEC).min(1.0);"""
+replace = """self.refresh_budget = (self.refresh_budget + dt * REFRESH_FACES_PER_SEC).min(1.0);
+        // aurora-local-patch: probe-change-pacing-settled
+        if !waiting {
+            self.settling = false;
+        }"""
+
+[[patch]]
+id = "probe-change-pacing-due"
+why = "the default probe after every two local captures during a change, the free cube of a local capture"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """let default_due = !self.default_complete || self.default_last.is_none_or(|t| now.duration_since(t) >= DEFAULT_PERIOD);
+            let candidate = order"""
+replace = """// aurora-local-patch: probe-change-pacing-due
+            // (whether the default probe is due is decided below, from the
+            // candidate: `probe-change-pacing-pick`)
+            let candidate = order"""
+
+[[patch]]
+id = "probe-change-pacing-pick"
+why = "the default probe after every two local captures during a change, the free cube of a local capture"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """let first_pass = candidate.is_some_and(|k| self.probes.get(&k).is_some_and(|p| !p.complete));
+            self.updating = if default_due && !(self.default_complete && first_pass) {
+                Some(Updating { key: None, face: 0 })
+            } else {
+                candidate.map(|k| Updating { key: Some(k), face: 0 })
+            };"""
+replace = """let first_pass = candidate.is_some_and(|k| self.probes.get(&k).is_some_and(|p| !p.complete));
+            // aurora-local-patch: probe-change-pacing-pick
+            // (during a change the default probe goes after every
+            // CHANGE_LOCALS_PER_DEFAULT local captures, or at once when no
+            // other probe is there)
+            let default_due = !self.default_complete
+                || self.default_last.is_none_or(|t| {
+                    if self.changing {
+                        self.locals_since_default >= CHANGE_LOCALS_PER_DEFAULT || candidate.is_none()
+                    } else {
+                        now.duration_since(t) >= DEFAULT_PERIOD
+                    }
+                });
+            self.updating = if default_due && !(self.default_complete && first_pass) {
+                Some(Updating {
+                    key: None,
+                    face: 0,
+                    target: None,
+                })
+            } else {
+                candidate.map(|k| Updating {
+                    key: Some(k),
+                    face: 0,
+                    target: self.fade_target(k),
+                })
+            };"""
+
+[[patch]]
+id = "probe-change-pacing-default-done"
+why = "the count of local captures starts again"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """if finish {
+                    self.default_complete = true;
+                    self.default_last = Some(now);
+                }"""
+replace = """if finish {
+                    self.default_complete = true;
+                    self.default_last = Some(now);
+                    self.locals_since_default = 0; // aurora-local-patch: probe-change-pacing-default-done
+                }"""
+
+[[patch]]
+id = "probe-change-pacing-local-done"
+why = "a local capture into a free cube starts its cross-fade"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """Some(p) if p.slot.is_some() => {
+                    let slot = p.slot.unwrap_or(0);
+                    if finish {
+                        p.complete = true;
+                        p.last_update = Some(now);
+                    }"""
+replace = """Some(p) if p.slot.is_some() => {
+                    // aurora-local-patch: probe-change-pacing-local-done
+                    // (into the free cube of `fade_target` when there is
+                    // one: the probe then cross-fades into it from the cube
+                    // it shows, which stays taken until then)
+                    let shown = p.slot.unwrap_or(0);
+                    let slot = u.target.unwrap_or(shown);
+                    if finish {
+                        let was_complete = p.complete;
+                        p.complete = true;
+                        p.last_update = Some(now);
+                        if slot != shown {
+                            p.slot = Some(slot);
+                            if was_complete {
+                                self.fades.insert(k, (shown, now));
+                            }
+                        }
+                        self.locals_since_default = self.locals_since_default.saturating_add(1);
+                    }"""
+
+[[patch]]
+id = "probe-change-pacing-keep"
+why = "two slots spared while the environment changes"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """let keep = self.slots.saturating_sub(1) as usize;
+        let mut used = vec![false; self.slots as usize];"""
+replace = """// aurora-local-patch: probe-change-pacing-keep
+        // (two fewer during a change: `keep`)
+        let keep = self.keep();
+        let mut used = vec![false; self.slots as usize];"""
+
+[[patch]]
+id = "probe-change-pacing-keep-capture"
+why = "the spared probes are not captured again"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """// (a probe fading out past the slots is not drawn again)
+        let keep = self.slots.saturating_sub(1) as usize;"""
+replace = """// (a probe fading out past the slots is not drawn again)
+        // aurora-local-patch: probe-change-pacing-keep-capture
+        let keep = self.keep();"""
+
+[[patch]]
+id = "probe-change-pacing-edge"
+why = "the field's edge stays where all the slots put it"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """let full = (keep > 0 && live.len() > keep).then(|| self.probes[live[keep - 1]].distance);"""
+replace = """// aurora-local-patch: probe-change-pacing-edge
+        // (from every slot, also during a change: the probes spared then
+        // fade out on their own, the edge and the others' weights stay)
+        let all = self.slots.saturating_sub(1) as usize;
+        let full = (all > 0 && live.len() > all).then(|| self.probes[live[all - 1]].distance);"""
+
+[[patch]]
+id = "probe-change-pacing-tests"
+why = "the pacing during a change, the turns of the other probes, the cross-fades, the end"
+paths = ["crates/aurora-viewer/src/scene/probes.rs"]
+op = "literal"
+find = """fn cell_probe(origin: Vec3, radius: f32, complete: bool) -> Probe {"""
+replace = """// aurora-local-patch: probe-change-pacing-tests
+    /// The captures finished over `frames` frames of `dt` seconds: (time,
+    /// slot, origin), with `changing` set before each frame.
+    fn finished_over(m: &mut ProbeManager, order: &[Key], start: Instant, frames: u32, dt: f32, changing: bool) -> Vec<(f32, u32, Vec3)> {
+        let mut done = Vec::new();
+        for i in 1..=frames {
+            let t = i as f32 * dt;
+            m.set_changing(changing);
+            if let Some(c) = m.next_capture(order, Vec3::ZERO, start + Duration::from_secs_f32(t), dt)
+                && c.finish
+            {
+                done.push((t, c.slot, c.origin));
+            }
+        }
+        done
+    }
+
+    /// A default probe and four local probes, all captured at `start`.
+    fn captured_field(start: Instant) -> (ProbeManager, Vec<Key>) {
+        let mut m = ProbeManager {
+            default_complete: true,
+            default_last: Some(start),
+            ..Default::default()
+        };
+        for x in 0..4 {
+            let mut p = cell_probe(Vec3::new(x as f32 * 16.0, 0.0, 0.0), 8.0, true);
+            p.slot = Some(1 + x as u32);
+            p.last_update = Some(start);
+            p.distance = x as f32 * 16.0;
+            m.probes.insert(cell_key(x), p);
+        }
+        (m, (0..4).map(cell_key).collect())
+    }
+
+    #[test]
+    fn during_a_change_the_default_probe_follows_it_and_the_others_keep_turns() {
+        let start = Instant::now();
+        for fps in [30.0, 50.0, 144.0, 240.0] {
+            let (mut m, order) = captured_field(start);
+            let dt = 1.0 / fps;
+            let frames = (4.0 * fps) as u32;
+            let done = finished_over(&mut m, &order, start, frames, dt, true);
+            let defaults: Vec<f32> = done.iter().filter(|d| d.1 == 0).map(|d| d.0).collect();
+            let locals = done.iter().filter(|d| d.1 != 0).count();
+            // the default probe after every two local captures (18 faces,
+            // a face a frame up to 60 fps, then at the paced rate's frames:
+            // 0.3 to 0.4 s, 0.6 s at 30 fps), not every 2 s
+            let per_face = (1.0 / (dt * REFRESH_FACES_PER_SEC)).ceil().max(1.0) * dt;
+            let gap = 18.0 * per_face + 3.0 * dt;
+            assert!(defaults.len() >= 5, "{fps} fps: {defaults:?}");
+            assert!(defaults.windows(2).all(|w| w[1] - w[0] <= gap), "{fps} fps: {defaults:?}");
+            // and the local probes keep two thirds of the captures
+            assert!(
+                locals + 2 >= 2 * defaults.len(),
+                "{fps} fps: {locals} locals, {} defaults",
+                defaults.len()
+            );
+            // with the face budget of no change
+            let mut faces = 0;
+            let (mut n, order) = captured_field(start);
+            for i in 1..=frames {
+                n.set_changing(true);
+                let now = start + Duration::from_secs_f32(i as f32 * dt);
+                faces += u32::from(n.next_capture(&order, Vec3::ZERO, now, dt).is_some());
+            }
+            assert!(faces <= (4.0 * fps.min(60.0)) as u32 + 1, "{fps} fps: {faces} faces");
+        }
+    }
+
+    #[test]
+    fn without_a_change_the_probes_are_paced_as_before() {
+        let start = Instant::now();
+        let (mut m, order) = captured_field(start);
+        let done = finished_over(&mut m, &order, start, 6 * 120, 1.0 / 120.0, false);
+        let defaults: Vec<f32> = done.iter().filter(|d| d.1 == 0).map(|d| d.0).collect();
+        // every 2 s (RenderDefaultProbeUpdatePeriod), the rest to the others,
+        // each in its own cube
+        assert!(defaults.windows(2).all(|w| w[1] - w[0] >= 2.0), "{defaults:?}");
+        assert!((2..=3).contains(&defaults.len()), "{defaults:?}");
+        assert!(done.iter().all(|d| d.1 == 0 || d.1 == 1 + (d.2.x / 16.0) as u32), "{done:?}");
+        assert!(m.fades.is_empty());
+    }
+
+    #[test]
+    fn a_change_that_ends_captures_every_probe_again_default_first() {
+        let start = Instant::now();
+        let (mut m, order) = captured_field(start);
+        let dt = 1.0 / 60.0;
+        finished_over(&mut m, &order, start, 120, dt, true);
+        // it ends: every probe is due, a face a frame, the default probe
+        // first, then the closest
+        let later = start + Duration::from_secs(2);
+        let done = finished_over(&mut m, &order, later, 5 * 6, dt, false);
+        let firsts: Vec<(bool, f32)> = done.iter().map(|d| (d.1 == 0, d.2.x)).collect();
+        assert_eq!(firsts, vec![(true, 0.0), (false, 0.0), (false, 16.0), (false, 32.0), (false, 48.0)]);
+        // then the paced refresh as before: no default capture for 2 s, and
+        // no more cross-fades
+        let after = later + Duration::from_secs_f32(5.0 * 6.0 * dt);
+        let fades = m.fades.len();
+        let next = finished_over(&mut m, &order, after, 90, dt, false);
+        assert!(next.iter().all(|d| d.1 != 0), "{next:?}");
+        assert_eq!(m.fades.len(), fades, "no new cross-fade once the round is done");
+        assert!(!m.settling);
+    }
+
+    /// Probe entries of a frame's list at `origin`: (slot, weight).
+    fn entries_at(frame: &aurora_render::ProbeFrame, origin: Vec3) -> Vec<(u32, f32)> {
+        frame.probes[1..]
+            .iter()
+            .filter(|g| Vec3::new(g.center_radius[0], g.center_radius[1], g.center_radius[2]) == origin)
+            .map(|g| (g.slot[0], g.params[2]))
+            .collect()
+    }
+
+    #[test]
+    fn during_a_change_a_probe_cross_fades_into_its_new_capture() {
+        let world = World::new(Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        let scene = Scene::new(std::path::PathBuf::new(), world.avatar_lib.clone());
+        let start = Instant::now();
+        for slots in [8, 3] {
+            let mut m = ProbeManager {
+                slots,
+                default_complete: true,
+                default_last: Some(start),
+                // (no scan of the empty scene during the test)
+                last_scan: Some(start + Duration::from_secs(1000)),
+                last_frame: Some(start),
+                ..Default::default()
+            };
+            let mut auto = cell_probe(Vec3::ZERO, 8.0, true);
+            auto.last_update = Some(start);
+            m.probes.insert(cell_key(0), auto);
+            let boxed = Vec3::new(100.0, 0.0, 0.0);
+            let mut b = cell_probe(boxed, 1.0, true);
+            b.kind = -1.0;
+            b.slot = Some(2);
+            b.last_update = Some(start);
+            m.probes.insert(Key::Object(Uuid::from_u128(1)), b);
+            let dt = 1.0 / 60.0;
+            let mut twins = 0;
+            let mut last = Vec::new();
+            for i in 1..=240u32 {
+                // the change for 2 s, then 2 s without
+                m.set_changing(i <= 120);
+                let now = start + Duration::from_secs_f32(i as f32 * dt);
+                let frame = m.update(&scene, &world, Vec3::ZERO, 0.0, now);
+                let at = entries_at(&frame, Vec3::ZERO);
+                // the pair weighs what the probe weighs alone: 1
+                let sum: f32 = at.iter().map(|e| e.1).sum();
+                assert!((sum - 1.0).abs() < 1e-5 && at.len() <= 2, "{slots} slots, frame {i}: {at:?}");
+                if at.len() == 2 {
+                    twins += 1;
+                    assert_ne!(at[0].0, at[1].0);
+                }
+                // a box probe never cross-fades
+                assert_eq!(entries_at(&frame, boxed).len(), 1, "{slots} slots, frame {i}");
+                // no cube is listed for two probes
+                let mut used: Vec<u32> = frame.probes[1..].iter().map(|g| g.slot[0]).collect();
+                used.sort_unstable();
+                assert!(used.windows(2).all(|w| w[0] != w[1]), "{slots} slots, frame {i}: {used:?}");
+                last = at;
+            }
+            if slots == 8 {
+                assert!(twins >= 30, "{twins} frames with a cross-fade");
+            } else {
+                // no free cube: the captures replace the cube in place
+                assert_eq!(twins, 0);
+            }
+            // well after the change, one cube again and no cube held
+            assert_eq!(last.len(), 1, "{last:?}");
+            assert!(m.fades.is_empty() && !m.settling);
+        }
+    }
+
+    #[test]
+    fn where_every_slot_is_taken_a_change_spares_two_without_a_step() {
+        let world = World::new(Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        let scene = Scene::new(std::path::PathBuf::new(), world.avatar_lib.clone());
+        let start = Instant::now();
+        let mut m = ProbeManager {
+            slots: 8,
+            default_complete: true,
+            default_last: Some(start),
+            last_scan: Some(start + Duration::from_secs(1000)),
+            last_frame: Some(start),
+            ..Default::default()
+        };
+        // seven probes for the seven slots past the default's: none free
+        let origins: Vec<Vec3> = (0..7).map(|x| Vec3::new(x as f32 * 12.0, 0.0, 0.0)).collect();
+        for (x, o) in origins.iter().enumerate() {
+            let mut p = cell_probe(*o, 8.0, true);
+            p.slot = Some(1 + x as u32);
+            p.last_update = Some(start);
+            m.probes.insert(cell_key(x as i32), p);
+        }
+        let dt = 1.0 / 60.0;
+        let weight = |frame: &aurora_render::ProbeFrame, o: Vec3| entries_at(frame, o).iter().map(|e| e.1).sum::<f32>();
+        let mut before: Option<Vec<f32>> = None;
+        let mut twins = 0;
+        let mut spared = 0;
+        for i in 1..=600u32 {
+            // the change for 4 s, then 6 s without
+            m.set_changing(i <= 240);
+            let now = start + Duration::from_secs_f32(i as f32 * dt);
+            let frame = m.update(&scene, &world, Vec3::ZERO, 0.0, now);
+            let w: Vec<f32> = origins.iter().map(|o| weight(&frame, *o)).collect();
+            // no probe's weight jumps: the spared ones fade out and back in
+            if let Some(b) = &before {
+                for (k, (x, y)) in b.iter().zip(&w).enumerate() {
+                    assert!((x - y).abs() <= 0.08, "frame {i}, probe {k}: {x} -> {y}");
+                }
+            }
+            twins += usize::from(origins.iter().any(|o| entries_at(&frame, *o).len() == 2));
+            spared += usize::from(w.iter().filter(|x| **x == 0.0).count() >= 2);
+            before = Some(w);
+        }
+        // during the change the farthest probes gave their cubes up, and the
+        // others cross-faded into theirs
+        assert!(spared >= 60, "{spared} frames with two probes spared");
+        assert!(twins >= 30, "{twins} frames with a cross-fade");
+        // well after it, every probe is back at its full weight
+        let last = before.unwrap_or_default();
+        assert!(last.iter().all(|x| (x - 1.0).abs() < 1e-3), "{last:?}");
+        assert!(m.fades.is_empty() && !m.settling && m.keep() == 7);
+    }
+
+    fn cell_probe(origin: Vec3, radius: f32, complete: bool) -> Probe {"""
+
+[[patch]]
+id = "probe-change-pacing-selector"
+why = "whether the environment is cross-fading"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = """pub fn has_local(&self) -> bool {
+        self.local.is_some()
+    }"""
+replace = """pub fn has_local(&self) -> bool {
+        self.local.is_some()
+    }
+
+    // aurora-local-patch: probe-change-pacing-selector
+    /// The shown environment is cross-fading into the selected one (its
+    /// textures included): what the reflection probes follow more closely.
+    pub fn changing(&self) -> bool {
+        self.fade.is_some()
+    }"""
+
+[[patch]]
+id = "probe-change-pacing-app"
+why = "the probes told each frame whether the environment changes"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """self.probes.range = self.settings.probe_range.min(self.settings.draw_distance);"""
+replace = """self.probes.range = self.settings.probe_range.min(self.settings.draw_distance);
+            // aurora-local-patch: probe-change-pacing-app
+            self.probes
+                .set_changing(self.world.eep.changing() && crate::scene::probes::change_pacing_enabled());"""
+
+[[patch]]
+id = "probe-change-pacing-overrides"
+why = "the probe, mirror and water reflection settings for a test launch"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "apply_test_overrides"
+find = """if let Ok(v) = std::env::var("AURORA_SSR") {
+        settings.ssr = v != "0";
+    }"""
+replace = """if let Ok(v) = std::env::var("AURORA_SSR") {
+        settings.ssr = v != "0";
+    }
+    // aurora-local-patch: probe-change-pacing-overrides
+    // AURORA_PROBES=<level>[,<count>[,<range>]]
+    if let Ok(v) = std::env::var("AURORA_PROBES") {
+        let mut parts = v.split(',').map(str::trim);
+        if let Some(level) = parts.next().and_then(|p| p.parse::<u8>().ok()) {
+            settings.reflection_probes = level.min(3);
+        }
+        if let Some(count) = parts.next().and_then(|p| p.parse::<u32>().ok()) {
+            settings.probe_count = count.clamp(8, 256);
+        }
+        if let Some(range) = parts.next().and_then(|p| p.parse::<f32>().ok()).filter(|r| r.is_finite()) {
+            settings.probe_range = range.clamp(32.0, crate::settings::DRAW_DISTANCE_MAX);
+        }
+    }
+    if let Some(v) = std::env::var("AURORA_MIRRORS").ok().and_then(|v| v.trim().parse::<u8>().ok()) {
+        settings.mirrors = v.min(4);
+    }
+    if let Some(v) = std::env::var("AURORA_WATER_REFLECTIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+    {
+        settings.water_reflections = v.min(4);
+    }"""
+
+[[patch]]
+id = "probe-change-pacing-doc"
+why = "the test variables in the table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = """| `AURORA_SSR=0\\|1` | Overrides the screen-space reflections |"""
+replace = """| `AURORA_SSR=0\\|1` | Overrides the screen-space reflections |
+| `AURORA_PROBES=<level>[,<count>[,<range>]]` | Overrides the reflection probe level (0–3), cube slots (8–256) and range (m) <!-- // aurora-local-patch: probe-change-pacing-doc --> |
+| `AURORA_MIRRORS=0..4`, `AURORA_WATER_REFLECTIONS=0..4` | Override the mirrors and the water reflections |
+| `AURORA_PROBE_CHANGE_PACING=0` | Reflection probes as before during an environment change |"""
+
+[[patch]]
+id = "probe-change-pacing-details"
+why = "what the pacing variable compares"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = """`AURORA_AA`: 0 none, 1 FXAA, 2 to 4 MSAA 2x / 4x / 8x, 5 TAA, 6 SMAA, 7 AMD"""
+replace = """<!-- // aurora-local-patch: probe-change-pacing-details -->
+`AURORA_PROBE_CHANGE_PACING=0`: during an environment change (a sky picked
+in World > Environment, `AURORA_DEMO_SKY_CHANGE`) the default reflection
+probe is captured again after every two local probe captures instead of
+every 2 s, each local probe cross-fades over 0.5 s from its previous cube
+into its new capture (when a cube slot is free), and every probe is
+captured once more when the change ends; with `0` the probes are as
+before. With a capture every few frames, compare the light of the surfaces
+the probes light (open ground, walls, glossy floors): before, it moves in
+steps every 2 s (default probe) and at each local capture; after, in small
+steps or ramps.
+`AURORA_PROBES`, `AURORA_MIRRORS` and `AURORA_WATER_REFLECTIONS` replace
+those settings for the launch, after the graphics level, like the other
+overrides of the table; `AURORA_PROBES` takes the level alone, or the level
+and the cube slots, or all three (the slots are as many as the device
+holds, the range within the draw distance).
+
+`AURORA_AA`: 0 none, 1 FXAA, 2 to 4 MSAA 2x / 4x / 8x, 5 TAA, 6 SMAA, 7 AMD"""

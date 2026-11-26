@@ -1,0 +1,229 @@
+# Small hardening patches picked from an independent security audit of a Windows
+# build (commit 6407f10), each checked again on this tree, on Linux. Findings
+# that did not hold on this tree were declined and are not patched here.
+#
+# Pairs: the *-test ids edit upstream's own tests to match the behaviour they
+# go with. Skip a behaviour patch and its test patch together, or the test fails.
+
+[[patch]]
+id = "hop-no-grid-switch"
+why = "A hop:// or x-grid-location-info:// link may move the next login, and its password hash, only to one of Linden's two grids, after upstream's question. Any other grid (saved, typed or unknown, even the one chosen) is ignored without a question: the password goes to the grid one logs in to, and https would not help since the server is still the link's. Since 35-sl-grids-only nothing picks another grid and no login goes to one; this patch still matters, because upstream's grid_switch would ask to switch to any grid, and offer Linden's own grid ids (util.aditi.lindenlab.com) as a custom address that the login lock would refuse. Upstream's grid_switch then only sees links without a grid."
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "open_external_url"
+find = '''
+match grid_switch(&self.settings, location.grid.as_deref()) {
+'''
+replace = '''
+// aurora-local-patch: hop-no-grid-switch
+                if let Some(authority) = location.grid.as_deref() {
+                    let Some(login) = linden_login(authority) else {
+                        log::warn!("startup links: the link names a grid other than Second Life's, ignored");
+                        return;
+                    };
+                    if self.settings.login_uri() == login {
+                        log::info!("startup links: login start location set");
+                        self.login_form.start_slurl = Some(location);
+                    } else {
+                        log::info!("startup links: the link names the other Second Life grid, asking before switching");
+                        self.external.grid_ask = Some(GridAsk {
+                            location,
+                            login: login.to_owned(),
+                            name: None,
+                        });
+                    }
+                    return;
+                }
+                match grid_switch(&self.settings, location.grid.as_deref()) {'''
+
+[[patch]]
+id = "hop-no-grid-switch-rule"
+why = "Goes with hop-no-grid-switch: which of Linden's grids a link's authority names. A host in the domain of that grid's login server, as the Legacy Viewer's grid ids (util.aditi.lindenlab.com) are, so the hosts come from the login constants instead of being written twice."
+paths = ["crates/aurora-viewer/src/**/external_links.rs"]
+op = "regex"
+pattern = '^impl ExternalLinks \{$'
+replace = '''// aurora-local-patch: hop-no-grid-switch-rule
+/// The login address of the Second Life grid `authority` (the `host:port` of
+/// a `hop://` or `x-grid-location-info://` link) names, None for any other
+/// grid. The port does not matter: the login goes to Linden's own address.
+pub(super) fn linden_login(authority: &str) -> Option<&'static str> {
+    let authority = crate::grids::authority(authority)?;
+    let host = authority.split(':').next()?.trim_end_matches('.');
+    [aurora_net::login::SL_MAIN_GRID, aurora_net::login::SL_BETA_GRID]
+        .into_iter()
+        .find(|login| {
+            // login.aditi.lindenlab.com: aditi.lindenlab.com and its subdomains
+            crate::grids::authority(login)
+                .and_then(|server| server.split_once('.').map(|(_, domain)| domain.to_owned()))
+                .is_some_and(|domain| host == domain || host.strip_suffix(domain.as_str()).is_some_and(|sub| sub.ends_with('.')))
+        })
+}
+
+impl ExternalLinks {'''
+
+[[patch]]
+id = "hop-no-grid-switch-apply"
+why = "Goes with hop-no-grid-switch: only Linden's grids are asked for, so 'Switch grid' picks that grid rather than a custom address holding its URI. As a custom grid it would lose its name cache, chat log folder, profile and marketplace pages, and overwrite the address typed by hand. The refusal of any other grid is kept although the login lock (sl-grids-only-login) would refuse it too: the form then stays on its grid instead of showing one it cannot log in to."
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "grid_link_question"
+find = '''
+self.settings.custom_login_uri = ask.login;
+self.settings.grid = crate::settings::GridChoice::Custom;
+'''
+replace = '''
+// aurora-local-patch: hop-no-grid-switch-apply
+            let grid = crate::login_accounts::grid(&ask.login);
+            if grid == crate::settings::GridChoice::Custom {
+                log::warn!("startup links: not a Second Life grid, switch refused");
+                return;
+            }
+            self.settings.grid = grid;'''
+
+[[patch]]
+id = "hop-no-grid-switch-test"
+why = "Checks linden_login (hop-no-grid-switch-rule): Linden's grid ids and login hosts are recognised whatever the case, port or final dot; look-alikes and other hosts are not; each answer maps to its grid choice."
+paths = ["crates/aurora-viewer/src/**/external_links.rs"]
+op = "regex"
+pattern = '^    #\[test\]\r?\n    fn a_link_without_a_grid_changes_only_the_start_location\(\) \{'
+replace = '''    // aurora-local-patch: hop-no-grid-switch-test
+    #[test]
+    fn only_the_second_life_grids_are_reached_by_links() {
+        use crate::settings::GridChoice;
+        use aurora_net::login::{SL_BETA_GRID, SL_MAIN_GRID};
+        for (authority, login) in [
+            ("util.agni.lindenlab.com", Some(SL_MAIN_GRID)),
+            ("login.agni.lindenlab.com:443", Some(SL_MAIN_GRID)),
+            ("agni.lindenlab.com", Some(SL_MAIN_GRID)),
+            ("UTIL.ADITI.LINDENLAB.COM.", Some(SL_BETA_GRID)),
+            ("util.aditi.lindenlab.com:12043", Some(SL_BETA_GRID)),
+            ("lindenlab.com", None),
+            ("evilagni.lindenlab.com", None),
+            ("agni.lindenlab.com.grid.example", None),
+            ("grid.example:8002", None),
+            ("", None),
+        ] {
+            assert_eq!(linden_login(authority), login, "{authority}");
+        }
+        assert_eq!(crate::login_accounts::grid(SL_MAIN_GRID), GridChoice::SecondLife);
+        assert_eq!(crate::login_accounts::grid(SL_BETA_GRID), GridChoice::SecondLifeBeta);
+    }
+
+    #[test]
+    fn a_link_without_a_grid_changes_only_the_start_location() {'''
+
+[[patch]]
+id = "media-filter-hostless"
+why = "Upstream (#2484) now asks about data: under 'data' and refuses javascript:, file:, blob: and about: pages outright, but a special-scheme URL with an empty authority (http:///site.example, https:///site.example) still falls through to the scheme: it is asked about as 'http', and a worn item or a list refusal of that site does not apply, while the browser and the type probe both load site.example. Read its host as the browser does (WHATWG, reqwest::Url) before falling back to the scheme."
+paths = ["crates/aurora-viewer/src/**/filter.rs"]
+op = "literal"
+fn = "target"
+find = '''
+None => match scheme_of(url) {
+    Some(scheme) if scheme != "about" => Target::Site(scheme),
+    _ => Target::Blank,
+},
+'''
+replace = '''
+// aurora-local-patch: media-filter-hostless
+        None => match (
+            reqwest::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().filter(|h| !h.is_empty()).map(str::to_ascii_lowercase)),
+            scheme_of(url),
+        ) {
+            (Some(host), _) => Target::Site(host),
+            (None, Some(scheme)) if scheme != "about" => Target::Site(scheme),
+            _ => Target::Blank,
+        },'''
+
+[[patch]]
+id = "media-filter-hostless-remember"
+why = "Goes with media-filter-hostless. The list reads an entry without :// as a domain, so 'this address' on a data: URL would never match and, once reloaded, would cover every data: URL. Such an answer holds for the session."
+paths = ["crates/aurora-viewer/src/**/filter.rs"]
+op = "literal"
+fn = "answer"
+find = '''
+Remember::Url => self.set(q.url.clone(), action),
+'''
+replace = '''
+// aurora-local-patch: media-filter-hostless-remember
+            Remember::Url if !q.url.contains("://") => {
+                self.session.insert(q.url.clone(), action);
+            }
+            Remember::Url => self.set(q.url.clone(), action),'''
+
+[[patch]]
+id = "media-filter-hostless-test"
+why = "Checks the rules media-filter-hostless and media-filter-hostless-remember add on top of upstream's: an empty-authority URL is asked about, refused and trusted as its real site, and a data: answer is remembered correctly. Upstream's own tests cover data:, about:blank and the refused schemes."
+paths = ["crates/aurora-viewer/src/**/filter.rs"]
+op = "literal"
+fn = "an_unknown_site_is_asked_about_once"
+find = '''
+assert_eq!(f.questions.len(), 2);
+'''
+replace = '''
+assert_eq!(f.questions.len(), 2);
+        // aurora-local-patch: media-filter-hostless-test
+        let mut g = MediaFilter::default();
+        for (url, site) in [
+            ("data:text/html,x", "data"),
+            ("DATA:text/html,y", "data"),
+            ("http:///hidden.example/x", "hidden.example"),
+            ("HTTPS:///Hidden.Example/", "hidden.example"),
+        ] {
+            assert_eq!(g.check(url, Source::PrimMedia), Verdict::Ask, "{url}");
+            assert_eq!(g.questions.back().map(|q| q.domain.as_str()), Some(site), "{url}");
+        }
+        // our own worn items stay unasked; the list's refusals still hold
+        assert_eq!(g.check_trusted("data:text/html,z", Source::PrimMedia), Verdict::Allow);
+        g.apply(Edit::Set("denied.example".into(), Action::Deny));
+        assert_eq!(g.check("http:///denied.example/x", Source::ParcelMedia), Verdict::Deny);
+        assert_eq!(g.check_trusted("https:///denied.example/", Source::PrimMedia), Verdict::Deny);
+        // each answer works: this address (the session), then the whole scheme
+        g.answer("data:text/html,x", true, Remember::Url);
+        assert_eq!(g.check("data:text/html,x", Source::PrimMedia), Verdict::Allow);
+        assert!(g.rules.iter().all(|r| r.pattern != "data:text/html,x"));
+        assert_eq!(g.check("data:text/html,q", Source::PrimMedia), Verdict::Ask);
+        g.answer("data:text/html,q", false, Remember::Domain);
+        assert_eq!(g.check("data:text/html,q", Source::PrimMedia), Verdict::Deny);
+        assert_eq!(pattern_of("data").as_deref(), Some("data"), "the rule survives a reload");'''
+
+[[patch]]
+id = "link-preview-no-referer"
+why = "The module says no referrer is sent, but reqwest adds Referer on redirect hops unless told not to. This client follows redirects, so a shortened or tracking hop reveals the previous address to the next host."
+paths = ["crates/aurora-viewer/src/**/link_preview.rs"]
+op = "literal"
+fn = "configure"
+find = '.redirect(policy),'
+replace = '''.redirect(policy)
+            .referer(false), // aurora-local-patch: link-preview-no-referer'''
+
+[[patch]]
+id = "link-preview-no-referer-test"
+why = "Checks that the client built by link_preview has the Referer header off, without a socket so that a firewall cannot hide the result. reqwest's Debug names the setting only when on, as the second assertion shows."
+paths = ["crates/aurora-viewer/src/**/link_preview.rs"]
+op = "regex"
+pattern = '^    #\[test\]\r?\n    fn demo_links_show_each_state\(\) \{'
+replace = '''    // aurora-local-patch: link-preview-no-referer-test
+    #[test]
+    fn the_client_sends_no_referer() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = rt.enter();
+        for trusted_only in [false, true] {
+            let debug = format!("{:?}", client(trusted_only).unwrap());
+            assert!(!debug.contains("referer"), "{debug}");
+        }
+        assert!(format!("{:?}", reqwest::Client::new()).contains("referer"));
+    }
+
+    #[test]
+    fn demo_links_show_each_state() {'''
+
+[[patch]]
+id = "shm-create-exclusive"
+why = "After the preemptive unlink the object must be a new one of ours. Without O_EXCL a segment another account placed under the predictable name would be reused; fs.protected_regular blocks that by default on Debian, this holds without it. SLPlugin opens with O_RDWR alone (LLPluginSharedMemory::attach), so it still attaches."
+paths = ["crates/aurora-media/src/**/*.rs"]
+op = "literal"
+find = 'libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600);'
+replace = 'libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600); // aurora-local-patch: shm-create-exclusive'

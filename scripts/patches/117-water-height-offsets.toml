@@ -1,0 +1,1451 @@
+# Water heights: a wider Flotation height for swimming, a Surface swimming
+# height, and a Water walking height; water walking on submerged objects.
+#
+# Movement window (Swimming section): "Flotation height" (the swim's
+# `float_height`, upstream's) now goes from -1.00 to +1.00 m instead of
+# ±0.50, and a new "Water walking height" slider sits right under it, in the
+# same style, from -1.00 to +1.00 m in 1 cm steps, 0 by default, usable while
+# "Walk / run on water" is on. Both are REAL positions: the worn helper
+# script holds the body there with its move-to-target motor, so the region
+# and everyone else see the avatar at that height. Both are kept with the
+# other movement preferences of the avatar (settings `movements`), bounded
+# on load (Preferences::sanitize), and an old settings file without the new
+# field loads it as 0. The AO window's copy of the flotation slider takes
+# the same range.
+#
+# Flotation height. The script already takes the offset as it comes (modes
+# 3 and 6, no clamp of its own); only the viewer's command check widens
+# (Motion::valid: ±1 m for the surface and underwater motors, and the
+# surface-return goal, which is the offset minus the flotation depth, up to
+# +1 m). Checked at ±1 m (1.7 m avatar, flotation depth 0.45 m):
+# - +1: the body rests 0.55 m above the water line. It stays "in the water"
+#   while below the water line + 0.45 + the rest height (1.0 m), so the
+#   0.45 m gap of upstream holds and resting there does not flicker between
+#   swimming and not swimming. Getting in still needs the body below the
+#   water line, as upstream; climbing out, the exit flight, the "deep
+#   enough" rule (the water depth, not the offset) and the surface-reached
+#   test (±0.18 m of the goal) are unchanged.
+# - -1: the body rests 1.45 m under the water line, still in the surface
+#   state (the dive threshold sits 0.42 m below the rest height, the
+#   return 0.18 m). Upstream's dive goal (-1.8 m for this avatar) is then
+#   too close: reached, the body would sit right on the Submerged-to-Surface
+#   threshold and bounce back. The dive goal is now at least 0.6 m below the
+#   rest height (unchanged within upstream's ±0.5). In water shallower than
+#   the rest depth the body simply stands on the bed, still swimming.
+# - The free camera keeps a swim it pauses while the body is within reach
+#   of the water; that lower bound now follows a negative offset, so the
+#   deepest rest heights keep it too.
+# - Moving the slider keeps the older (shallower) dive threshold until the
+#   body reaches the new height, as upstream (settled_float_height).
+#
+# Water walking height. The bridge command already carries, for water
+# walking (mode 13), a field the script uses only for this target: the
+# avatar height, of which it holds the body's centre half above the water
+# level. The viewer now sends there the height plus twice the offset
+# (Motion::water_walk_support), so the body is held at the water level +
+# half the avatar's height + the offset, during the walk and the jump. The
+# worn script is NOT changed (same text, same version, nothing reinstalled);
+# the viewer's check of that field widens by the offset's range. The
+# viewer's own rules (water_walk.rs) count from the same target: the catch
+# band (released above target + 0.45 m), the jump start (within 0.3 m), its
+# rise and landing; the walk, run and crouch speeds are unchanged. The
+# release at the shore is the script's and the viewer's water-over-ground
+# test, which does not depend on the offset (a raised avatar drops by the
+# offset when it walks out onto the shore). A negative offset is wading,
+# never swimming: the two modes stay exclusive (set_water_mode) and water
+# walking still decides first. Where the water is shallower than a lowered
+# body, the body stands on the bed: the viewer's rules then count from where
+# it stands, so the support keeps it instead of handing it to the
+# simulator's own walking while over water (a jump there rises less, by the
+# missing depth). The water surface swell (water_float.rs) still applies
+# only within half the avatar's height + 0.5 m of the water line: above
+# about +0.5 m of Water walking height, or below about -0.9 m of Flotation
+# height, it rests (visual only).
+#
+# Surface swimming height. A third slider, "Surface swimming height", right
+# under "Flotation height" (Movement window and the AO window's copy), -1.00
+# to +1.00 m in 1 cm steps, 0 by default, kept and bounded like the others.
+# The AO plays one animation floating at rest and another swimming along, and
+# one height does not suit both. Upstream holds the same height either way:
+# the surface motor (mode 3) aims at the water line - the flotation depth +
+# the flotation height, moving or not. The new value is an OFFSET added to
+# the flotation height while swimming along the surface (forward, back or
+# sideways, the AO's swim stroke condition, in the surface state, with no
+# dive or surface return under way); an absolute height would move every
+# avatar to 0 m while swimming at its default. The sum stays within ±1 m (the
+# command's bound, no wider range for the script). At rest, under water
+# (mode 6), diving and returning to the surface (modes 7 and 8), the
+# flotation height applies as before. It travels in the field the surface
+# motor already reads: the worn script is NOT changed. The script's motor
+# glides to each new height (move-to-target, 0.2 s, critically damped), but
+# the viewer resends at most twice a second, so a step of up to 2 m would
+# lurch: the offset comes in and goes out at 1 m/s (SURFACE_SWIM_EASE), and
+# snaps out when the body leaves the surface. The thresholds count from the
+# height in force: the "settled" test, the dive threshold (the lower of the
+# settled and the new height until the body gets there, as upstream for the
+# slider), the exit rule above the water line (the higher of the two), the
+# dive goal (at least 0.6 m below the height in force) and the free camera's
+# lower bound (the lower of the two heights). Checked with the body half a
+# second behind the sent height (1.7 m avatar, 0.45 m deep): flotation -1
+# with +1 swims at the water line - 0.45 m, rests at -1.45 m; the dive
+# threshold stays at -1.87 m while rising and follows 0.42 m under the eased
+# height while sinking; flotation +1 with -1 rests at +0.55 m and swims at
+# -0.45 m, its exit limit stays at +1.0 m until the body settles; neither
+# leaves the surface state. With 0 the sent value is the flotation height
+# exactly, every frame.
+#
+# Water walking on submerged objects. With "Walk / run on water" on, each
+# frame the scene looks for the highest solid top under the body (five rays
+# down from its centre over its footprint, upward-facing faces only, as the
+# cannonball check looks: `Scene::water_walk_top`; `movement_solid`, so
+# phantom objects, attachments, rigged meshes and HUDs never count). When
+# that top lies between the held feet (the water + Water walking height,
+# 5 cm of tolerance under it; a little above the water when the feet are
+# held higher) and 0.2 m above the water (`top_band`), the avatar stands and
+# walks on it: the water walk lets go of the body (no motor command, as when
+# it rises above its catch band) and the region's own walking holds it on
+# the object, a REAL position everyone sees. Hysteresis: the top must be
+# seen 0.1 s before the walk lets go, the band widens by 0.1 m while
+# standing on it, and it must be missed 0.15 s before the walk catches the
+# body again (stepping off over open water: the body drops to the held
+# height and is caught by the usual catch band). Only over open water (or a
+# top outside the band) is the body held at the target. A jump under way
+# keeps its arc. The worn script is NOT changed: the walk only sends, or
+# stops sending, the commands it already sends. The probe costs five ray
+# tests a frame, only with water walking on and water under the avatar.
+#
+# Aurora's own design: the Legacy Viewer has no equivalent.
+#
+# Tests: movement/water_walk.rs (a submerged top carries the avatar after
+# a moment, a missed frame does not flicker, stepping off catches it again,
+# tops outside the band and open water keep the hold, the band),
+# scene/picking.rs (the probe finds the top, none below the band or beside
+# it, a phantom top is ignored), movement/tests.rs (the swim's rest at ±1 m without flicker, the dive
+# goal at -1 m and unchanged within ±0.5 m, the water walk's target, catch
+# band and jump at -1, 0, +1 m, the shallow-water wading, the exclusion of
+# the modes, both settings' bounds and round trip, old settings; the surface
+# swimming height at rest, swimming along and stopping at the extreme
+# combinations with a lagging body, the default unchanged, the eased switch,
+# the dive and the underwater motor, its bounds and round trip), aurora-net
+# bridge.rs (the command's bounds at the new ranges, the support field).
+# Texts are in the English, French and Japanese catalogues. Apply or skip the whole file, not one patch
+# of it.
+
+# ------------------------------------------------------------------ command
+
+[[patch]]
+id = "water-height-net-limit"
+why = "the shared range of both offsets"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = "pub const WATER_WALK_JUMP_DURATION: f32 = 1.25;"
+replace = '''pub const WATER_WALK_JUMP_DURATION: f32 = 1.25;
+// aurora-local-patch: water-height-net-limit
+/// The largest Flotation height and Water walking height, either way, in
+/// metres (local patch set, 117-water-height-offsets).
+pub const WATER_OFFSET_LIMIT: f32 = 1.0;'''
+
+[[patch]]
+id = "water-walk-support-field"
+why = "the water walk's height field carries the offset (the script uses it only for this target)"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = "pub fn water_walk_jump(speed: f32, height: f32) -> Self {"
+replace = '''// aurora-local-patch: water-walk-support-field
+    /// The height field of water walking (mode 13): the script holds the
+    /// body's centre at the water level plus half of it, and reads it for
+    /// nothing else in that mode, so Water walking height travels in it as
+    /// the avatar's height plus twice the offset.
+    pub fn water_walk_support(height: f32, offset: f32) -> f32 {
+        height + 2.0 * offset
+    }
+    pub fn water_walk_jump(speed: f32, height: f32) -> Self {'''
+
+[[patch]]
+id = "water-walk-support-valid"
+why = "goes with water-walk-support-field: the field's bounds widen by the offset's range"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''            13 => {
+                (0.5..=8.0).contains(&speed)
+                    && (0.6..=3.0).contains(&height)'''
+replace = '''13 => {
+                (0.5..=8.0).contains(&speed)
+                    // aurora-local-patch: water-walk-support-valid
+                    && (0.6 - 2.0 * WATER_OFFSET_LIMIT..=3.0 + 2.0 * WATER_OFFSET_LIMIT).contains(&height)'''
+
+[[patch]]
+id = "float-height-surface-valid"
+why = "the surface-return goal is the flotation height minus the flotation depth (at least 0.25 m): up to +0.75 m"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''                    } else if self.mode == 8 {
+                        (-2.0..=0.5).contains(&climb)'''
+replace = '''} else if self.mode == 8 {
+                        (-2.0..=WATER_OFFSET_LIMIT).contains(&climb) // aurora-local-patch: float-height-surface-valid'''
+
+[[patch]]
+id = "float-height-motor-valid"
+why = "the surface and underwater motors take the flotation height up to ±1 m"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''                    } else if matches!(self.mode, 3 | 6) {
+                        (-0.5..=0.5).contains(&climb)'''
+replace = '''} else if matches!(self.mode, 3 | 6) {
+                        (-WATER_OFFSET_LIMIT..=WATER_OFFSET_LIMIT).contains(&climb) // aurora-local-patch: float-height-motor-valid'''
+
+[[patch]]
+id = "float-height-motor-valid-tests"
+why = "goes with float-height-motor-valid: upstream's bounds test at the new limit"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''            for offset in [-0.51, 0.51, f32::NAN] {'''
+replace = '''// aurora-local-patch: float-height-motor-valid-tests
+            for offset in [-1.01, 1.01, f32::NAN] {'''
+
+[[patch]]
+id = "float-height-surface-valid-tests"
+why = "goes with float-height-surface-valid: the dive keeps +0.5 m, the surface return takes +1 m"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''            motion.parameters[2] = 0.51;
+            assert!(!motion.valid());'''
+replace = '''// aurora-local-patch: float-height-surface-valid-tests
+            if mode == 8 {
+                motion.parameters[2] = 1.0;
+                assert!(motion.valid());
+            }
+            motion.parameters[2] = if mode == 7 { 0.51 } else { 1.01 };
+            assert!(!motion.valid());'''
+
+[[patch]]
+id = "water-walk-support-valid-tests"
+why = "goes with water-walk-support-valid: upstream's out-of-bounds jump height at the new limit"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = "            Motion::water_walk_jump(3.2, 3.01),"
+replace = '''Motion::water_walk_jump(3.2, 5.01), // aurora-local-patch: water-walk-support-valid-tests
+            Motion::water_walk_jump(3.2, -1.41),'''
+
+[[patch]]
+id = "water-walk-support-tests"
+why = "the support field at -1, 0 and +1 m, for the walk and the jump, and its bounds"
+paths = ["crates/aurora-net/src/bridge.rs"]
+op = "literal"
+find = '''    #[test]
+    fn water_walking_jump_payload_requires_a_bounded_one_shot_action() {'''
+replace = '''// aurora-local-patch: water-walk-support-tests
+    #[test]
+    fn water_walking_height_travels_in_the_support_field_within_bounds() {
+        for height in [0.6_f32, 1.7, 3.0] {
+            for (offset, centre) in [(-1.0_f32, -1.0_f32), (0.0, 0.0), (1.0, 1.0)] {
+                let support = Motion::water_walk_support(height, offset);
+                // The script's target: water + field / 2.
+                assert!((support * 0.5 - (height * 0.5 + centre)).abs() < 1e-6, "{height} {offset}");
+                assert!(Motion::motor(13, 3.2, support).valid(), "{height} {offset}");
+                assert!(Motion::water_walk_jump(5.13, support).valid(), "{height} {offset}");
+            }
+        }
+        assert_eq!(Motion::water_walk_support(1.7, 0.0), 1.7, "no offset sends the height as upstream");
+        for (mode, offset) in [(3, 1.0), (3, -1.0), (6, 1.0), (6, -1.0)] {
+            let mut motion = Motion::motor(mode, 2.0, 1.7);
+            motion.parameters[2] = offset;
+            assert!(motion.valid(), "{mode} {offset}");
+        }
+    }
+
+    #[test]
+    fn water_walking_jump_payload_requires_a_bounded_one_shot_action() {'''
+
+# --------------------------------------------------------------- settings
+
+[[patch]]
+id = "water-walk-height-setting"
+why = "the saved Water walking height, beside the flotation height"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = '''    pub float_height: f32,
+    #[serde(default, rename = "run_speed", skip_serializing)]'''
+replace = '''pub float_height: f32,
+    /// Water walking height, m (local patch set, 117-water-height-offsets):
+    /// the body is held this much higher (or lower, wading) than half its
+    /// height above the water. Real: the region holds it there.
+    pub water_walk_height: f32, // aurora-local-patch: water-walk-height-setting
+    #[serde(default, rename = "run_speed", skip_serializing)]'''
+
+[[patch]]
+id = "water-walk-height-default"
+why = "goes with water-walk-height-setting: no change until the slider is moved"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = '''            float_height: 0.0,
+            legacy_run_speed: None,'''
+replace = '''float_height: 0.0,
+            water_walk_height: 0.0, // aurora-local-patch: water-walk-height-default
+            legacy_run_speed: None,'''
+
+[[patch]]
+id = "water-height-limit"
+why = "the range of both sliders and of the load bound"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = '''impl Preferences {
+    /// Selecting one water mode never implicitly enables the other on release.'''
+replace = '''// aurora-local-patch: water-height-limit
+/// The largest Flotation height and Water walking height, either way, in
+/// metres (local patch set, 117-water-height-offsets).
+pub const WATER_HEIGHT_LIMIT: f32 = aurora_net::bridge::WATER_OFFSET_LIMIT;
+
+impl Preferences {
+    /// Selecting one water mode never implicitly enables the other on release.'''
+
+[[patch]]
+id = "water-height-sanitize"
+why = "both offsets bounded on load (a saved or typed value outside the slider, or not a number)"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "self.float_height = bounded(self.float_height, -0.5, 0.5, 0.0);"
+replace = '''// aurora-local-patch: water-height-sanitize
+        self.float_height = bounded(self.float_height, -WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT, 0.0);
+        self.water_walk_height = bounded(self.water_walk_height, -WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT, 0.0);'''
+
+[[patch]]
+id = "water-height-sanitize-test"
+why = "goes with water-height-sanitize: upstream's bound test at the new limit"
+paths = ["crates/aurora-viewer/src/movement/tests.rs"]
+op = "literal"
+find = "assert_eq!(restored.float_height, value.clamp(-0.5, 0.5));"
+replace = "assert_eq!(restored.float_height, value.clamp(-1.0, 1.0)); // aurora-local-patch: water-height-sanitize-test"
+
+# ------------------------------------------------------------------ swimming
+
+[[patch]]
+id = "float-height-dive-goal"
+why = "at a deep flotation height the dive goal stays clearly below the resting height, so a dive does not bounce back"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "self.water_target = Some((7, -(frame.height * 0.5 + 1.1).max(1.8)));"
+replace = '''// aurora-local-patch: float-height-dive-goal
+                // At least 0.6 m below the resting height: below -0.5 m of
+                // flotation height, upstream's goal sits on the threshold
+                // back to the surface. Unchanged within ±0.5 m.
+                self.water_target = Some((7, (-(frame.height * 0.5 + 1.1).max(1.8)).min(dive_offset - 0.6)));'''
+
+[[patch]]
+id = "float-height-inspection"
+why = "a free camera keeps a swim resting deep under a negative flotation height"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "&& (*state == State::Submerged || frame.position.z > water - frame.height * 0.5 - 0.5)"
+replace = '''// aurora-local-patch: float-height-inspection
+                            && (*state == State::Submerged
+                                || frame.position.z > water - frame.height * 0.5 - 0.5 + prefs.float_height.min(0.0))'''
+
+# ------------------------------------------------------------- water walking
+
+[[patch]]
+id = "water-walk-height-pass"
+why = "the water walk gets the avatar's Water walking height each frame"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = '''        let was_water_walking = self.water_walk.active();
+        if let Some(motion) = self'''
+replace = '''let was_water_walking = self.water_walk.active();
+        self.water_walk.height_offset = prefs.water_walk_height; // aurora-local-patch: water-walk-height-pass
+        if let Some(motion) = self'''
+
+[[patch]]
+id = "water-walk-height-field"
+why = "the water walk knows the user's offset"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+find = '''    signal: Option<PlayingAnimation>,
+}'''
+replace = '''signal: Option<PlayingAnimation>,
+    /// Water walking height, m (local patch set, 117-water-height-offsets).
+    pub height_offset: f32, // aurora-local-patch: water-walk-height-field
+    /// The highest solid top under the body this frame (m, the scene's
+    /// `water_walk_top`), and whether the avatar stands on one.
+    pub object_top: Option<f32>,
+    top: TopState,
+}
+
+/// Water walking on submerged objects: standing on a top, since when one
+/// is seen, since when it is missed.
+#[derive(Default)]
+struct TopState {
+    on: bool,
+    seen_since: Option<Instant>,
+    missing_since: Option<Instant>,
+}
+
+/// A top carries the avatar up to this far above the water (m), and down to
+/// this far under the held feet (m); standing on one, the band widens by
+/// TOP_KEEP (m). It is seen TOP_ENTER before the walk lets go and missed
+/// TOP_EXIT before it catches the body again.
+pub const TOP_ABOVE: f32 = 0.2;
+pub const TOP_BELOW: f32 = 0.05;
+pub const TOP_KEEP: f32 = 0.1;
+const TOP_ENTER: Duration = Duration::from_millis(100);
+const TOP_EXIT: Duration = Duration::from_millis(150);
+
+/// The heights (m) a solid top under the body carries it between: from
+/// the held feet (the water + Water walking height `offset`; a little above
+/// the water when they are held higher) to TOP_ABOVE above the water.
+pub fn top_band(water: f32, offset: f32) -> (f32, f32) {
+    let high = water + TOP_ABOVE;
+    ((water + water_walk_height(offset)).min(high) - TOP_BELOW, high)
+}
+
+/// The lowest top worth looking for (m).
+pub fn lowest_top(water: f32, offset: f32) -> f32 {
+    top_band(water, offset).0 - TOP_KEEP
+}
+
+/// Water walking height, bounded: never further than the slider, 0 for a
+/// value that is not a number.
+pub fn water_walk_height(offset: f32) -> f32 {
+    if offset.is_finite() {
+        offset.clamp(-super::WATER_HEIGHT_LIMIT, super::WATER_HEIGHT_LIMIT)
+    } else {
+        0.0
+    }
+}'''
+
+[[patch]]
+id = "water-walk-height-target"
+why = "every rule of the water walk counts from the offset target (catch band, jump start, rise, landing)"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+fn = "update"
+find = "let target = frame.water? + frame.height * 0.5;"
+replace = '''// aurora-local-patch: water-walk-height-target
+        // Water walking height: the support holds the body's centre this
+        // much higher (or lower, wading) than half its height above the
+        // water. The body cannot stand below the bed: where the water is
+        // shallower than a lowered support, the rules count from where it
+        // stands, so the support keeps it instead of the simulator's own
+        // walking while over water.
+        let offset = water_walk_height(self.height_offset);
+        let support = frame.water? + frame.height * 0.5 + offset;
+        let target = frame.ground.map_or(support, |ground| support.max(ground + frame.height * 0.5));
+        let support_height = Motion::water_walk_support(frame.height, offset);'''
+
+[[patch]]
+id = "water-walk-height-jump"
+why = "goes with water-walk-height-target: the jump's arc starts from the offset support"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+fn = "update"
+find = "motion: Motion::water_walk_jump(speed, frame.height),"
+replace = "motion: Motion::water_walk_jump(speed, support_height), // aurora-local-patch: water-walk-height-jump"
+
+[[patch]]
+id = "water-walk-height-motor"
+why = "goes with water-walk-height-target: the support motor holds the offset height"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+fn = "update"
+find = "Some(Motion::motor(13, speed, frame.height))"
+replace = "Some(Motion::motor(13, speed, support_height)) // aurora-local-patch: water-walk-height-motor"
+
+# --------------------------------------------------------------------- tests
+
+[[patch]]
+id = "water-height-tests"
+why = "both offsets at their extremes: rests without flicker, the dive, the walk's rules, wading, the bounds"
+paths = ["crates/aurora-viewer/src/movement/tests.rs"]
+op = "literal"
+find = '''#[test]
+fn removing_the_global_switch_preserves_effective_legacy_activation() {'''
+replace = '''// aurora-local-patch: water-height-tests
+#[test]
+fn flotation_height_rests_at_its_extremes_without_flicker_and_dives_clear_of_the_surface() {
+    let now = Instant::now();
+    for offset in [-1.0_f32, 1.0] {
+        let prefs = Preferences {
+            float_height: offset,
+            ..prefs()
+        };
+        let mut runtime = Runtime::default();
+        let mut f = frame();
+        // in the water first, then at the resting height (1.7 m: 0.45 m deep)
+        runtime.update(&prefs, &f, &MoveInput::default(), now);
+        let rest = 20.0 - 0.45 + offset;
+        f.position.z = rest;
+        for i in 0..20 {
+            // a little bobbing around the rest height never leaves the swim
+            f.position.z = rest + if i % 2 == 0 { 0.15 } else { -0.15 };
+            let step = runtime.update(&prefs, &f, &MoveInput::default(), now + Duration::from_millis(i * 100));
+            assert_eq!(runtime.state, State::Surface, "offset={offset}, i={i}");
+            assert_eq!(step.motion.mode, 3);
+            assert_eq!(step.motion.parameters[2], offset);
+            assert!(step.motion.valid());
+        }
+        let dive = runtime.update(
+            &prefs,
+            &f,
+            &MoveInput {
+                down: true,
+                ..Default::default()
+            },
+            now + Duration::from_secs(3),
+        );
+        assert_eq!(dive.motion.mode, 7);
+        assert!(dive.motion.valid());
+        let goal = dive.motion.parameters[2];
+        assert!(goal <= -0.45 + offset - 0.6 + 1e-4, "offset={offset}: dive goal {goal}");
+        // reached: the body stays under water instead of bouncing back
+        f.position.z = 20.0 + goal;
+        let released = MoveInput::default();
+        runtime.update(&prefs, &f, &released, now + Duration::from_secs(4));
+        for i in 0..5 {
+            runtime.update(&prefs, &f, &released, now + Duration::from_millis(4100 + i * 100));
+            assert_eq!(runtime.state, State::Submerged, "offset={offset}: after the dive");
+        }
+    }
+    // within upstream's range, upstream's dive goal
+    for offset in [-0.5_f32, 0.0, 0.5] {
+        let prefs = Preferences {
+            float_height: offset,
+            ..prefs()
+        };
+        let mut runtime = Runtime::default();
+        let mut f = frame();
+        runtime.update(&prefs, &f, &MoveInput::default(), now);
+        f.position.z = 20.0 - 0.45 + offset;
+        runtime.update(&prefs, &f, &MoveInput::default(), now);
+        let dive = runtime.update(
+            &prefs,
+            &f,
+            &MoveInput {
+                down: true,
+                ..Default::default()
+            },
+            now,
+        );
+        assert_eq!(dive.motion.parameters[2], -(1.7_f32 * 0.5 + 1.1).max(1.8), "offset={offset}");
+    }
+}
+
+#[test]
+fn water_walking_height_moves_the_target_and_every_rule_with_it() {
+    let now = Instant::now();
+    for offset in [-1.0_f32, 0.0, 1.0] {
+        let prefs = Preferences {
+            water_walk: true,
+            water_walk_height: offset,
+            ..Default::default()
+        };
+        let target = 20.0 + 0.85 + offset;
+        let mut r = Runtime::default();
+        let mut f = frame();
+        f.on_ground = false;
+        f.position.z = target;
+        let step = r.update(&prefs, &f, &MoveInput::default(), now);
+        assert_eq!(step.motion.mode, 13, "offset={offset}");
+        assert!(step.motion.valid());
+        // the script holds water + field / 2
+        assert!((20.0 + step.motion.parameters[1] * 0.5 - target).abs() < 1e-5, "offset={offset}");
+        assert_eq!(r.state, State::WaterWalking);
+        assert!(!r.state.swimming(), "never a swim, even wading");
+        // the catch band: kept up to target + 0.45, released above it
+        f.position.z = target + 0.4;
+        assert_eq!(r.update(&prefs, &f, &MoveInput::default(), now).motion.mode, 13);
+        f.position.z = target + 0.5;
+        assert_ne!(r.update(&prefs, &f, &MoveInput::default(), now).motion.mode, 13);
+        // caught again just above the target
+        f.position.z = target + 0.2;
+        assert_eq!(r.update(&prefs, &f, &MoveInput::default(), now).motion.mode, 13);
+        // the jump starts near the target, with the same support field
+        f.position.z = target;
+        let up = MoveInput {
+            up: true,
+            ..Default::default()
+        };
+        let jump = r.update(&prefs, &f, &up, now + Duration::from_millis(100)).motion;
+        assert!(jump.action > 0 && jump.valid(), "offset={offset}");
+        assert_eq!(jump.parameters[1], step.motion.parameters[1]);
+        assert_eq!(jump.parameters[2], aurora_net::bridge::WATER_WALK_JUMP_HEIGHT);
+        // rise, then land back on the offset target
+        f.position.z = target + 0.8;
+        f.velocity.z = 1.0;
+        assert_eq!(
+            r.update(&prefs, &f, &MoveInput::default(), now + Duration::from_millis(500)).motion,
+            jump
+        );
+        f.position.z = target + 0.1;
+        f.velocity.z = -1.0;
+        let landed = r
+            .update(&prefs, &f, &MoveInput::default(), now + Duration::from_millis(1200))
+            .motion;
+        assert_eq!(landed.action, 0, "offset={offset}: landed");
+        assert_eq!(landed.mode, 13);
+        // the speeds stay as they are
+        let walk = MoveInput {
+            forward: true,
+            ..Default::default()
+        };
+        f.velocity.z = 0.0;
+        f.position.z = target;
+        assert_eq!(r.update(&prefs, &f, &walk, now + Duration::from_secs(2)).motion.parameters[0], 3.2);
+        let crouch = MoveInput { down: true, ..walk };
+        assert_eq!(
+            r.update(&prefs, &f, &crouch, now + Duration::from_secs(2)).motion.parameters[0],
+            1.2
+        );
+    }
+}
+
+#[test]
+fn a_lowered_water_walk_in_shallow_water_keeps_the_support_on_the_bed() {
+    let now = Instant::now();
+    let prefs = Preferences {
+        water_walk: true,
+        water_walk_height: -1.0,
+        ..Default::default()
+    };
+    let mut r = Runtime::default();
+    let mut f = frame();
+    // 0.5 m of water: the body stands on the bed, 0.35 m above the lowered support
+    f.ground = Some(19.5);
+    f.position.z = 19.5 + 0.85;
+    f.on_ground = true;
+    for i in 0..5 {
+        let step = r.update(&prefs, &f, &MoveInput::default(), now + Duration::from_millis(i * 100));
+        assert_eq!(step.motion.mode, 13, "the support keeps it, not the simulator's walking");
+        assert_eq!(r.state, State::WaterWalking);
+    }
+    // a jump still starts from where it stands
+    let jump = r.update(
+        &prefs,
+        &f,
+        &MoveInput {
+            up: true,
+            ..Default::default()
+        },
+        now + Duration::from_secs(1),
+    );
+    assert!(jump.motion.action > 0);
+    // the shore still releases it
+    f.ground = Some(19.98);
+    assert_ne!(
+        r.update(&prefs, &f, &MoveInput::default(), now + Duration::from_secs(5))
+            .motion
+            .mode,
+        13
+    );
+}
+
+#[test]
+fn water_heights_are_bounded_on_load_and_survive_a_save() {
+    let old: Preferences = serde_json::from_value(serde_json::json!({"swimming": true, "float_height": 0.3})).expect("old prefs");
+    assert_eq!(old.water_walk_height, 0.0, "older settings have no water walking height");
+    for (value, expected) in [
+        (0.0, 0.0),
+        (0.35, 0.35),
+        (-0.8, -0.8),
+        (1.0, 1.0),
+        (-1.0, -1.0),
+        (1.5, 1.0),
+        (-4.0, -1.0),
+        (f32::NAN, 0.0),
+        (f32::INFINITY, 0.0),
+        (f32::NEG_INFINITY, 0.0),
+    ] {
+        let mut prefs = Preferences {
+            float_height: value,
+            water_walk_height: value,
+            ..prefs()
+        };
+        if value.is_finite() {
+            let saved = serde_json::to_string(&prefs).expect("save");
+            let mut restored: Preferences = serde_json::from_str(&saved).expect("restore");
+            restored.sanitize();
+            assert_eq!(restored.float_height, expected, "{value} after a save");
+            assert_eq!(restored.water_walk_height, expected, "{value} after a save");
+        }
+        prefs.sanitize();
+        assert_eq!(prefs.float_height, expected, "{value}");
+        assert_eq!(prefs.water_walk_height, expected, "{value}");
+    }
+    assert_eq!(water_walk::water_walk_height(f32::NAN), 0.0);
+    assert_eq!(water_walk::water_walk_height(3.0), WATER_HEIGHT_LIMIT);
+}
+
+#[test]
+fn removing_the_global_switch_preserves_effective_legacy_activation() {'''
+
+# ---------------------------------------------------------------------- page
+
+[[patch]]
+id = "water-height-sliders"
+why = "Flotation height to ±1 m, and Water walking height right under it (usable while water walking is on)"
+paths = ["crates/aurora-viewer/src/ui/movement.rs"]
+op = "literal"
+find = '''            ui.add(
+                egui::Slider::new(&mut prefs.float_height, -0.5..=0.5)
+                    .suffix(" m")
+                    .step_by(0.01)
+                    .text(aurora_i18n::tr!("movement-float-height")),
+            )
+            .on_hover_text(aurora_i18n::tr!("movement-float-help"));
+            ui.add_space(ui.spacing().item_spacing.y * 2.0);
+            widgets::checkbox(ui, p, &mut prefs.jump_obstacles, aurora_i18n::tr!("movement-jump-obstacles"));
+        });'''
+replace = '''// aurora-local-patch: water-height-sliders
+            let limit = crate::movement::WATER_HEIGHT_LIMIT;
+            ui.add(
+                egui::Slider::new(&mut prefs.float_height, -limit..=limit)
+                    .suffix(" m")
+                    .step_by(0.01)
+                    .text(aurora_i18n::tr!("movement-float-height")),
+            )
+            .on_hover_text(aurora_i18n::tr!("movement-float-help"));
+        });
+        // Water walking height, beside the flotation height (Aurora's own,
+        // no Legacy Viewer equivalent).
+        ui.add_enabled_ui(prefs.water_walk, |ui| {
+            let limit = crate::movement::WATER_HEIGHT_LIMIT;
+            ui.add(
+                egui::Slider::new(&mut prefs.water_walk_height, -limit..=limit)
+                    .suffix(" m")
+                    .step_by(0.01)
+                    .text(aurora_i18n::tr!("movement-water-walk-height")),
+            )
+            .on_hover_text(aurora_i18n::tr!("movement-water-walk-height-help"));
+        });
+        ui.add_enabled_ui(prefs.swimming, |ui| {
+            ui.add_space(ui.spacing().item_spacing.y * 2.0);
+            widgets::checkbox(ui, p, &mut prefs.jump_obstacles, aurora_i18n::tr!("movement-jump-obstacles"));
+        });'''
+
+[[patch]]
+id = "float-height-ao-slider"
+why = "the AO window's copy of the flotation slider takes the same range"
+paths = ["crates/aurora-viewer/src/ui/ao/prototype.rs"]
+op = "literal"
+find = '''egui::Slider::new(&mut prefs.float_height, -0.5..=0.5)
+                .suffix(" m")
+                .step_by(0.01)
+                .text(aurora_i18n::tr!("movement-float-height")),'''
+replace = '''// aurora-local-patch: float-height-ao-slider
+            egui::Slider::new(
+                &mut prefs.float_height,
+                -crate::movement::WATER_HEIGHT_LIMIT..=crate::movement::WATER_HEIGHT_LIMIT,
+            )
+            .suffix(" m")
+            .step_by(0.01)
+            .text(aurora_i18n::tr!("movement-float-height")),'''
+
+# --------------------------------------------------------------------- texts
+
+[[patch]]
+id = "water-walk-height-ftl-en"
+why = "the slider's label and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "movement-float-help ="
+replace = '''# // aurora-local-patch: water-walk-height-ftl-en
+movement-water-walk-height = Water walking height
+movement-water-walk-height-help = While walking on water, holds your body this much higher (above 0) or lower (below 0, wading in the water). Everyone sees it: the region holds your avatar at this height. In shallower water your feet stay on the bottom. Default: 0 m.
+movement-float-help ='''
+
+[[patch]]
+id = "water-walk-height-ftl-fr"
+why = "the slider's label and help (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "movement-float-help ="
+replace = '''# // aurora-local-patch: water-walk-height-ftl-fr
+movement-water-walk-height = Hauteur de marche sur l’eau
+movement-water-walk-height-help = Quand vous marchez sur l’eau, tient votre corps d’autant plus haut (au-dessus de 0) ou plus bas (en dessous de 0, vous avancez dans l’eau). Tout le monde le voit : la région tient votre avatar à cette hauteur. Dans une eau moins profonde, vos pieds restent sur le fond. Par défaut : 0 m.
+movement-float-help ='''
+
+[[patch]]
+id = "water-walk-height-ftl-ja"
+why = "the slider's label and help (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "movement-float-help ="
+replace = '''# // aurora-local-patch: water-walk-height-ftl-ja
+movement-water-walk-height = 水面歩行の高さ
+movement-water-walk-height-help = 水面を歩くとき、体をこの分だけ高く（０より大きい値）または低く（０より小さい値で、水の中を歩きます）保ちます。全員に見えます：リージョンがアバターをこの高さに保ちます。それより浅い水では足が水底に着いたままになります。デフォルト：０ｍ。
+movement-float-help ='''
+
+# ======================================================= surface swimming height
+
+[[patch]]
+id = "surface-swim-height-setting"
+why = "the saved Surface swimming height, beside the flotation height"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "pub water_walk_height: f32, // aurora-local-patch: water-walk-height-setting"
+replace = '''pub water_walk_height: f32, // aurora-local-patch: water-walk-height-setting
+    /// Surface swimming height, m (local patch set, 117-water-height-offsets):
+    /// added to the flotation height while swimming along the surface. Real:
+    /// the region holds the body there.
+    pub surface_swim_height: f32, // aurora-local-patch: surface-swim-height-setting'''
+
+[[patch]]
+id = "surface-swim-height-default"
+why = "goes with surface-swim-height-setting: no change until the slider is moved"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "water_walk_height: 0.0, // aurora-local-patch: water-walk-height-default"
+replace = '''water_walk_height: 0.0, // aurora-local-patch: water-walk-height-default
+            // aurora-local-patch: surface-swim-height-default
+            surface_swim_height: 0.0,'''
+
+[[patch]]
+id = "surface-swim-height-sanitize"
+why = "the offset bounded on load (a saved or typed value outside the slider, or not a number)"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "self.water_walk_height = bounded(self.water_walk_height, -WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT, 0.0);"
+replace = '''self.water_walk_height = bounded(self.water_walk_height, -WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT, 0.0);
+        // aurora-local-patch: surface-swim-height-sanitize
+        self.surface_swim_height = bounded(self.surface_swim_height, -WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT, 0.0);'''
+
+[[patch]]
+id = "surface-swim-height-rule"
+why = "the height in force at the surface, the bounded offset and the ease"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "pub const WATER_HEIGHT_LIMIT: f32 = aurora_net::bridge::WATER_OFFSET_LIMIT;"
+replace = '''pub const WATER_HEIGHT_LIMIT: f32 = aurora_net::bridge::WATER_OFFSET_LIMIT;
+
+// aurora-local-patch: surface-swim-height-rule
+/// How fast the Surface swimming height comes in and goes out, m/s. The
+/// viewer resends the bridge command at most twice a second and the script's
+/// motor glides to each new height (move-to-target, 0.2 s, no overshoot), so
+/// the body rises or sinks at about this speed instead of a jump of up to 2 m.
+pub const SURFACE_SWIM_EASE: f32 = 1.0;
+
+/// Surface swimming height, bounded: never further than the slider, 0 for a
+/// value that is not a number.
+pub fn surface_swim_lift(offset: f32) -> f32 {
+    if offset.is_finite() {
+        offset.clamp(-WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT)
+    } else {
+        0.0
+    }
+}
+
+/// The height the surface motor holds: the flotation height plus the part of
+/// the Surface swimming height in force, within the slider's range (the
+/// command's bound). No lift leaves the flotation height exactly as it is.
+pub fn surface_swim_float(float_height: f32, lift: f32) -> f32 {
+    if lift == 0.0 {
+        float_height
+    } else {
+        (float_height + lift).clamp(-WATER_HEIGHT_LIMIT, WATER_HEIGHT_LIMIT)
+    }
+}
+
+/// Swimming along, as the AO picks its swim stroke over floating.
+fn swimming_along(input: &MoveInput) -> bool {
+    input.forward || input.back || input.strafe_left || input.strafe_right
+}'''
+
+[[patch]]
+id = "surface-swim-height-runtime"
+why = "the eased lift and the lift at which the body last settled"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = '''    settled_float_height: f32,
+    passage: Option<(Motion, Instant)>,'''
+replace = '''settled_float_height: f32,
+    // aurora-local-patch: surface-swim-height-runtime
+    /// Part of the Surface swimming height in force now (eased), the part in
+    /// force when the body last settled, and the time of the last ease.
+    swim_lift: f32,
+    settled_swim_lift: f32,
+    swim_lift_at: Option<Instant>,
+    passage: Option<(Motion, Instant)>,'''
+
+[[patch]]
+id = "surface-swim-height-hold"
+why = "while swimming along the surface the body is held at the flotation height plus the offset, eased; the thresholds count from the height in force"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+fn = "update"
+find = '''        if self.state != State::Surface
+            || water.is_some_and(|w| {
+                let surface = w - (frame.height * 0.5 - 0.4).clamp(0.25, 0.8) + prefs.float_height;
+                (frame.position.z - surface).abs() < 0.1
+            })
+        {
+            self.settled_float_height = prefs.float_height;
+        }
+        let dive_height = if self.state == State::Surface {
+            prefs.float_height.min(self.settled_float_height)
+        } else {
+            prefs.float_height
+        };
+        let flotation_depth = (frame.height * 0.5 - 0.4).clamp(0.25, 0.8);
+        let surface_offset = -flotation_depth + prefs.float_height;'''
+replace = '''// aurora-local-patch: surface-swim-height-hold
+        // Surface swimming height: swimming along the surface (the AO's swim
+        // stroke: moving, at the surface, no dive or return under way), the
+        // body is held at the flotation height plus this offset; at rest,
+        // under water and on the way back up, at the flotation height. The
+        // offset comes in and goes out at SURFACE_SWIM_EASE, and snaps out
+        // when the body leaves the surface. With 0 nothing changes.
+        let lift_goal = if self.state == State::Surface && self.water_target.is_none() && swimming_along(input) {
+            surface_swim_lift(prefs.surface_swim_height)
+        } else {
+            0.0
+        };
+        let ease_dt = self
+            .swim_lift_at
+            .map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f32().min(0.25));
+        self.swim_lift_at = Some(now);
+        let ease_step = SURFACE_SWIM_EASE * ease_dt;
+        self.swim_lift = if self.state != State::Surface {
+            0.0
+        } else if (lift_goal - self.swim_lift).abs() <= ease_step {
+            lift_goal
+        } else {
+            self.swim_lift + ease_step.copysign(lift_goal - self.swim_lift)
+        };
+        let held_height = surface_swim_float(prefs.float_height, self.swim_lift);
+        if self.state != State::Surface
+            || water.is_some_and(|w| {
+                let surface = w - (frame.height * 0.5 - 0.4).clamp(0.25, 0.8) + held_height;
+                (frame.position.z - surface).abs() < 0.1
+            })
+        {
+            self.settled_float_height = prefs.float_height;
+            self.settled_swim_lift = self.swim_lift;
+        }
+        // Until the body reaches a new height, the dive threshold keeps the
+        // lower of the old and new heights and the exit rule the higher, so
+        // the switch never flickers between the surface, under water and out.
+        let dive_height = if self.state == State::Surface {
+            held_height.min(surface_swim_float(self.settled_float_height, self.settled_swim_lift))
+        } else {
+            prefs.float_height
+        };
+        let flotation_depth = (frame.height * 0.5 - 0.4).clamp(0.25, 0.8);
+        let exit_offset = -flotation_depth + held_height.max(surface_swim_float(prefs.float_height, self.settled_swim_lift));
+        let surface_offset = -flotation_depth + prefs.float_height;'''
+
+[[patch]]
+id = "surface-swim-height-exit"
+why = "goes with surface-swim-height-hold: the exit rule above the water line counts from the higher height in force"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+fn = "update"
+find = "water.is_some_and(|w| frame.position.z < w + if was_swimming { 0.45 + surface_offset.max(0.0) } else { -0.05 });"
+replace = '''water.is_some_and(|w| frame.position.z < w + if was_swimming { 0.45 + exit_offset.max(0.0) } else { -0.05 }); // aurora-local-patch: surface-swim-height-exit'''
+
+[[patch]]
+id = "surface-swim-height-motor"
+why = "goes with surface-swim-height-hold: the surface motor (mode 3) carries the height in force in its existing field; under water (mode 6) keeps the flotation height"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+fn = "update"
+find = '''} else if mode == 3 || mode == 6 {
+                    step.motion.parameters[2] = prefs.float_height;'''
+replace = '''} else if mode == 3 {
+                    step.motion.parameters[2] = held_height; // aurora-local-patch: surface-swim-height-motor
+                } else if mode == 6 {
+                    step.motion.parameters[2] = prefs.float_height;'''
+
+[[patch]]
+id = "surface-swim-height-inspection"
+why = "a free camera keeps a swim resting at the lower of the two surface heights"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+fn = "update"
+find = "|| frame.position.z > water - frame.height * 0.5 - 0.5 + prefs.float_height.min(0.0))"
+replace = '''|| frame.position.z
+                                    > water - frame.height * 0.5 - 0.5
+                                        // aurora-local-patch: surface-swim-height-inspection
+                                        + prefs
+                                            .float_height
+                                            .min(surface_swim_float(prefs.float_height, surface_swim_lift(prefs.surface_swim_height)))
+                                            .min(0.0))'''
+
+[[patch]]
+id = "surface-swim-height-tests"
+why = "the height in force at rest and swimming along, the default unchanged, the eased switch without flicker at the extremes, the dive, the bounds"
+paths = ["crates/aurora-viewer/src/movement/tests.rs"]
+op = "literal"
+find = '''#[test]
+fn removing_the_global_switch_preserves_effective_legacy_activation() {'''
+replace = '''// aurora-local-patch: surface-swim-height-tests
+/// Rests, swims along for 3 s and stops for 3 s, the body following the sent
+/// height half a second late (the resend interval); returns the heights sent.
+fn surface_swim_run(float_height: f32, surface_swim_height: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let prefs = Preferences {
+        float_height,
+        surface_swim_height,
+        ..prefs()
+    };
+    let now = Instant::now();
+    let mut runtime = Runtime::default();
+    let mut f = frame();
+    runtime.update(&prefs, &f, &MoveInput::default(), now);
+    let mut sent = vec![float_height; 5];
+    let mut phases = Vec::new();
+    let mut t = 0;
+    for input in [
+        MoveInput::default(),
+        MoveInput {
+            forward: true,
+            ..Default::default()
+        },
+        MoveInput::default(),
+    ] {
+        let mut phase = Vec::new();
+        for _ in 0..30 {
+            t += 100;
+            f.position.z = 20.0 - 0.45 + sent[sent.len() - 5];
+            let step = runtime.update(&prefs, &f, &input, now + Duration::from_millis(t));
+            let label = format!("float={float_height} surface={surface_swim_height} t={t}");
+            assert_eq!(runtime.state, State::Surface, "{label}");
+            assert_eq!(step.motion.mode, 3, "{label}");
+            assert!(step.motion.valid(), "{label}");
+            let height = step.motion.parameters[2];
+            let previous = sent[sent.len() - 1];
+            assert!(
+                (height - previous).abs() <= SURFACE_SWIM_EASE * 0.1 + 1e-5,
+                "{label}: {previous} -> {height}"
+            );
+            sent.push(height);
+            phase.push(height);
+        }
+        phases.push(phase);
+    }
+    let stop = phases.pop().expect("three phases");
+    let along = phases.pop().expect("three phases");
+    let rest = phases.pop().expect("three phases");
+    (rest, along, stop)
+}
+
+#[test]
+fn surface_swimming_height_holds_the_body_while_swimming_along_and_eases_back_at_rest() {
+    for (float_height, offset, along) in [
+        (0.0_f32, 0.0_f32, 0.0_f32),
+        (0.3, 0.0, 0.3),
+        (-1.0, 0.0, -1.0),
+        (0.0, 0.4, 0.4),
+        (0.2, -0.5, -0.3),
+        (-1.0, 1.0, 0.0),
+        (1.0, -1.0, 0.0),
+        (0.0, 1.0, 1.0),
+        (0.0, -1.0, -1.0),
+        (0.6, 0.8, 1.0),
+        (-1.0, -1.0, -1.0),
+    ] {
+        let (rest, moving, stop) = surface_swim_run(float_height, offset);
+        assert!(rest.iter().all(|h| *h == float_height), "at rest, the flotation height");
+        let reached = *moving.last().expect("sent");
+        assert!((reached - along).abs() < 1e-6, "{float_height} {offset}: {reached}");
+        assert_eq!(*stop.last().expect("sent"), float_height, "{float_height} {offset}");
+        if offset == 0.0 {
+            // the default changes nothing: the flotation height, every frame
+            assert!(moving.iter().chain(&stop).all(|h| *h == float_height));
+        }
+    }
+    assert_eq!(surface_swim_float(0.37, 0.0), 0.37);
+    assert_eq!(surface_swim_float(0.6, 0.8), WATER_HEIGHT_LIMIT);
+    assert_eq!(surface_swim_float(-0.6, -0.8), -WATER_HEIGHT_LIMIT);
+    assert_eq!(surface_swim_lift(f32::NAN), 0.0);
+    assert_eq!(surface_swim_lift(-3.0), -WATER_HEIGHT_LIMIT);
+}
+
+#[test]
+fn surface_swimming_height_leaves_the_dive_and_the_underwater_motor_on_the_flotation_height() {
+    let now = Instant::now();
+    for (float_height, offset) in [(0.0_f32, 1.0_f32), (-1.0, 1.0), (1.0, -1.0)] {
+        let prefs = Preferences {
+            float_height,
+            surface_swim_height: offset,
+            ..prefs()
+        };
+        let along = surface_swim_float(float_height, offset);
+        let mut runtime = Runtime::default();
+        let mut f = frame();
+        runtime.update(&prefs, &f, &MoveInput::default(), now);
+        let forward = MoveInput {
+            forward: true,
+            ..Default::default()
+        };
+        // the body follows the surface motor's height, from the rest height
+        let mut t = 0;
+        let mut height = float_height;
+        for _ in 0..40 {
+            t += 100;
+            f.position.z = 20.0 - 0.45 + height;
+            let step = runtime.update(&prefs, &f, &forward, now + Duration::from_millis(t));
+            if step.motion.mode == 3 {
+                height = step.motion.parameters[2];
+            }
+        }
+        assert_eq!(runtime.state, State::Surface);
+        assert!((height - along).abs() < 1e-6, "{float_height} {offset}: {height}");
+        // a dive goes at least 0.6 m below the height in force
+        let dive = runtime.update(
+            &prefs,
+            &f,
+            &MoveInput {
+                down: true,
+                forward: true,
+                ..Default::default()
+            },
+            now + Duration::from_millis(t + 100),
+        );
+        assert_eq!(dive.motion.mode, 7);
+        assert!(dive.motion.valid());
+        let goal = dive.motion.parameters[2];
+        assert!(goal <= -0.45 + along - 0.6 + 1e-4, "{float_height} {offset}: {goal}");
+        // under water, swimming along keeps the flotation height in the field
+        f.position.z = 20.0 + goal;
+        for i in 0..5 {
+            let step = runtime.update(&prefs, &f, &forward, now + Duration::from_millis(t + 1200 + i * 100));
+            assert_eq!(runtime.state, State::Submerged);
+            assert_eq!(step.motion.mode, 6);
+            assert_eq!(step.motion.parameters[2], float_height);
+            assert_eq!(runtime.swim_lift, 0.0);
+        }
+    }
+}
+
+#[test]
+fn surface_swimming_height_is_bounded_on_load_and_survives_a_save() {
+    let old: Preferences = serde_json::from_value(serde_json::json!({"swimming": true, "float_height": 0.3})).expect("old prefs");
+    assert_eq!(old.surface_swim_height, 0.0, "older settings have no surface swimming height");
+    assert_eq!(Preferences::default().surface_swim_height, 0.0);
+    for (value, expected) in [
+        (0.0, 0.0),
+        (0.42, 0.42),
+        (-0.8, -0.8),
+        (1.0, 1.0),
+        (-1.0, -1.0),
+        (1.5, 1.0),
+        (-4.0, -1.0),
+        (f32::NAN, 0.0),
+        (f32::INFINITY, 0.0),
+        (f32::NEG_INFINITY, 0.0),
+    ] {
+        let mut prefs = Preferences {
+            surface_swim_height: value,
+            ..prefs()
+        };
+        if value.is_finite() {
+            let saved = serde_json::to_string(&prefs).expect("save");
+            let mut restored: Preferences = serde_json::from_str(&saved).expect("restore");
+            restored.sanitize();
+            assert_eq!(restored.surface_swim_height, expected, "{value} after a save");
+        }
+        prefs.sanitize();
+        assert_eq!(prefs.surface_swim_height, expected, "{value}");
+    }
+}
+
+#[test]
+fn removing_the_global_switch_preserves_effective_legacy_activation() {'''
+
+[[patch]]
+id = "surface-swim-height-slider"
+why = "Surface swimming height right under Flotation height in the Movement window's Swimming section"
+paths = ["crates/aurora-viewer/src/ui/movement.rs"]
+op = "literal"
+find = '''.on_hover_text(aurora_i18n::tr!("movement-float-help"));
+        });'''
+replace = '''.on_hover_text(aurora_i18n::tr!("movement-float-help"));
+            // aurora-local-patch: surface-swim-height-slider
+            ui.add(
+                egui::Slider::new(&mut prefs.surface_swim_height, -limit..=limit)
+                    .suffix(" m")
+                    .step_by(0.01)
+                    .text(aurora_i18n::tr!("movement-surface-swim-height")),
+            )
+            .on_hover_text(aurora_i18n::tr!("movement-surface-swim-height-help"));
+        });'''
+
+[[patch]]
+id = "surface-swim-height-ao-slider"
+why = "the same slider under the AO window's copy of the flotation slider"
+paths = ["crates/aurora-viewer/src/ui/ao/prototype.rs"]
+op = "literal"
+find = '''.text(aurora_i18n::tr!("movement-float-height")),
+        );
+        widgets::checkbox(ui, p, &mut prefs.jump_obstacles'''
+replace = '''.text(aurora_i18n::tr!("movement-float-height")),
+        );
+        // aurora-local-patch: surface-swim-height-ao-slider
+        ui.add(
+            egui::Slider::new(
+                &mut prefs.surface_swim_height,
+                -crate::movement::WATER_HEIGHT_LIMIT..=crate::movement::WATER_HEIGHT_LIMIT,
+            )
+            .suffix(" m")
+            .step_by(0.01)
+            .text(aurora_i18n::tr!("movement-surface-swim-height")),
+        )
+        .on_hover_text(aurora_i18n::tr!("movement-surface-swim-height-help"));
+        widgets::checkbox(ui, p, &mut prefs.jump_obstacles'''
+
+[[patch]]
+id = "surface-swim-height-ftl-en"
+why = "the slider's label and help (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = "# // aurora-local-patch: water-walk-height-ftl-en"
+replace = '''# // aurora-local-patch: surface-swim-height-ftl-en
+movement-surface-swim-height = Surface swimming height
+movement-surface-swim-height-help = While swimming along the surface, holds your body this much higher (above 0) or lower (below 0) than the flotation height, so the swimming animation sits right in the water; at rest the flotation height applies. Everyone sees it: the region holds your avatar at this height. Together the two stay within -1 to +1 m. Default: 0 m.
+# // aurora-local-patch: water-walk-height-ftl-en'''
+
+[[patch]]
+id = "surface-swim-height-ftl-fr"
+why = "the slider's label and help (French)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = "# // aurora-local-patch: water-walk-height-ftl-fr"
+replace = '''# // aurora-local-patch: surface-swim-height-ftl-fr
+movement-surface-swim-height = Hauteur de nage en surface
+movement-surface-swim-height-help = Quand vous nagez à la surface, tient votre corps d’autant plus haut (au-dessus de 0) ou plus bas (en dessous de 0) que la hauteur de flottaison, pour que l’animation de nage soit bien placée dans l’eau ; au repos, la hauteur de flottaison s’applique. Tout le monde le voit : la région tient votre avatar à cette hauteur. À elles deux, elles restent entre -1 et +1 m. Par défaut : 0 m.
+# // aurora-local-patch: water-walk-height-ftl-fr'''
+
+[[patch]]
+id = "surface-swim-height-ftl-ja"
+why = "the slider's label and help (Japanese)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = "# // aurora-local-patch: water-walk-height-ftl-ja"
+replace = '''# // aurora-local-patch: surface-swim-height-ftl-ja
+movement-surface-swim-height = 水面を泳ぐ高さ
+movement-surface-swim-height-help = 水面を泳いで進むとき、体を「浮かぶ高さ」よりこの分だけ高く（０より大きい値）または低く（０より小さい値）保ち、泳ぎのアニメーションが水にちょうど合うようにします。止まっているときは「浮かぶ高さ」が使われます。全員に見えます：リージョンがアバターをこの高さに保ちます。２つを合わせて－１～＋１ｍの範囲に収まります。デフォルト：０ｍ。
+# // aurora-local-patch: water-walk-height-ftl-ja'''
+
+# ------------------------------------------- water walking on submerged objects
+
+[[patch]]
+id = "water-walk-object-top"
+why = "a solid top under the body between the held feet and a little above the water carries the avatar: the walk lets go while it does (hysteresis both ways), and holds the body only over open water"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+fn = "update"
+find = "let support_height = Motion::water_walk_support(frame.height, offset);"
+replace = '''let support_height = Motion::water_walk_support(frame.height, offset);
+        // aurora-local-patch: water-walk-object-top
+        // Water walking on submerged objects: while a solid top lies under
+        // the body within `top_band`, the avatar stands and walks on it as
+        // on any floor (the support motor is released, the region's own
+        // walking holds it). It must be seen TOP_ENTER before the walk lets
+        // go and missed TOP_EXIT before it catches the body again; standing
+        // on it, the band widens by TOP_KEEP. A jump under way keeps its arc.
+        let (top_low, top_high) = top_band(frame.water?, offset);
+        let keep = if self.top.on { TOP_KEEP } else { 0.0 };
+        let top_here = self
+            .object_top
+            .is_some_and(|top| top.is_finite() && (top_low - keep..=top_high + keep).contains(&top));
+        if top_here {
+            self.top.missing_since = None;
+            let since = *self.top.seen_since.get_or_insert(now);
+            self.top.on |= now.saturating_duration_since(since) >= TOP_ENTER;
+        } else {
+            self.top.seen_since = None;
+            if self.top.on {
+                let since = *self.top.missing_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= TOP_EXIT {
+                    self.top = TopState::default();
+                }
+            }
+        }
+        if self.top.on && self.jump.is_none() {
+            self.active = false;
+            self.pose = None;
+            self.signal = None;
+            return None;
+        }'''
+
+[[patch]]
+id = "water-walk-object-reset"
+why = "goes with water-walk-object-top: leaving water walking forgets the top"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+fn = "update"
+find = """            self.signal = None;
+            self.jump = None;
+            return None;"""
+replace = """self.signal = None;
+            self.jump = None;
+            self.top = TopState::default(); // aurora-local-patch: water-walk-object-reset
+            return None;"""
+
+[[patch]]
+id = "water-walk-object-tests"
+why = "a submerged top carries the avatar after a moment, a missed frame does not flicker, stepping off catches it again, tops outside the band and open water keep the hold"
+paths = ["crates/aurora-viewer/src/movement/water_walk.rs"]
+op = "literal"
+find = """    #[test]
+    fn water_walk_releases_unavailable_contexts_and_never_pulls_a_flyer_down() {"""
+replace = """// aurora-local-patch: water-walk-object-tests
+    #[test]
+    fn a_submerged_solid_top_carries_the_avatar_with_hysteresis_and_open_water_holds_it() {
+        let now = Instant::now();
+        let at = |ms: u64| now + Duration::from_millis(ms);
+        let idle = MoveInput::default();
+        for (offset, top) in [(-1.0f32, 19.4f32), (0.0, 20.1)] {
+            let mut r = Runtime {
+                height_offset: offset,
+                ..Default::default()
+            };
+            let mut f = frame();
+            let target = 20.0 + 0.9 + offset;
+            f.position.z = target;
+            // open water: held at the target
+            assert_eq!(r.update(true, &f, &idle, now).map(|m| m.mode), Some(13), "{offset}");
+            // a top in the band: not at once, then the walk lets go
+            r.object_top = Some(top);
+            assert_eq!(r.update(true, &f, &idle, at(50)).map(|m| m.mode), Some(13));
+            assert!(r.update(true, &f, &idle, at(160)).is_none(), "{offset}: standing on it");
+            assert!(!r.active() && r.pose().is_none());
+            // standing on it: a missed frame and a top a little higher keep it
+            f.position.z = top + 0.9;
+            r.object_top = None;
+            assert!(r.update(true, &f, &idle, at(200)).is_none(), "no flicker");
+            r.object_top = Some(top + 0.08);
+            assert!(r.update(true, &f, &idle, at(250)).is_none());
+            // stepping off over open water: caught again
+            r.object_top = None;
+            assert!(r.update(true, &f, &idle, at(300)).is_none());
+            f.position.z = target + 0.1;
+            assert_eq!(r.update(true, &f, &idle, at(500)).map(|m| m.mode), Some(13), "{offset}: caught");
+            assert!(r.active());
+            // a top too deep under the held feet, or above the water's band:
+            // the hold stays
+            for (i, other) in [19.0 + offset - 0.5, 20.6].into_iter().enumerate() {
+                r.object_top = Some(other);
+                for k in 0..4 {
+                    let step = r.update(true, &f, &idle, at(600 + i as u64 * 1000 + k * 100));
+                    assert_eq!(step.map(|m| m.mode), Some(13), "{offset}: {other}");
+                }
+            }
+        }
+        // the band: from the held feet (or a little above the water, when
+        // they are held higher) to 0.2 m above the water
+        assert_eq!(top_band(20.0, -1.0), (19.0 - TOP_BELOW, 20.0 + TOP_ABOVE));
+        assert_eq!(top_band(20.0, 0.0), (20.0 - TOP_BELOW, 20.0 + TOP_ABOVE));
+        assert_eq!(top_band(20.0, 1.0), (20.0 + TOP_ABOVE - TOP_BELOW, 20.0 + TOP_ABOVE));
+        assert_eq!(lowest_top(20.0, -1.0), 19.0 - TOP_BELOW - TOP_KEEP);
+    }
+
+    #[test]
+    fn water_walk_releases_unavailable_contexts_and_never_pulls_a_flyer_down() {"""
+
+[[patch]]
+id = "water-walk-object-probe"
+why = "the highest solid top under the body, five rays down from its centre (movement_solid: no phantom, attachment, rigged mesh or HUD)"
+paths = ["crates/aurora-viewer/src/scene/picking.rs"]
+op = "literal"
+find = "    /// Presentation prediction only: reject known solid decks, walls and roofs"
+replace = """// aurora-local-patch: water-walk-object-probe
+    /// Water walking on submerged objects (local patch set,
+    /// 117-water-height-offsets): the highest solid, upward-facing top under
+    /// the body, from its centre down to `lowest` (m), at its centre and four
+    /// points of its footprint as `cannonball_clear` looks; phantom objects,
+    /// attachments, rigged meshes and HUDs never carry it (`movement_solid`).
+    pub fn water_walk_top(&self, world: &World, position: Vec3, height: f32, lowest: f32) -> Option<f32> {
+        if !position.is_finite() || !height.is_finite() || !lowest.is_finite() || position.z <= lowest {
+            return None;
+        }
+        let radius = (height * 0.16).clamp(0.18, 0.35);
+        let distance = position.z - lowest;
+        let now = Instant::now();
+        let mut candidates = Vec::new();
+        let mut best: Option<f32> = None;
+        for offset in [Vec3::ZERO, Vec3::X * radius, -Vec3::X * radius, Vec3::Y * radius, -Vec3::Y * radius] {
+            let ray = (position + offset, -Vec3::Z);
+            candidates.clear();
+            self.pick.ray_candidates(ray, &mut candidates);
+            for &idx in &candidates {
+                if !self.movement_solid(world, idx) {
+                    continue;
+                }
+                if let Some(hit) = self
+                    .geometry_hit(world, idx, ray, now)
+                    .filter(|hit| hit.t.is_finite() && hit.t <= distance && hit.normal.z > 0.7)
+                {
+                    let z = ray.0.z - hit.t;
+                    best = Some(best.map_or(z, |b| b.max(z)));
+                }
+            }
+        }
+        best
+    }
+    /// Presentation prediction only: reject known solid decks, walls and roofs"""
+
+[[patch]]
+id = "water-walk-object-probe-test"
+why = "goes with water-walk-object-probe: a top found under the body, none below the band or beside it, a phantom one ignored"
+paths = ["crates/aurora-viewer/src/scene/picking.rs"]
+op = "literal"
+find = """    #[test]
+    fn swim_landing_finds_a_walkable_top_and_rejects_phantom_and_low_ceiling() {"""
+replace = """// aurora-local-patch: water-walk-object-probe-test
+    #[test]
+    fn water_walk_top_finds_a_solid_top_under_the_body_and_ignores_phantom() {
+        let (mut world, mut scene, front, back) = scene_with_two_objects();
+        for (idx, x) in [(front, 129.0), (back, 140.0)] {
+            let object = world.objects.get_mut(idx).expect("object");
+            object.position = Vec3::new(x, 128.0, 19.0);
+            object.update_flags = 0;
+            scene.gpu[idx].center = object.position;
+            scene.gpu[idx].radius = 2.0;
+            scene.pick.set(idx, super::super::hover::PickEntry::of(&scene.gpu[idx]));
+        }
+        let key = scene.gpu[front].geom.expect("geometry");
+        let GeomState::Ready(geometry) = &mut scene.geoms.get_mut(&key).expect("geometry").state else {
+            panic!("ready geometry");
+        };
+        // a 1 m box's horizontal top, 0.5 m under the water at 20 m
+        let geometry = Arc::get_mut(geometry).expect("unshared test geometry");
+        geometry.pick_faces[0] = Some(PickFace::new(
+            vec![[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]],
+            vec![[0.0; 2]; 4],
+            vec![0, 1, 2, 0, 2, 3],
+        ));
+        let body = Vec3::new(129.0, 128.0, 19.5 + 0.85);
+        let top = scene.water_walk_top(&world, body, 1.7, 18.0).expect("the top");
+        assert!((top - 19.5).abs() < 0.01, "{top}");
+        assert!(
+            scene.water_walk_top(&world, body, 1.7, 19.8).is_none(),
+            "below the lowest looked for"
+        );
+        assert!(
+            scene.water_walk_top(&world, Vec3::new(134.0, 128.0, 20.85), 1.7, 18.0).is_none(),
+            "open water"
+        );
+        world.objects.get_mut(front).expect("front").update_flags |= crate::build::edits::FLAGS_PHANTOM;
+        assert!(
+            scene.water_walk_top(&world, body, 1.7, 18.0).is_none(),
+            "a phantom top never carries"
+        );
+    }
+
+    #[test]
+    fn swim_landing_finds_a_walkable_top_and_rejects_phantom_and_low_ceiling() {"""
+
+[[patch]]
+id = "water-walk-object-pass"
+why = "each frame with water walking on: the top under the body, for the walk's rule (the probe costs five ray tests, only near water)"
+paths = ["crates/aurora-viewer/src/app/movement.rs"]
+op = "literal"
+find = "let step = self.movement_runtime.update(&prefs, &frame, &input, now);"
+replace = """// aurora-local-patch: water-walk-object-pass
+        // Water walking on submerged objects (117-water-height-offsets)
+        self.movement_runtime.water_walk.object_top = frame
+            .water
+            .filter(|water| prefs.water_walk && water.is_finite() && !frame.flying && !frame.seated)
+            .and_then(|water| {
+                let lowest = crate::movement::water_walk::lowest_top(water, prefs.water_walk_height);
+                self.scene.water_walk_top(&self.world, frame.position, frame.height, lowest)
+            });
+        let step = self.movement_runtime.update(&prefs, &frame, &input, now);"""

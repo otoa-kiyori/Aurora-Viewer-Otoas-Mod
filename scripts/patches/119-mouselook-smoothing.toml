@@ -1,0 +1,475 @@
+# Mouselook smoothing: a choice of how the view follows the mouse in
+# mouselook, and one strength.
+#
+# Preferences › Camera › Mouselook: "Mouselook smoothing" (a drop-down, Off by
+# default) and "Strength" (0 to 1.00 in 0.01 steps, 0 by default, greyed
+# while Off). Kept with the other mouselook settings (settings `camera`),
+# bounded on load (CameraSettings::sanitized); an old settings file loads
+# Off / 0. Off, or a strength of 0, is today's viewer bit for bit: the
+# filter is bypassed entirely and the mouse writes the agent's yaw and pitch
+# as before (a test checks the bits).
+#
+# Where it sits (camera/mouselook_smoothing.rs): the mouse turns an AIM
+# (yaw and pitch after the sensitivity, pitch limits applied); once a frame,
+# after the agent's own update and before the camera reads it, the filter
+# moves the VIEW toward the aim and writes it to the agent's yaw and pitch.
+# The filters take the aim as moving in a straight line during each frame
+# and solve their equation exactly over it, so a given motion gives the same
+# view at any frame rate; a frame of 0.5 s or more puts the view on the aim;
+# yaw goes the short way across ±180°; pitch never leaves the agent's limits;
+# a held aim is reached exactly. The techniques:
+# - Frame average: the mean of the aim over the last N frames' worth of
+#   time at 60 fps, N = 1 + 7 × strength (a window of 0 to 117 ms); no drift.
+# - Exponential: view += (aim - view)(1 - e^(-dt/tau)), tau = 0.5 s ×
+#   strength² (0.25 → 31 ms, 0.5 → 125 ms, 1 → 0.5 s: the squared slider
+#   keeps the light, useful settings on its first half). Its relative is the
+#   Legacy Viewer's fixed-strength MouseSmooth (LLViewerWindow::
+#   updateMouseDelta, indra/newview/llviewerwindow.cpp, originally LGPL 2.1).
+# - One Euro: the published adaptive low-pass (a cutoff that rises with the
+#   speed of the motion, the derivative low-passed at 1 Hz as the paper
+#   does). Minimum cutoff 25 Hz × (0.5/25)^strength (25 Hz near 0, 3.5 Hz at
+#   0.5, 0.5 Hz at 1); speed coefficient 6 Hz per rad/s, so a turn of
+#   170°/s raises the cutoff by about 18 Hz and stays nearly direct (1.3°
+#   behind at 0.5, against 7.7° for an exponential with the same smoothing
+#   of slow motion), while a ±0.05° tremor is damped to almost nothing.
+# - Damped spring: a critically damped spring (the closed form of the usual
+#   "smooth damp"; no overshoot), catch-up time 1 s × strength².
+# - Leading cursor: the aim moves at once and the crosshair shows it, off
+#   the centre; the view follows with the same spring (up to 1 s) and so
+#   brings the crosshair back to the centre. The aim stays within 85% of
+#   the half screen: at the edge it drags the view along. In this mode a
+#   mouselook click (touch / grab of what is under the crosshair), the depth
+#   of field's and the photo's mouselook focus and the combat aids' "under
+#   the crosshair" all use the aim, through one helper
+#   (Camera::mouselook_aim_pixel / mouselook_aim_forward); in the four
+#   others the crosshair and the clicks stay at the centre, as today.
+#
+# What the region and others see: the smoothed view IS the agent's yaw and
+# pitch, so the body rotation, the head rotation, the camera and the
+# look-at of the AgentUpdate all follow what the user sees and nothing snaps
+# ahead. What is sent and how often is unchanged (aurora-net's rule of
+# send_agent_update is not touched; a slower turn only crosses its
+# thresholds at another moment).
+#
+# Resets: leaving mouselook, entering it, a mode the mouse does not turn
+# (VR, flycam, free camera, a Director track), a teleport, sitting down or
+# standing up, a change of technique, and any other turn of the agent over
+# 1 rad in one frame start the filter again from the current direction. A
+# turning seat turns the aim and the view together (not smoothed). Switching
+# Off while turning keeps the mouse's last motion.
+#
+# Other inputs: a game controller or joystick turning the view in mouselook
+# (MoveInput::joystick_yaw / joystick_pitch, applied by AgentState::update)
+# shares the aim: its turn becomes a turn of the aim and is smoothed the
+# same. The turn keys do not turn in mouselook (they strafe), unchanged.
+# The third-person camera is not touched.
+#
+# Verified: pure tests of every technique (strength 0 and Off bypass, the
+# view converges and ends exactly on a held aim, no overshoot for the spring
+# and the leading cursor, the same motion at 30 and 120 fps, the ±180° wrap,
+# a huge or invalid frame time, the pitch limits, the One Euro sweep and
+# tremor numbers, the leading cursor's margin, the agent's other turns and
+# the resets), the settings' bounds and round trip, and the bit-for-bit
+# bypass through the camera. Texts in the English, French and Japanese
+# catalogues. Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------------ module
+
+[[patch]]
+id = "mouselook-smoothing-module"
+why = "the filters (pure, with their tests) and the camera's glue: one step a frame, the aim's pixel and direction for picks"
+paths = ["crates/aurora-viewer/src/camera/mouselook_smoothing.rs"]
+op = "add_file"
+source = "files/mouselook-smoothing/mouselook_smoothing.rs"
+
+[[patch]]
+id = "mouselook-smoothing-mod"
+why = "declare the module"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "literal"
+find = '''
+mod mouselook_zoom;
+'''
+replace = '''
+pub mod mouselook_smoothing; // aurora-local-patch: mouselook-smoothing-mod
+mod mouselook_zoom;'''
+
+# ------------------------------------------------------------------ camera
+
+[[patch]]
+id = "mouselook-smoothing-field"
+why = "the camera keeps the smoothing's state"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "literal"
+find = '''
+    gamepad_ml_zoom: mouselook_zoom::GamepadZoom,
+'''
+replace = '''
+gamepad_ml_zoom: mouselook_zoom::GamepadZoom,
+    // aurora-local-patch: mouselook-smoothing-field
+    /// The mouselook smoothing's aim and filter (`mouselook_smoothing.rs`).
+    ml_smooth: mouselook_smoothing::Smoother,'''
+
+[[patch]]
+id = "mouselook-smoothing-field-default"
+why = "no smoothing state at start"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "literal"
+find = '''
+            gamepad_ml_zoom: Default::default(),
+            virtual_position: Vec3::ZERO,
+'''
+replace = '''
+gamepad_ml_zoom: Default::default(),
+            ml_smooth: Default::default(), // aurora-local-patch: mouselook-smoothing-field-default
+            virtual_position: Vec3::ZERO,'''
+
+[[patch]]
+id = "mouselook-smoothing-look"
+why = "while a filter runs the mouse turns the aim; otherwise the agent, exactly as before"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "literal"
+find = '''
+    pub fn look(&mut self, dx: f32, dy: f32, sensitivity: f32, agent: &mut AgentState) {
+        let k = DRAG_RATE * sensitivity;
+'''
+replace = '''
+pub fn look(&mut self, dx: f32, dy: f32, sensitivity: f32, agent: &mut AgentState) {
+        let k = DRAG_RATE * sensitivity;
+        // aurora-local-patch: mouselook-smoothing-look
+        if self.ml_smooth.engaged() {
+            self.ml_smooth.turn(-dx * k, -dy * k);
+            return;
+        }'''
+
+[[patch]]
+id = "mouselook-smoothing-seat"
+why = "a turning seat turns the smoothed view and its aim together, not through the filter"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "literal"
+find = '''
+                if let Some(yaw) = flat(rot * Vec3::new(seat.local_yaw.cos(), seat.local_yaw.sin(), 0.0)) {
+                    agent.yaw = yaw;
+                }
+'''
+replace = '''
+if let Some(yaw) = flat(rot * Vec3::new(seat.local_yaw.cos(), seat.local_yaw.sin(), 0.0)) {
+                    // aurora-local-patch: mouselook-smoothing-seat
+                    self.ml_smooth.shift_frame(yaw - agent.yaw);
+                    agent.yaw = yaw;
+                }'''
+
+[[patch]]
+id = "mouselook-smoothing-teleport"
+why = "a teleport starts the smoothing again from the arriving direction"
+paths = ["crates/aurora-viewer/src/camera/mod.rs"]
+op = "insert_fn_start"
+fn = "on_teleport_arrival"
+body = '''
+self.reset_mouselook_smoothing();
+'''
+
+# ------------------------------------------------------------------ settings
+
+[[patch]]
+id = "mouselook-smoothing-settings"
+why = "the technique and the strength, with the other mouselook settings"
+paths = ["crates/aurora-viewer/src/camera/settings.rs"]
+op = "literal"
+find = '''
+    pub show_interface_in_mouselook: bool,
+'''
+replace = '''
+pub show_interface_in_mouselook: bool,
+    // aurora-local-patch: mouselook-smoothing-settings
+    /// How the view follows the mouse in mouselook (Off: exactly).
+    pub mouselook_smoothing: super::mouselook_smoothing::Technique,
+    /// Its strength, 0 to 1 (0: none).
+    pub mouselook_smoothing_strength: f32,'''
+
+[[patch]]
+id = "mouselook-smoothing-settings-default"
+why = "Off and 0 by default"
+paths = ["crates/aurora-viewer/src/camera/settings.rs"]
+op = "literal"
+find = '''
+            show_interface_in_mouselook: false,
+'''
+replace = '''
+show_interface_in_mouselook: false,
+            // aurora-local-patch: mouselook-smoothing-settings-default
+            mouselook_smoothing: super::mouselook_smoothing::Technique::Off,
+            mouselook_smoothing_strength: 0.0,'''
+
+[[patch]]
+id = "mouselook-smoothing-settings-bounds"
+why = "a strength from an edited file is finite and within 0 to 1"
+paths = ["crates/aurora-viewer/src/camera/settings.rs"]
+op = "literal"
+find = '''
+        self.mouselook_iff_range = fix(self.mouselook_iff_range, 0.0, 500.0, d.mouselook_iff_range);
+'''
+replace = '''
+self.mouselook_iff_range = fix(self.mouselook_iff_range, 0.0, 500.0, d.mouselook_iff_range);
+        // aurora-local-patch: mouselook-smoothing-settings-bounds
+        self.mouselook_smoothing_strength = super::mouselook_smoothing::sanitize_strength(self.mouselook_smoothing_strength);'''
+
+# ------------------------------------------------------------------ the frame
+
+[[patch]]
+id = "mouselook-smoothing-step"
+why = "one step a frame, after the agent's update (its controller turn) and before the camera and the AgentUpdate read the agent"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                self.vr_rig_yaw += (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            }
+'''
+replace = '''
+self.vr_rig_yaw += (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            }
+            // aurora-local-patch: mouselook-smoothing-step
+            if self.vr_camera.is_none() && self.studio_photo_session.is_none() {
+                let aspect = self.camera_aspect();
+                self.camera
+                    .smooth_mouselook(&mut self.world.agent, &self.settings.camera, dt, aspect);
+            } else {
+                self.camera.reset_mouselook_smoothing();
+            }'''
+
+[[patch]]
+id = "mouselook-smoothing-crosshair"
+why = "the leading cursor's crosshair is drawn where the aim is"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                if self.camera.mouselook() && !vr_active {
+                    let c = ctx.content_rect().center();
+'''
+replace = '''
+if self.camera.mouselook() && !vr_active {
+                    let c = ctx.content_rect().center();
+                    // aurora-local-patch: mouselook-smoothing-crosshair
+                    let aim_at = {
+                        let r = ctx.content_rect();
+                        self.camera
+                            .mouselook_aim_ndc(r.width() / r.height().max(1.0))
+                            .map_or(c, |n| c + egui::vec2(n.x * r.width() * 0.5, -n.y * r.height() * 0.5))
+                    };'''
+
+[[patch]]
+id = "mouselook-smoothing-crosshair-draw"
+why = "draw it there (the centre in every other mode)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                        ui::crosshair::draw(&painter, c, crosshair, picture.as_ref());
+'''
+replace = '''
+ui::crosshair::draw(&painter, aim_at, crosshair, picture.as_ref()); // aurora-local-patch: mouselook-smoothing-crosshair-draw'''
+
+[[patch]]
+id = "mouselook-smoothing-combat"
+why = "the combat aids' avatar under the crosshair is the one under the leading cursor's aim"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                        self.camera.position,
+                        self.camera.forward(),
+                        &camera,
+'''
+replace = '''
+self.camera.position,
+                        self.camera.mouselook_aim_forward(), // aurora-local-patch: mouselook-smoothing-combat
+                        &camera,'''
+
+# ------------------------------------------------------------------ picks at the crosshair
+
+[[patch]]
+id = "mouselook-smoothing-gun"
+why = "a mouselook click touches or grabs what is under the crosshair, which the leading cursor moves"
+paths = ["crates/aurora-viewer/src/app/script_clicks.rs"]
+op = "literal"
+find = '''
+            self.cursor_pos = (w as f32 * 0.5, h as f32 * 0.5);
+'''
+replace = '''
+// aurora-local-patch: mouselook-smoothing-gun
+            self.cursor_pos = self.camera.mouselook_aim_pixel(w as f32, h as f32);'''
+
+[[patch]]
+id = "mouselook-smoothing-dof"
+why = "the depth of field's mouselook focus is at the crosshair"
+paths = ["crates/aurora-viewer/src/app/dof.rs"]
+op = "literal"
+find = '''
+            renderer.hover_pick(w as f32 * 0.5, h as f32 * 0.5)
+'''
+replace = '''
+// aurora-local-patch: mouselook-smoothing-dof
+            let (x, y) = self.camera.mouselook_aim_pixel(w as f32, h as f32);
+            renderer.hover_pick(x, y)'''
+
+[[patch]]
+id = "mouselook-smoothing-viewfinder"
+why = "the photo's pointer focus in mouselook is at the crosshair"
+paths = ["crates/aurora-viewer/src/app/viewfinder.rs"]
+op = "literal"
+find = '''
+                    (w as f32 * 0.5, h as f32 * 0.5)
+'''
+replace = '''
+self.camera.mouselook_aim_pixel(w as f32, h as f32) // aurora-local-patch: mouselook-smoothing-viewfinder'''
+
+# ------------------------------------------------------------------ Preferences
+
+[[patch]]
+id = "mouselook-smoothing-options"
+why = "the drop-down and the strength slider, under the other mouselook rows"
+paths = ["crates/aurora-viewer/src/ui/options/pages/camera.rs"]
+op = "literal"
+find = '''
+                cx.slider(
+                    tr!("ui-options-camera-combat-range"),
+                    "",
+                    &field!(camera.mouselook_iff_range),
+                    0.0..=500.0,
+                    " m",
+                );
+            });
+        });
+'''
+replace = '''
+cx.slider(
+                    tr!("ui-options-camera-combat-range"),
+                    "",
+                    &field!(camera.mouselook_iff_range),
+                    0.0..=500.0,
+                    " m",
+                );
+            });
+        });
+        // aurora-local-patch: mouselook-smoothing-options
+        {
+            use crate::camera::mouselook_smoothing::{STRENGTH_RANGE, Technique};
+            cx.combo(
+                tr!("ui-options-camera-ml-smoothing"),
+                tr!("ui-options-camera-ml-smoothing-tip"),
+                &field!(camera.mouselook_smoothing),
+                &[
+                    (Technique::Off, tr!("ui-options-camera-ml-smoothing-off")),
+                    (Technique::FrameAverage, tr!("ui-options-camera-ml-smoothing-average")),
+                    (Technique::Exponential, tr!("ui-options-camera-ml-smoothing-exponential")),
+                    (Technique::OneEuro, tr!("ui-options-camera-ml-smoothing-one-euro")),
+                    (Technique::DampedSpring, tr!("ui-options-camera-ml-smoothing-spring")),
+                    (Technique::LeadingCursor, tr!("ui-options-camera-ml-smoothing-leading")),
+                ],
+            );
+            cx.greyed(cx.s.camera.mouselook_smoothing == Technique::Off);
+            cx.row(
+                tr!("ui-options-camera-ml-smoothing-strength"),
+                tr!("ui-options-camera-ml-smoothing-strength-tip"),
+                &field!(camera.mouselook_smoothing_strength),
+                |ui, s| {
+                    ui.spacing_mut().slider_width = super::super::SLIDER_W;
+                    ui.add(
+                        egui::Slider::new(&mut s.camera.mouselook_smoothing_strength, STRENGTH_RANGE)
+                            .step_by(0.01)
+                            .fixed_decimals(2)
+                            .custom_parser(aurora_i18n::parse_number)
+                            .trailing_fill(true),
+                    )
+                    .changed()
+                },
+            );
+            cx.greyed(false);
+        }'''
+
+# ------------------------------------------------------------------ texts
+
+[[patch]]
+id = "mouselook-smoothing-en"
+why = "the English texts"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''
+ui-options-camera-combat-range = Marker range
+'''
+replace = '''
+ui-options-camera-combat-range = Marker range
+# // aurora-local-patch: mouselook-smoothing-en
+ui-options-camera-ml-smoothing = Mouselook smoothing
+ui-options-camera-ml-smoothing-tip =
+    How the view follows the mouse in mouselook. Your avatar turns with the smoothed view, so others see what you see.
+    Off: the view turns exactly with the mouse.
+    Frame average: the motion of the last few frames is evened out, with very little lag.
+    Exponential: the view glides toward where the mouse points; steady, a little behind every motion.
+    One Euro: slow, fine aiming is smoothed while fast turns stay almost direct.
+    Damped spring: the view eases in and out like a camera on a spring, without overshooting.
+    Leading cursor: the crosshair moves at once and the view follows it back to the centre; clicks go where the crosshair is.
+ui-options-camera-ml-smoothing-off = Off
+ui-options-camera-ml-smoothing-average = Frame average
+ui-options-camera-ml-smoothing-exponential = Exponential
+ui-options-camera-ml-smoothing-one-euro = One Euro
+ui-options-camera-ml-smoothing-spring = Damped spring
+ui-options-camera-ml-smoothing-leading = Leading cursor
+ui-options-camera-ml-smoothing-strength = Strength
+ui-options-camera-ml-smoothing-strength-tip = How much smoothing: 0 is none, 1 the strongest (about half a second of lag, one second of catch-up for the spring and the leading cursor)'''
+
+[[patch]]
+id = "mouselook-smoothing-fr"
+why = "the French texts"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''
+ui-options-camera-combat-range = Portée des marqueurs
+'''
+replace = '''
+ui-options-camera-combat-range = Portée des marqueurs
+# // aurora-local-patch: mouselook-smoothing-fr
+ui-options-camera-ml-smoothing = Lissage de la vue subjective
+ui-options-camera-ml-smoothing-tip =
+    Comment la vue suit la souris en vue subjective. Votre avatar tourne avec la vue lissée : les autres voient ce que vous voyez.
+    Désactivé : la vue tourne exactement avec la souris.
+    Moyenne des images : le mouvement des dernières images est égalisé, avec très peu de retard.
+    Exponentiel : la vue glisse vers là où pointe la souris ; régulier, un peu en retard sur chaque mouvement.
+    One Euro : la visée lente et fine est lissée, les rotations rapides restent presque directes.
+    Ressort amorti : la vue démarre et s'arrête en douceur, comme une caméra sur un ressort, sans dépasser.
+    Curseur en avance : le réticule bouge tout de suite et la vue le suit jusqu'au centre ; les clics vont là où est le réticule.
+ui-options-camera-ml-smoothing-off = Désactivé
+ui-options-camera-ml-smoothing-average = Moyenne des images
+ui-options-camera-ml-smoothing-exponential = Exponentiel
+ui-options-camera-ml-smoothing-one-euro = One Euro
+ui-options-camera-ml-smoothing-spring = Ressort amorti
+ui-options-camera-ml-smoothing-leading = Curseur en avance
+ui-options-camera-ml-smoothing-strength = Force
+ui-options-camera-ml-smoothing-strength-tip = L'importance du lissage : 0 aucun, 1 le plus fort (environ une demi-seconde de retard, une seconde de rattrapage pour le ressort et le curseur en avance)'''
+
+[[patch]]
+id = "mouselook-smoothing-ja"
+why = "the Japanese texts"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "literal"
+find = '''
+ui-options-camera-combat-range = マーカーの範囲
+'''
+replace = '''
+ui-options-camera-combat-range = マーカーの範囲
+# // aurora-local-patch: mouselook-smoothing-ja
+ui-options-camera-ml-smoothing = マウスルックの滑らかさ
+ui-options-camera-ml-smoothing-tip =
+    マウスルック中に視点がマウスにどう追従するかを選びます。アバターは滑らかにした視点と一緒に回るので、ほかの人にもあなたが見ている方向が見えます。
+    オフ：視点はマウスとまったく同じに回ります。
+    フレーム平均：直前の数フレームの動きをならします。遅れはごくわずかです。
+    指数平滑：視点がマウスの向きへ滑るように近づきます。安定していますが、どの動きにも少し遅れます。
+    One Euro：ゆっくりした細かい照準は滑らかにし、速い回転はほぼそのまま通します。
+    減衰スプリング：ばねに付いたカメラのように、行き過ぎずに滑らかに動き出して止まります。
+    先行カーソル：照準がすぐに動き、視点がそれを追って画面中央へ戻します。クリックは照準のある位置に届きます。
+ui-options-camera-ml-smoothing-off = オフ
+ui-options-camera-ml-smoothing-average = フレーム平均
+ui-options-camera-ml-smoothing-exponential = 指数平滑
+ui-options-camera-ml-smoothing-one-euro = One Euro
+ui-options-camera-ml-smoothing-spring = 減衰スプリング
+ui-options-camera-ml-smoothing-leading = 先行カーソル
+ui-options-camera-ml-smoothing-strength = 強さ
+ui-options-camera-ml-smoothing-strength-tip = 滑らかさの度合いです。０でなし、１で最大です（遅れは約０．５秒、スプリングと先行カーソルの追いつきは約１秒）。'''

@@ -1,0 +1,337 @@
+# Aurora Weather: the top quarter of the Amount slider falls harder. A
+# downpour and a blizzard draw up to RAIN_TOP_COUNT times the drops or
+# flakes, their splashes and landing flakes, and as many more streaks in
+# the distant rain's sheets, and the near streaks and flakes stand out more
+# (RAIN_TOP_BOOST times their opacity).
+#
+# What: upstream's drops pass draws `rain_drops` instances (renderer.rs:
+# Amount x 45,000 x the weather quality's share, in a 44 x 44 x 30 m box
+# around the camera, env.wgsl `RAIN_BOX`, `vs_rain`), the splashes Amount x
+# 9,000 places (snow: 1,200 landing flakes), and the distant rain
+# (`fs_rain_far`) two offset patterns of faint streaks a layer. Each drop
+# is mostly transparent (`rain_streak`: a fifth of its light at its
+# middle; `snow_flake`: 0.85 at most), so at 4K a full downpour reads as a
+# few drops.
+#
+# Now (renderer.rs `rain_top`, `top_count`, `top_boost`): below Amount 0.75
+# nothing changes (the same counts, to the bit, and the same uniform). From
+# 0.75 to 1 a ramp, 0 to 1, multiplies:
+# - the drops' and the splashes' instance counts (and the snow's flakes
+#   that land) by 1 to RAIN_TOP_COUNT (4 at first: 180,000 drops at High);
+#   they are drawn without buffers (instance ids hashed into places), so
+#   nothing has a cap to raise;
+# - the distant rain's patterns: up to 2 x RAIN_TOP_COUNT a layer, the extra
+#   ones fading in with the ramp (Frame::snow_far.y, the count factor less
+#   1; the loop stays at two below 0.75);
+# - the near streaks' and flakes' opacity by 1 to RAIN_TOP_BOOST (1.5 at
+#   first; Frame::snow_far.z, the boost less 1, read only when above 0),
+#   splashes and landed flakes included (they share the fragment).
+# The Amount value itself is not changed: everything else that reads it
+# (the drops' sizes and the splashes' force, the wet ground and puddles and
+# their rings, the lying snow's build-up, footprints and deep snow, the
+# snow on avatars, the rain's sound, the thunder, the ground's wetness
+# memory) reads what it read before.
+#
+# Cost: at Amount 0.75 and below, none (the same instance counts, the far
+# loop's bound read from a uniform, one compare a fragment in the streaks
+# and flakes). At the top end, the drops' and splashes' fill grows with the
+# count, and the distant rain's loop runs up to four times as long.
+#
+# Test variable: AURORA_WEATHER_SIZE=<0..1.29>, the Flake size and Drop size
+# position until the Aurora Weather window is used (patch 105's sizes; its
+# two steps are optional without it).
+#
+# Tests: renderer.rs rain_top_tests (below 0.75 the counts are upstream's
+# formulas written out, to the bit, and the factors exactly 1; continuous
+# at 0.75; monotonic; the top values); the shaders through naga (lib.rs).
+
+# ------------------------------------------------------------ renderer
+
+[[patch]]
+id = "weather-top-fns"
+why = "the top quarter's ramp, its two factors and the splashes' count, with their tests"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''fn rain_share(quality: u32) -> f32 {
+    match quality {
+        0 => 0.45,
+        1 => 0.7,
+        _ => 1.0,
+    }
+}'''
+replace = '''fn rain_share(quality: u32) -> f32 {
+    match quality {
+        0 => 0.45,
+        1 => 0.7,
+        _ => 1.0,
+    }
+}
+
+// aurora-local-patch: weather-top-fns
+/// Where the top quarter of the Amount slider starts (local patch set,
+/// 105-weather-top-end): below it, the drops, splashes and distant rain as
+/// upstream draws them.
+const RAIN_TOP_FROM: f32 = 0.75;
+/// How many times the drops, splashes, landing flakes and distant streaks
+/// at Amount 1.
+const RAIN_TOP_COUNT: f32 = 4.0;
+/// How many times the near streaks' and flakes' opacity at Amount 1.
+const RAIN_TOP_BOOST: f32 = 1.5;
+
+/// The top quarter's ramp for an Amount `rain`: 0 up to RAIN_TOP_FROM, 1 at
+/// 1 (0 for a value that is not a number).
+fn rain_top(rain: f32) -> f32 {
+    ((rain.clamp(0.0, 1.0) - RAIN_TOP_FROM) / (1.0 - RAIN_TOP_FROM)).max(0.0)
+}
+
+/// The count factor: exactly 1 below the top quarter.
+fn top_count(rain: f32) -> f32 {
+    1.0 + (RAIN_TOP_COUNT - 1.0) * rain_top(rain)
+}
+
+/// The opacity factor: exactly 1 below the top quarter.
+fn top_boost(rain: f32) -> f32 {
+    1.0 + (RAIN_TOP_BOOST - 1.0) * rain_top(rain)
+}
+
+/// The splashes drawn (in snow, the flakes that land): up to 9,000 places
+/// (1,200 in snow) at the quality's share, times the count factor.
+fn rain_splashes(rain: f32, snow: bool, quality: u32) -> u32 {
+    let places = if snow { 1_200.0 } else { 9_000.0 };
+    (rain.clamp(0.0, 1.0) * places * rain_share(quality) * top_count(rain)) as u32
+}
+
+#[cfg(test)]
+mod rain_top_tests {
+    use super::*;
+
+    // upstream's counts, written out
+    fn upstream_drops(rain: f32, quality: u32) -> u32 {
+        (rain.clamp(0.0, 1.0) * 45_000.0 * [0.45, 0.7, 1.0][quality.min(2) as usize]) as u32
+    }
+
+    fn upstream_splashes(rain: f32, snow: bool, quality: u32) -> u32 {
+        let places = if snow { 1_200.0 } else { 9_000.0 };
+        (rain.clamp(0.0, 1.0) * places * [0.45, 0.7, 1.0][quality.min(2) as usize]) as u32
+    }
+
+    #[test]
+    fn below_the_top_quarter_the_rain_is_upstream_s() {
+        for quality in 0..4 {
+            for i in -10..=7500 {
+                let rain = i as f32 / 10_000.0;
+                assert_eq!(rain_drops(rain, quality), upstream_drops(rain, quality), "{rain} {quality}");
+                for snow in [false, true] {
+                    assert_eq!(
+                        rain_splashes(rain, snow, quality),
+                        upstream_splashes(rain, snow, quality),
+                        "{rain} {snow}"
+                    );
+                }
+                assert_eq!(top_count(rain).to_bits(), 1f32.to_bits(), "{rain}");
+                assert_eq!(top_boost(rain).to_bits(), 1f32.to_bits(), "{rain}");
+            }
+        }
+        for odd in [f32::NAN, f32::NEG_INFINITY, -1.0] {
+            assert_eq!((top_count(odd), top_boost(odd)), (1.0, 1.0));
+            assert_eq!(rain_drops(odd, 2), upstream_drops(odd, 2));
+        }
+    }
+
+    #[test]
+    fn the_top_quarter_ramps_up_without_a_step() {
+        for quality in 0..3 {
+            let mut last = (
+                rain_drops(0.75, quality),
+                rain_splashes(0.75, false, quality),
+                rain_splashes(0.75, true, quality),
+            );
+            let (mut count, mut boost) = (1.0, 1.0);
+            for i in 1..=2500 {
+                let rain = 0.75 + 0.25 * i as f32 / 2500.0;
+                let now = (
+                    rain_drops(rain, quality),
+                    rain_splashes(rain, false, quality),
+                    rain_splashes(rain, true, quality),
+                );
+                // monotonic, and no more per 1 / 10,000 of the slider than
+                // the top's slope (45,000 x 4 + 45,000 x 12, a unit of
+                // Amount) allows
+                assert!(now.0 >= last.0 && now.1 >= last.1 && now.2 >= last.2, "{rain}");
+                assert!(
+                    now.0 - last.0 <= 80 && now.1 - last.1 <= 16 && now.2 - last.2 <= 3,
+                    "{rain}: {last:?} -> {now:?}"
+                );
+                let (c, b) = (top_count(rain), top_boost(rain));
+                assert!(c >= count && b >= boost && c - count < 2e-3 && b - boost < 1e-3, "{rain}");
+                (last, count, boost) = (now, c, b);
+            }
+        }
+        assert_eq!(top_count(1.0), RAIN_TOP_COUNT);
+        assert_eq!(top_boost(1.0), RAIN_TOP_BOOST);
+        assert_eq!(top_count(2.0), RAIN_TOP_COUNT);
+        assert_eq!(rain_drops(1.0, 2), 180_000);
+        assert_eq!(rain_splashes(1.0, false, 2), 36_000);
+        assert_eq!(rain_splashes(1.0, true, 2), 4_800);
+    }
+}'''
+
+[[patch]]
+id = "weather-top-count"
+why = "the drops: times the count factor (exactly 1 below the top quarter)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+fn = "rain_drops"
+op = "literal"
+find = "(rain.clamp(0.0, 1.0) * 45_000.0 * rain_share(quality)) as u32"
+replace = "(rain.clamp(0.0, 1.0) * 45_000.0 * rain_share(quality) * top_count(rain)) as u32 // aurora-local-patch: weather-top-count"
+
+[[patch]]
+id = "weather-top-splash"
+why = "the splashes and the landing flakes: rain_splashes, times the count factor"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''let places = if f.rain_look.snow > 0.0 { 1_200.0 } else { 9_000.0 };
+                    pass.draw(0..36, 0..(f.rain.clamp(0.0, 1.0) * places * rain_share(f.rain_look.quality)) as u32);'''
+replace = '''// aurora-local-patch: weather-top-splash
+                    pass.draw(0..36, 0..rain_splashes(f.rain, f.rain_look.snow > 0.0, f.rain_look.quality));'''
+
+[[patch]]
+id = "weather-top-uniform"
+why = "the distant rain's extra density and the near opacity boost, each less 1, in two unused lanes"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "u.snow_far = [f.rain_look.snow_distance, 0.0, 0.0, 0.0];"
+replace = "u.snow_far = [f.rain_look.snow_distance, top_count(f.rain) - 1.0, top_boost(f.rain) - 1.0, 0.0]; // aurora-local-patch: weather-top-uniform"
+
+# ------------------------------------------------------------ shaders
+
+[[patch]]
+id = "weather-top-frame"
+why = "the uniform's two lanes, documented"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "snow_far: vec4<f32>,        // x how far the snow lying is drawn (m), whatever falls (while it snows and while it melts); yzw unused"
+replace = "snow_far: vec4<f32>,        // x how far the snow lying is drawn (m), whatever falls (while it snows and while it melts); y the distant rain's extra density, z the near streaks' and flakes' opacity boost, each less 1 (Amount's top quarter, renderer.rs top_count, top_boost; 0 below it); w unused // aurora-local-patch: weather-top-frame"
+
+[[patch]]
+id = "weather-top-streak"
+why = "the near streaks and splashes: the opacity boost"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+fn = "rain_streak"
+op = "literal"
+find = '''var alpha = taper * sqrt(r) * (0.22 + fresnel * 0.55 + lit) * in.life;
+    alpha *= 1.0 - rain_sheltered_slanted(in.world);'''
+replace = '''var alpha = taper * sqrt(r) * (0.22 + fresnel * 0.55 + lit) * in.life;
+    alpha *= 1.0 - rain_sheltered_slanted(in.world);
+    // aurora-local-patch: weather-top-streak
+    // Amount's top quarter: more opaque
+    if (frame.snow_far.z > 0.0) { alpha = min(alpha * (1.0 + frame.snow_far.z), 1.0); }'''
+
+[[patch]]
+id = "weather-top-flake"
+why = "the near flakes and the flakes that land: the opacity boost"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+fn = "snow_flake"
+op = "literal"
+find = '''alpha *= 1.0 - rain_sheltered_slanted(in.world);'''
+replace = '''alpha *= 1.0 - rain_sheltered_slanted(in.world);
+    // aurora-local-patch: weather-top-flake
+    // Amount's top quarter: more opaque
+    if (frame.snow_far.z > 0.0) { alpha = min(alpha * (1.0 + frame.snow_far.z), 1.0); }'''
+
+[[patch]]
+id = "weather-top-far-loop"
+why = "the distant rain: up to 2 x the count factor patterns a layer, the extra ones fading in"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+fn = "rain_far_streaks"
+op = "literal"
+find = "for (var s = 0; s < 2; s++) {"
+replace = '''// aurora-local-patch: weather-top-far-loop
+        // Amount's top quarter: more offset patterns, the extra ones fading
+        // in (snow_far.y, the count factor less 1: none below it)
+        let extra = 2.0 * frame.snow_far.y;
+        let patterns = 2 + i32(ceil(extra));
+        for (var s = 0; s < patterns; s++) {
+            let weight = select(1.0, clamp(extra - f32(s - 2), 0.0, 1.0), s >= 2);'''
+
+[[patch]]
+id = "weather-top-far-seed"
+why = "the extra patterns' own seeds (the first two keep theirs)"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+fn = "rain_far_streaks"
+op = "literal"
+find = "let seed = bitcast<u32>(i32(col)) * 747796405u + u32(k * 2 + s) * 2891336453u + 17u;"
+replace = "let seed = bitcast<u32>(i32(col)) * 747796405u + select(u32(k * 2 + s), u32(64 + k * 8 + s), s >= 2) * 2891336453u + 17u; // aurora-local-patch: weather-top-far-seed"
+
+[[patch]]
+id = "weather-top-far-weight"
+why = "the extra patterns at their weight"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+fn = "rain_far_streaks"
+op = "literal"
+find = "lift += across * along * faint * seen * drifts * (0.06 - 0.01 * f32(k)) * select(1.0, 1.4, snow);"
+replace = "lift += across * along * faint * seen * drifts * (0.06 - 0.01 * f32(k)) * select(1.0, 1.4, snow) * weight; // aurora-local-patch: weather-top-far-weight"
+
+# ------------------------------------------------------------ test variable
+
+[[patch]]
+id = "weather-top-size-flake"
+why = "AURORA_WEATHER_SIZE: the Flake size position until the window is used"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+fn = "flake_scale"
+op = "literal"
+required = false
+find = "size_scale(self.snow_size)"
+replace = "size_scale(env_size().filter(|_| !self.touched).unwrap_or(self.snow_size)) // aurora-local-patch: weather-top-size-flake"
+
+[[patch]]
+id = "weather-top-size-drop"
+why = "AURORA_WEATHER_SIZE: the Drop size position until the window is used"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+fn = "drop_scale"
+op = "literal"
+required = false
+find = "size_scale(self.rain_size)"
+replace = "size_scale(env_size().filter(|_| !self.touched).unwrap_or(self.rain_size)) // aurora-local-patch: weather-top-size-drop"
+
+[[patch]]
+id = "weather-top-size-env"
+why = "AURORA_WEATHER_SIZE read once"
+paths = ["crates/aurora-viewer/src/weather/mod.rs"]
+op = "literal"
+required = false
+find = '''/// `AURORA_WEATHER_QUALITY=low|medium|high`: the weather's quality until
+/// the menu is used (measurements, `AURORA_PROFILE`).'''
+replace = '''// aurora-local-patch: weather-top-size-env
+/// `AURORA_WEATHER_SIZE=<0..1.29>`: the Flake size and Drop size position
+/// until the menu is used (measurements, demo captures).
+#[allow(dead_code)]
+fn env_size() -> Option<f32> {
+    static SIZE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| std::env::var("AURORA_WEATHER_SIZE").ok().and_then(|v| v.trim().parse::<f32>().ok()))
+}
+
+/// `AURORA_WEATHER_QUALITY=low|medium|high`: the weather's quality until
+/// the menu is used (measurements, `AURORA_PROFILE`).'''
+
+[[patch]]
+id = "weather-top-size-doc"
+why = "the test variable in the weather table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "| `AURORA_WEATHER_QUALITY=low\\|medium\\|high` | The weather's quality until the Aurora Weather window is used |"
+replace = '''| `AURORA_WEATHER_QUALITY=low\|medium\|high` | The weather's quality until the Aurora Weather window is used |
+| `AURORA_WEATHER_SIZE=<0..1.29>` | The Flake size and Drop size position until the Aurora Weather window is used <!-- // aurora-local-patch: weather-top-size-doc --> |'''
+
+[[patch]]
+id = "weather-top-size-details"
+why = "the test variable in the weather details"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''`AURORA_SNOW_DEEP`, `AURORA_SNOW_DEEP_REACH` (metres) and `AURORA_WEATHER_QUALITY` set deep snow, its reach and the
+  quality the same way, to measure each with `AURORA_PROFILE`.'''
+replace = '''`AURORA_SNOW_DEEP`, `AURORA_SNOW_DEEP_REACH` (metres) and `AURORA_WEATHER_QUALITY` set deep snow, its reach and the
+  quality the same way, to measure each with `AURORA_PROFILE`.
+  `AURORA_WEATHER_SIZE=<0..1.29>` sets the Flake size and Drop size
+  sliders' position the same way (0.5 the middle, 1.29 their top).
+  <!-- // aurora-local-patch: weather-top-size-details -->'''

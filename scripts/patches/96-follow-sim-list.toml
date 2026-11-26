@@ -1,0 +1,300 @@
+# With Preferences › Aurora › Animations › Synchronize on, each avatar's
+# playback follows the simulator's AvatarAnimation list exactly. This is
+# Otoa's rule, not a Legacy Viewer port. With the setting off, nothing
+# changes.
+#
+# On each sync of an avatar (scene::anim::Controller::sync), Aurora corrects
+# its motions to the simulator's full list
+# (files/follow-sim-list/follow_sim.rs):
+# 1. What the simulator does not list stops. What it lists plays, also when
+#    our own drawn list (the AO's pose, movement prediction) lacks it.
+# 2. The listed motions are ordered newest first by the simulator's
+#    sequence numbers, not by packet order or download time. The blender
+#    breaks priority ties with this order.
+#    - A restart (a new sequence for a listed id) moves the motion to the
+#      newest place.
+#    - An expression named in an animation's header stays right above that
+#      animation.
+#    - The built-in motions (head, eyes, breathing, body noise) are not in the
+#      list. They stay below every keyframe state of their priority, as
+#      before. IK and foot placement still run after the blend.
+# 3. One copy per animation.
+#    - A restart replaces the copy at once, without a fade. The new copy
+#      starts at the old copy's weight (Motion::floor), so there is no dip.
+#      A loop listed without a break keeps its phase.
+#    - A stop fades the single copy out.
+#    - With the setting on, this replaces anim-restart-legacy's keep rule
+#      (patch 92) and the second instance that fades beside a new one. With
+#      the setting off, both stay exactly as patch 92 has them.
+# 4. Exceptions Otoa chose (World::simulator_list_of, our own avatar):
+#    - The AO keeps hiding what it leaves out of its pose: the stock clips it
+#      replaces, and its own clips it stopped while the simulator still lists
+#      them (the round trip, its 2 s owned grace).
+#    - With Instant movement (predict_own_motion), a predicted stop keeps the
+#      listed walk hidden until the simulator drops it. With Server movement,
+#      the list is followed strictly.
+#    - Our own local starts not listed yet (AO, movement prediction,
+#      previews) rank newest. Once listed, they take their sequence's place.
+#      Our local upload preview is never treated as listed.
+# 5. Nothing is sent to the simulator for this. The sends that already
+#    exist stay as they are.
+# 6. One INFO line, "follow simulator list: avatar <id>: ...", for each sync
+#    that changed something: removed, added, deduplicated, reordered (with
+#    the new order).
+#
+# Animesh (ObjectAnimation) is not followed; it keeps today's playback.
+# Tests: files/follow-sim-list/follow_sim.rs, for both settings. Apply or
+# skip the whole file, not one patch of it. It applies after
+# 92-anim-restart-legacy.toml, whose lines it anchors on.
+
+[[patch]]
+id = "follow-sim-list-module"
+why = "the reconcile (prepare / finish), Controller::follow_simulator and their tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/anim/follow_sim.rs"]
+source = "files/follow-sim-list/follow_sim.rs"
+
+[[patch]]
+id = "follow-sim-list-mod"
+why = "declare the module as a child of anim"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = "pub(super) mod grounding;"
+replace = """mod follow_sim; // aurora-local-patch: follow-sim-list-mod
+pub(super) mod grounding;"""
+
+[[patch]]
+id = "follow-sim-list-field"
+why = "Controller::follow: the simulator's list this avatar follows, and the sequence each copy plays"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = """/// (LLMotionController::mJointSignature), position and rotation bits.
+    joint_signature: Vec<[u8; 2]>,
+}"""
+replace = """/// (LLMotionController::mJointSignature), position and rotation bits.
+    joint_signature: Vec<[u8; 2]>,
+    /// Synchronize on: follow the simulator's list (follow_sim.rs).
+    // aurora-local-patch: follow-sim-list-field
+    follow: follow_sim::Follow,
+}"""
+
+[[patch]]
+id = "follow-sim-list-floor-field"
+why = "Motion::floor: the weight a copy that replaces a restarted one starts at"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = """// aurora-local-patch: anim-restart-legacy-inserted-field
+    inserted: Instant,
+}"""
+replace = """// aurora-local-patch: anim-restart-legacy-inserted-field
+    inserted: Instant,
+    /// The weight of the copy this one replaced (Synchronize on,
+    /// follow_sim.rs): its ease-in starts there, with no dip. 0 otherwise.
+    // aurora-local-patch: follow-sim-list-floor-field
+    floor: f32,
+}"""
+
+[[patch]]
+id = "follow-sim-list-floor-signal"
+why = "a signalled motion starts from no weight, as before"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = "inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-signal"
+replace = """inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-signal
+                        floor: 0.0,    // aurora-local-patch: follow-sim-list-floor-signal"""
+
+[[patch]]
+id = "follow-sim-list-floor-emote"
+why = "an expression an animation names starts from no weight, as before"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = "inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-emote"
+replace = """inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-emote
+                            floor: 0.0,    // aurora-local-patch: follow-sim-list-floor-emote"""
+
+[[patch]]
+id = "follow-sim-list-floor-use"
+why = "the ease-in of a replacing copy starts at the replaced copy's weight; with floor 0 the weight is unchanged"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "ease_in_weight"
+find = """if ease_in > 0.0 {
+            aurora_assets::anim::cubic_step(elapsed / f64::from(ease_in))
+        } else {
+            1.0
+        }"""
+replace = """let weight = if ease_in > 0.0 {
+            aurora_assets::anim::cubic_step(elapsed / f64::from(ease_in))
+        } else {
+            1.0
+        };
+        // aurora-local-patch: follow-sim-list-floor-use
+        if self.floor > 0.0 {
+            self.floor + (1.0 - self.floor) * weight
+        } else {
+            weight
+        }"""
+
+[[patch]]
+id = "follow-sim-list-prepare"
+why = "Synchronize on: replace the copies the simulator restarted, and play the listed motions our own drawn list lacks"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "insert_fn_start"
+fn = "sync"
+impl = "Controller"
+expect_sig = 'pub fn sync\(&mut self, playing: &\[PlayingAnimation\], now: Instant, mut get: impl FnMut\(&Uuid\) -> Option<Arc<BoundAnim>>\) -> Vec<Uuid>'
+body = '''
+// Synchronize on: follow the simulator's list (follow_sim.rs). Off, or
+// for an animesh, `followed` is None and the sync is unchanged.
+let followed = follow_sim::prepare(self, playing, now);
+let playing: &[PlayingAnimation] = followed.as_deref().unwrap_or(playing);
+'''
+
+[[patch]]
+id = "follow-sim-list-finish"
+why = "Synchronize on: one copy per animation, the simulator's order, and the log line"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """true
+        });
+        completed"""
+replace = """true
+        });
+        follow_sim::finish(self, playing, now); // aurora-local-patch: follow-sim-list-finish
+        completed"""
+
+[[patch]]
+id = "follow-sim-list-world"
+why = "World::simulator_list_of: what the simulator lists for an avatar (without our local upload preview), and what our own drawn list hides on purpose (AO, Instant movement's predicted stop)"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "pub fn animations_of(&self, owner: &Uuid) -> &[PlayingAnimation] {"
+replace = """/// Synchronize on (scene/anim/follow_sim.rs): what the simulator lists
+    /// for an avatar, and for our own what our drawn list hides on purpose
+    /// (Otoa's exceptions), so the simulator's list does not bring it back.
+    /// The simulator's list of our own avatar is `animations` without the
+    /// local upload preview, which the AvatarAnimations handler and
+    /// `preview_animation` push last. Hidden on purpose:
+    /// - with Instant movement (`predict_own_motion`, the agent predicting)
+    ///   and the keys released, a predicted stop: the listed motions the
+    ///   prediction's drawn list (`own_drawn`) left out, until the
+    ///   simulator drops them. With Server movement nothing is predicted,
+    ///   and the simulator's list is followed strictly;
+    /// - with the AO's pose, every clip of the AO's input (`own_signals`)
+    ///   missing from its pose: the stock clips it replaces, and its own
+    ///   clips it stopped while the simulator still lists them (the round
+    ///   trip, its 2 s owned grace).
+    // aurora-local-patch: follow-sim-list-world
+    pub fn simulator_list_of(&self, owner: &Uuid) -> (&[PlayingAnimation], Vec<Uuid>) {
+        let listed = self.animations.get(owner).map(Vec::as_slice).unwrap_or_default();
+        if *owner != self.agent_id {
+            return (listed, Vec::new());
+        }
+        // (the local previews, several at once, are pushed last in their order)
+        let mut listed = listed;
+        while let Some((last, rest)) = listed.split_last()
+            && self.local_previews.iter().any(|p| p.signal.id == last.id)
+        {
+            listed = rest;
+        }
+        let mut masked = Vec::new();
+        if self.agent.predicting()
+            && self.own_locomotion.wanted().is_none()
+            && let Some(drawn) = &self.own_drawn
+        {
+            masked.extend(listed.iter().map(|a| a.id).filter(|id| !drawn.iter().any(|d| d.id == *id)));
+        }
+        if let Some(pose) = &self.ao_pose {
+            for id in self.own_signals().iter().map(|a| a.id) {
+                if !pose.iter().any(|p| p.id == id) && !masked.contains(&id) {
+                    masked.push(id);
+                }
+            }
+        }
+        (listed, masked)
+    }
+
+    pub fn animations_of(&self, owner: &Uuid) -> &[PlayingAnimation] {"""
+
+[[patch]]
+id = "follow-sim-list-world-tests"
+why = "World::simulator_list_of: a predicted stop is hidden with Instant movement only, and a clip the AO stopped is hidden at once while still listed"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = """#[test]
+    fn ao_pose_does_not_replace_network_signals_or_other_avatars() {"""
+replace = """// aurora-local-patch: follow-sim-list-world-tests
+    #[test]
+    fn synchronize_hides_a_predicted_stop_with_instant_movement_only() {
+        let (mut world, _, _) = fixture();
+        let me = world.agent_id;
+        let (walk, stand) = (crate::own_motion::ANIM_WALK, crate::own_motion::ANIM_STAND);
+        let now = Instant::now();
+        world.apply(NetEvent::AvatarAnimations {
+            avatar: me,
+            anims: vec![(walk, 4)],
+            sources: Vec::new(),
+        });
+        // the keys released: prediction draws a local stand over the listed walk
+        world.own_drawn = Some(vec![PlayingAnimation::from_signal(stand, i32::MIN, now, None)]);
+        for (instant, hidden) in [(true, vec![walk]), (false, Vec::new())] {
+            world.agent.set_predicting(instant);
+            let (listed, masked) = world.simulator_list_of(&me);
+            let ids: Vec<_> = listed.iter().map(|a| a.id).collect();
+            assert_eq!(ids, [walk], "the simulator's list is unchanged");
+            // Instant: the predicted stop hides the walk; Server: strict
+            assert_eq!(masked, hidden, "Instant {instant}");
+        }
+    }
+
+    #[test]
+    fn synchronize_hides_a_clip_the_ao_stopped_while_it_is_still_listed() {
+        let (mut world, _, _) = fixture();
+        let me = world.agent_id;
+        let (stopped, kept) = (Uuid::from_u128(9630), Uuid::from_u128(9631));
+        let stock = crate::ao::State::Standing.motion();
+        let now = Instant::now();
+        world.apply(NetEvent::AvatarAnimations {
+            avatar: me,
+            anims: vec![(stock, 1), (stopped, 2), (kept, 3)],
+            sources: Vec::new(),
+        });
+        // the AO stopped its own clip and replaces the stock stand
+        world.ao_pose = Some(vec![PlayingAnimation::from_signal(kept, 0, now, None)]);
+        let (listed, masked) = world.simulator_list_of(&me);
+        assert_eq!(listed.len(), 3, "still listed until the simulator's next list");
+        assert_eq!(masked, [stock, stopped]);
+        world.ao_pose = None;
+        assert!(world.simulator_list_of(&me).1.is_empty(), "no AO pose: nothing hidden");
+    }
+
+    #[test]
+    fn ao_pose_does_not_replace_network_signals_or_other_avatars() {"""
+
+[[patch]]
+id = "follow-sim-list-scene"
+why = "each avatar's controller gets the simulator's list before its sync while Synchronize is on, and is released when it is off"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "let stopped = motions.sync_avatar(signals, male, pose_now, |id| anims.get(id));"
+replace = """// aurora-local-patch: follow-sim-list-scene
+                motions.follow_simulator(owner, self.synchronize_animations.then(|| world.simulator_list_of(&owner)));
+                let stopped = motions.sync_avatar(signals, male, pose_now, |id| anims.get(id));"""
+
+[[patch]]
+id = "follow-sim-list-doc"
+why = "the setting's comment says it also makes playback follow the simulator's list"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+required = false
+find = """/// the Legacy Viewer starts at asset activation and suspends during edits.
+    pub synchronize_animations: bool,"""
+replace = """/// the Legacy Viewer starts at asset activation and suspends during edits.
+    /// On, each avatar's playback also follows the simulator's list, in its
+    /// sequence order, one copy per animation (local patch set,
+    /// scene/anim/follow_sim.rs).
+    // aurora-local-patch: follow-sim-list-doc
+    pub synchronize_animations: bool,"""

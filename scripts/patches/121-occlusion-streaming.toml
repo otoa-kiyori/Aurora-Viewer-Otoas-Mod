@@ -1,0 +1,1153 @@
+# Occlusion streaming: objects that stay hidden behind others load less
+# (Aurora's own; the Legacy Viewer freezes the detail level of what its
+# occlusion hides, and sizes textures by the view cone only).
+#
+# Preferences › Graphics, behind the cog of "Occlusion": "Lighter loading
+# behind walls" (on by default; used only with the occlusion on) and
+# "Hidden for" (2 s, 0.5 to 10 s). AURORA_OCCLUSION_STREAMING=0|1 and
+# AURORA_OCCLUSION_STREAMING_DELAY=<s> force them for a launch.
+#
+# GPU. The main view's occlusion test of the GPU draw lists (cull.wgsl
+# cs_occlude) already tests one sphere per object for each face it keeps.
+# It now also sets two bits per object of the scene's table in a buffer of
+# its own (binding 14): tested (the object had a face in the main view's
+# bins) and seen (its sphere, 1.25 times larger plus 0.5 m, passes the Hi-Z
+# test; only the first face of each object does it, and only when the exact
+# test hid it). The draws keep the exact test. The bits are cleared before
+# the pass, copied with the culling's counts into a ring of three mapped
+# buffers and read back a few frames later, never waited for
+# (aurora_render::object_occlusion). With the switch off the buffer is a
+# placeholder of one word and the shader writes nothing. A frame whose main
+# view is not the user's camera (a photo or film frame at its own size, a
+# 360° face, an external output) is not read back, nor is a frame from
+# before the last cut of the motion history (teleport, region change, 360°
+# capture). The CPU draw lists (no GPU culling) give nothing: everything
+# stays as before there. Cost: a clear of 2 bits per object, an atomic per
+# face of the main bins, at most one more Hi-Z test per hidden object, a
+# readback of 25 KB for 100,000 objects.
+#
+# Viewer (scene/occlusion_streaming.rs). An object tested and not seen for
+# the delay counts as hidden; one never seen since its slot was given to it
+# counts as hidden at once (nothing finer was loaded for it). Any verdict
+# that sees it reveals it; an object not tested (out of the view) keeps its
+# state. A released slot starts afresh. While hidden:
+# - its textures are noted as out of view (note_usage_away, no boost near
+#   the camera): not loaded finer for it, lowered under memory pressure as
+#   any out-of-view texture; a texture another visible face uses keeps that
+#   face's size. The faces a shadow samples keep their size (masked faces,
+#   and blended ones when blended faces cast, of an object within the
+#   shadow distance).
+# - its mesh keeps the detail level it shows, both ways, while it shows the
+#   mesh it is asked for (LLPipeline::stateSort, indra/newview/pipeline.cpp:
+#   occluded groups never reach LLVOVolume::updateLOD). Prims, sculpts and
+#   trees follow their distance as before.
+# Revealed, its textures take in the same frame the level their size on
+# screen asks for (TextureStreamer::reveal, the rule of recompute_wants for
+# one texture; a waiting download moves up), and its mesh is synced again.
+# The coarse level stays shown meanwhile; what was downloaded is kept.
+# Left as before: avatars and everything they wear, HUDs, selected, picked
+# or highlighted objects, what stands in front of the mirror drawn this
+# frame, and everything while a second camera shows the world or a photo
+# wants every texture at full resolution.
+#
+# Network: only the rank and the byte ranges of the HTTP asset requests
+# change (fewer and smaller); no simulator message, capability or rate
+# changes.
+#
+# Test without the grid: AURORA_DEMO_STREAM=<n>,<n>,j2k=<folder>[,net=<ms>],
+# size=2,wall=8 puts a wall between the view and the objects and removes it
+# after 8 s; the log gives the textures by level then, and once nothing is
+# left to download or decode. With AURORA_PROFILE=1 the log gets an
+# "occlusion streaming:" line a second.
+#
+# Tests: scene/occlusion_streaming.rs (delay, never seen, reveal, out of
+# view, flicker, released slot, old verdicts, off, exemptions, frozen
+# level), object_occlusion.rs (bits, lengths, the shader's enlargement),
+# textures.rs (reveal = the next pass's level), the options page (the rows
+# behind the Occlusion cog), demo_stream.rs (the wall option).
+
+[[patch]]
+id = "occl-stream-render-module"
+why = "the objects' verdict, its GPU bits and their readback ring, and their tests"
+paths = ["crates/aurora-render/src/object_occlusion.rs"]
+op = "add_file"
+source = "files/occlusion-streaming/object_occlusion.rs"
+
+[[patch]]
+id = "occl-stream-render-mod"
+why = "declare the module (its own comment line keeps the sorted group after it)"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = '''mod motion_history;
+mod occlusion;'''
+replace = '''mod motion_history;
+// aurora-local-patch: occl-stream-render-mod
+pub mod object_occlusion;
+mod occlusion;'''
+
+[[patch]]
+id = "occl-stream-wgsl-binding"
+why = "the objects' bits, beside the spheres"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = "@group(0) @binding(13) var<storage, read_write> spheres: array<vec4<f32>>;"
+replace = '''@group(0) @binding(13) var<storage, read_write> spheres: array<vec4<f32>>;
+// aurora-local-patch: occl-stream-wgsl-binding
+// occlusion streaming (object_occlusion.rs): per object of the table, a
+// tested bit then a seen bit (two halves of (objects + 31) / 32 words); a
+// placeholder too short for them while the streaming is off
+@group(0) @binding(14) var<storage, read_write> obj_bits: array<atomic<u32>>;'''
+
+[[patch]]
+id = "occl-stream-wgsl-occlude"
+why = "tested and seen bits of each object; the draw keeps the exact test"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = '''    args[a + 1u] = select(0u, 1u, vis);
+    // drawn by phase 1'''
+replace = '''args[a + 1u] = select(0u, 1u, vis);
+    // aurora-local-patch: occl-stream-wgsl-occlude
+    // occlusion streaming: the first face of an object tested this frame
+    // tells whether its sphere, enlarged (object_occlusion::INFLATE_*), is
+    // seen; the draw keeps the exact test above
+    let words = (frame.sizes.y + 31u) / 32u;
+    if (f.object < frame.sizes.y && 2u * words <= arrayLength(&obj_bits)) {
+        let w = f.object / 32u;
+        let bit = 1u << (f.object % 32u);
+        let before = atomicOr(&obj_bits[w], bit);
+        if ((before & bit) == 0u) {
+            var seen = vis;
+            if (!seen) {
+                let s = spheres[f.object];
+                seen = hiz_sphere_visible(hiz, vec4<f32>(s.xyz, s.w * 1.25 + 0.5), occl.view_proj, occl.screen, occl.levels);
+            }
+            if (seen) {
+                atomicOr(&obj_bits[words + w], bit);
+            }
+        }
+    }
+    // drawn by phase 1'''
+
+[[patch]]
+id = "occl-stream-cull-field"
+why = "the bits and their readbacks in the GPU culling"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    face_backoff: Backoff,
+    sphere_backoff: Backoff,
+}'''
+replace = '''face_backoff: Backoff,
+    sphere_backoff: Backoff,
+    // aurora-local-patch: occl-stream-cull-field
+    /// Occlusion streaming: the objects' tested and seen bits of the
+    /// occlusion pass, and their readbacks (object_occlusion.rs).
+    obj_bits: crate::object_occlusion::ObjectBits,
+}'''
+
+[[patch]]
+id = "occl-stream-cull-init"
+why = "the placeholder at first"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''            sphere_backoff: Backoff::default(),
+        };'''
+replace = '''sphere_backoff: Backoff::default(),
+            obj_bits: crate::object_occlusion::ObjectBits::new(device), // aurora-local-patch: occl-stream-cull-init
+        };'''
+
+[[patch]]
+id = "occl-stream-cull-layout"
+why = "binding 14 of the occlusion pass (7 storage buffers of the 8 the GPU lists need)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''                    count: None,
+                },
+                storage(13, false),
+            ],
+        });'''
+replace = '''count: None,
+                },
+                storage(13, false),
+                storage(14, false), // aurora-local-patch: occl-stream-cull-layout
+            ],
+        });'''
+
+[[patch]]
+id = "occl-stream-cull-ensure"
+why = "room for as many objects as the spheres, or the placeholder while off"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "prepare"
+find = '''        frame.groups[2] = index_count;
+        queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));'''
+replace = '''frame.groups[2] = index_count;
+        // aurora-local-patch: occl-stream-cull-ensure
+        self.obj_bits.ensure(device, self.sphere_cap);
+        queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));'''
+
+[[patch]]
+id = "occl-stream-cull-bind"
+why = "bind the bits to the occlusion pass"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "encode_occlusion"
+find = '''                entry(13, &self.spheres),
+            ],
+        });'''
+replace = '''entry(13, &self.spheres),
+                entry(14, self.obj_bits.buffer()), // aurora-local-patch: occl-stream-cull-bind
+            ],
+        });'''
+
+[[patch]]
+id = "occl-stream-cull-clear"
+why = "cleared before the pass, when the frame is read back"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "encode_occlusion"
+find = '''        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu culling occlusion"),'''
+replace = '''// aurora-local-patch: occl-stream-cull-clear
+        self.obj_bits.clear(encoder, self.objects);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu culling occlusion"),'''
+
+[[patch]]
+id = "occl-stream-cull-api"
+why = "the renderer marks the frame and takes the newest verdict"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    /// Copy this frame's counts for the statistics (mapped after the submit).
+    pub fn copy_counts(&self, encoder: &mut wgpu::CommandEncoder) {'''
+replace = '''// aurora-local-patch: occl-stream-cull-api
+    /// Occlusion streaming (object_occlusion.rs), before `prepare`: whether
+    /// the objects' bits are wanted, and this frame's index when its main
+    /// view is the user's camera (only then are they read back).
+    pub fn object_frame(&self, on: bool, frame: Option<u64>) {
+        self.obj_bits.begin_frame(on, frame);
+    }
+
+    /// The newest objects' verdict read back since the last call.
+    pub fn take_object_occlusion(&mut self) -> Option<Arc<crate::object_occlusion::ObjectOcclusion>> {
+        self.obj_bits.take()
+    }
+
+    /// Copy this frame's counts for the statistics (mapped after the submit).
+    pub fn copy_counts(&self, encoder: &mut wgpu::CommandEncoder) {'''
+
+[[patch]]
+id = "occl-stream-cull-copy"
+why = "the bits copied with the counts"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    pub fn copy_counts(&self, encoder: &mut wgpu::CommandEncoder) {
+'''
+replace = '''pub fn copy_counts(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.obj_bits.copy(encoder); // aurora-local-patch: occl-stream-cull-copy'''
+
+[[patch]]
+id = "occl-stream-cull-map"
+why = "mapped after the submit"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    pub fn after_submit(&mut self) {
+        let Some(slot) = self.copied.take() else {'''
+replace = '''pub fn after_submit(&mut self) {
+        self.obj_bits.after_submit(); // aurora-local-patch: occl-stream-cull-map
+        let Some(slot) = self.copied.take() else {'''
+
+[[patch]]
+id = "occl-stream-cull-harvest"
+why = "collected with the counts, never waited for"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    /// Collect the finished count readbacks (never waits).
+    pub fn harvest(&mut self) {
+'''
+replace = '''/// Collect the finished count readbacks (never waits).
+    pub fn harvest(&mut self) {
+        self.obj_bits.harvest(); // aurora-local-patch: occl-stream-cull-harvest'''
+
+[[patch]]
+id = "occl-stream-tables"
+why = "the main thread's copy of the newest verdict, and the frame of the last cut"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''    /// Last counts read back by the render thread (a few frames old).
+    pub last: CullCounts,
+}'''
+replace = '''/// Last counts read back by the render thread (a few frames old).
+    pub last: CullCounts,
+    // aurora-local-patch: occl-stream-tables
+    /// Occlusion streaming: the newest objects' verdict read back (a few
+    /// frames old), and the first frame it may come from (the motion
+    /// history's last cut: what an older frame saw is from another view).
+    pub object_occlusion: Option<Arc<crate::object_occlusion::ObjectOcclusion>>,
+    pub object_cut: u64,
+}'''
+
+[[patch]]
+id = "occl-stream-tables-init"
+why = "none at first"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = '''            last: CullCounts::default(),
+        }
+    }
+}'''
+replace = '''last: CullCounts::default(),
+            object_occlusion: None, // aurora-local-patch: occl-stream-tables-init
+            object_cut: 0,
+        }
+    }
+}'''
+
+[[patch]]
+id = "occl-stream-frame"
+why = "read back only when the main view is the user's camera"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "render_view"
+find = '''        let snapshot = match wanted {
+            Some(Capture::Snapshot(s) | Capture::Film(_, Some(s))) if s.width > 0 && s.height > 0 => Some(s),
+            _ => None,
+        };'''
+replace = '''let snapshot = match wanted {
+            Some(Capture::Snapshot(s) | Capture::Film(_, Some(s))) if s.width > 0 && s.height > 0 => Some(s),
+            _ => None,
+        };
+        // aurora-local-patch: occl-stream-frame
+        // occlusion streaming: what the occlusion pass hides is read back only
+        // when the main view is the user's camera (not a photo or film frame
+        // at its own size, a 360° face, nor an external output)
+        let object_occlusion_frame = (!external_output && snapshot.is_none()).then_some(index);'''
+
+[[patch]]
+id = "occl-stream-cull-frame"
+why = "the frame marked before the culling is prepared"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+fn = "render_view"
+find = '''            // the same limit as the CPU-built lists' bound (`push`)
+            self.cull
+                .prepare('''
+replace = '''// the same limit as the CPU-built lists' bound (`push`)
+            self.cull.object_frame(self.settings.object_occlusion, object_occlusion_frame); // aurora-local-patch: occl-stream-cull-frame
+            self.cull
+                .prepare('''
+
+[[patch]]
+id = "occl-stream-result"
+why = "the newest verdict goes back with the frame's result"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            cull: self.cull.last,
+            captured,'''
+replace = '''cull: self.cull.last,
+            object_occlusion: self.cull.take_object_occlusion(), // aurora-local-patch: occl-stream-result
+            captured,'''
+
+[[patch]]
+id = "occl-stream-packet"
+why = "the verdict in the frame's result"
+paths = ["crates/aurora-render/src/packet.rs"]
+op = "literal"
+find = '''    /// Last GPU culling counts read back.
+    pub cull: CullCounts,'''
+replace = '''/// Last GPU culling counts read back.
+    pub cull: CullCounts,
+    // aurora-local-patch: occl-stream-packet
+    /// Occlusion streaming: the objects' verdict read back since the last
+    /// result (object_occlusion.rs).
+    pub object_occlusion: Option<std::sync::Arc<crate::object_occlusion::ObjectOcclusion>>,'''
+
+[[patch]]
+id = "occl-stream-apply"
+why = "kept for the scene, unless it comes from before the last cut"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = "        self.cull.last = r.cull;"
+replace = '''self.cull.last = r.cull;
+        // aurora-local-patch: occl-stream-apply
+        // (what a frame before the last cut of the motion history saw is from
+        // another view: dropped)
+        if let Some(o) = r.object_occlusion.take()
+            && o.index >= self.cull.object_cut
+        {
+            self.cull.object_occlusion = Some(o);
+        }'''
+
+[[patch]]
+id = "occl-stream-cut"
+why = "a cut (teleport, region change, 360° capture) drops what the frames before it saw"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = '''    pub fn cut_motion_history(&mut self) {
+        self.motion_cut = true;'''
+replace = '''pub fn cut_motion_history(&mut self) {
+        self.motion_cut = true;
+        // aurora-local-patch: occl-stream-cut
+        // (occlusion streaming: only what the frames from the next one see)
+        self.cull.object_cut = self.frames;
+        self.cull.object_occlusion = None;'''
+
+[[patch]]
+id = "occl-stream-render-setting"
+why = "the renderer's switch"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    /// GPU occlusion culling (UseOcclusion).
+    pub occlusion: bool,'''
+replace = '''/// GPU occlusion culling (UseOcclusion).
+    pub occlusion: bool,
+    // aurora-local-patch: occl-stream-render-setting
+    /// Occlusion streaming (local patch set): the occlusion pass also tells
+    /// which objects it hid, read back for the viewer (object_occlusion.rs).
+    pub object_occlusion: bool,'''
+
+[[patch]]
+id = "occl-stream-render-setting-default"
+why = "off until the viewer's settings say otherwise"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "            occlusion: true,"
+replace = '''occlusion: true,
+            object_occlusion: false, // aurora-local-patch: occl-stream-render-setting-default'''
+
+[[patch]]
+id = "occl-stream-viewer-module"
+why = "the hidden objects' states, the exemptions, the frozen level, and their tests"
+paths = ["crates/aurora-viewer/src/scene/occlusion_streaming.rs"]
+op = "add_file"
+source = "files/occlusion-streaming/occlusion_streaming.rs"
+
+[[patch]]
+id = "occl-stream-scene-mod"
+why = "declare the module (its own comment line: patch 87 inserts origin_shift after morph)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''pub mod morph;
+pub mod particles;'''
+replace = '''pub mod morph;
+// aurora-local-patch: occl-stream-scene-mod
+pub mod occlusion_streaming;
+pub mod particles;'''
+
+[[patch]]
+id = "occl-stream-scene-field"
+why = "the states, in the scene"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    fresh_usage: FastSet<usize>,"
+replace = '''fresh_usage: FastSet<usize>,
+    // aurora-local-patch: occl-stream-scene-field
+    /// Occlusion streaming: which objects stay hidden behind others
+    /// (occlusion_streaming.rs).
+    pub occl_stream: occlusion_streaming::OcclusionStreaming,'''
+
+[[patch]]
+id = "occl-stream-scene-init"
+why = "none at first"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "            fresh_usage: Default::default(),"
+replace = '''fresh_usage: Default::default(),
+            occl_stream: Default::default(), // aurora-local-patch: occl-stream-scene-init'''
+
+[[patch]]
+id = "occl-stream-release"
+why = "a released slot starts afresh"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "release_slot"
+find = '''        self.list_index.remove(i);
+        self.bom_stale.remove(&i);'''
+replace = '''self.list_index.remove(i);
+        self.occl_stream.forget(i); // aurora-local-patch: occl-stream-release
+        self.bom_stale.remove(&i);'''
+
+[[patch]]
+id = "occl-stream-clear"
+why = "the scene emptied (logout, teleport): every state forgotten"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''    pub fn clear(&mut self, renderer: &mut Renderer) {
+        self.remote_soles = Default::default();'''
+replace = '''pub fn clear(&mut self, renderer: &mut Renderer) {
+        self.occl_stream.clear(); // aurora-local-patch: occl-stream-clear
+        self.remote_soles = Default::default();'''
+
+[[patch]]
+id = "occl-stream-lod"
+why = "a hidden mesh keeps the level it shows (the Legacy Viewer's occluded groups skip updateLOD)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "sync_object"
+find = '''            object_lod(o, lod_radius, lod_dist, self.lod_factor, self.tree_lod_factor, self.fov_y),
+        );
+        // (whatever comes of this sync; what the GPU places leaves below)'''
+replace = '''object_lod(o, lod_radius, lod_dist, self.lod_factor, self.tree_lod_factor, self.fov_y),
+        );
+        // aurora-local-patch: occl-stream-lod
+        // occlusion streaming: a mesh hidden behind others keeps the level it
+        // shows, as the Legacy Viewer's occluded groups skip updateLOD
+        // (LLPipeline::stateSort, indra/newview/pipeline.cpp); not what is
+        // worn, selected, or held at a level by the mesh inspection
+        let lod = {
+            let kept = self.selection_wire.contains_key(&idx) || self.mesh_lod_overrides.contains_key(&o.key);
+            let worn = self.gpu.get(idx).is_none_or(|g| g.avatar(idx).is_some());
+            let hidden =
+                !hud && !kept && !worn && self.occl_stream.hidden(idx, occlusion_streaming::seconds(now)) && renderer.gpu_culling();
+            occlusion_streaming::frozen_lod(hidden, self.gpu.get(idx).and_then(|g| g.geom), lod, |l| Self::object_geom_key(o, l))
+        };
+        // (whatever comes of this sync; what the GPU places leaves below)'''
+
+[[patch]]
+id = "occl-stream-ingest"
+why = "the GPU's newest verdict taken before the lists (GPU lists, one camera, no full-resolution photo)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = "        let boost_textures = self.textures.stats.pressure == 0;"
+replace = '''let boost_textures = self.textures.stats.pressure == 0;
+        // aurora-local-patch: occl-stream-ingest
+        // occlusion streaming: the GPU's latest verdict on what hides behind
+        // what (with the GPU lists only, one camera, and no photo wanting
+        // every texture at full resolution)
+        let occl_now = occlusion_streaming::seconds(t0);
+        let occl_active = gpu_mode && view.second.is_none() && !self.textures.full_resolution && self.occl_stream.is_on();
+        if occl_active {
+            self.occl_stream.ingest(renderer.cull.object_occlusion.as_deref(), occl_now);
+            if let Some(line) = self.occl_stream.profile_line(occl_now) {
+                log::info!("{line}");
+            }
+        }
+        let occl_stream = occl_active.then_some(&self.occl_stream);'''
+
+[[patch]]
+id = "occl-stream-usage-object"
+why = "a hidden object's size on screen without the boost near the camera; the exemptions"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = "            let px = texture_importance::texture_pixels(view, g.center, g.radius, in_view && boost_textures);"
+replace = '''let px = texture_importance::texture_pixels(view, g.center, g.radius, in_view && boost_textures);
+            // aurora-local-patch: occl-stream-usage-object
+            // occlusion streaming: hidden behind others for a while, its
+            // textures are noted as out of view (no boost near the camera)
+            let occl_hidden = in_view
+                && occl_stream.is_some_and(|s| s.hidden(idx, occl_now))
+                && occlusion_streaming::streams_less(
+                    avatar.is_some() || g.is_avatar || g.owner_avatar.is_some(),
+                    selection_wire.contains_key(&idx)
+                        || self.has_picks(idx)
+                        || photo_marks.contains(&idx)
+                        || give_marks.contains(&idx)
+                        || self.beacon_highlights.contains(&idx)
+                        || mirror_plane.is_some_and(|(p, n)| n.dot(sc - p) > -sr),
+                );
+            let px_hidden = if occl_hidden {
+                texture_importance::texture_pixels(view, g.center, g.radius, false)
+            } else {
+                px
+            };'''
+
+[[patch]]
+id = "occl-stream-usage-face"
+why = "its faces noted as out of view, but for those a shadow samples"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = '''                if usage {
+                    // (out of view too: what memory pressure may not
+                    // lower a texture under, see `note_usage_away`)
+                    note_face_usage(&mut l.usage, f, px, in_view);
+                }'''
+replace = '''if usage {
+                    // (out of view too: what memory pressure may not
+                    // lower a texture under, see `note_usage_away`)
+                    // aurora-local-patch: occl-stream-usage-face
+                    // (hidden behind others: as out of view, but for the
+                    // faces a shadow samples)
+                    if occl_hidden
+                        && !occlusion_streaming::face_keeps_size(casts, pass.record_flags() != 0, pass == Pass::Blend, blend_casts)
+                    {
+                        note_face_usage(&mut l.usage, f, px_hidden, false);
+                    } else {
+                        note_face_usage(&mut l.usage, f, px, in_view);
+                    }
+                }'''
+
+[[patch]]
+id = "occl-stream-reveal"
+why = "what is revealed takes its levels at once, and its mesh is synced again"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = '''        for (id, px, in_view) in result.usage {
+            if in_view {
+                self.textures.note_usage(&id, px);
+            } else {
+                self.textures.note_usage_away(&id, px);
+            }
+        }'''
+replace = '''for (id, px, in_view) in result.usage {
+            if in_view {
+                self.textures.note_usage(&id, px);
+            } else {
+                self.textures.note_usage_away(&id, px);
+            }
+        }
+        // aurora-local-patch: occl-stream-reveal
+        // occlusion streaming: what came out from behind something takes at
+        // once the levels its size on screen asks for, and its mesh detail
+        // is checked again
+        for idx in self.occl_stream.take_revealed() {
+            let Some(g) = self.gpu.get(idx) else {
+                continue;
+            };
+            if g.faces.is_empty() || g.hud {
+                continue;
+            }
+            let (sc, sr) = g.sphere();
+            let px = texture_importance::texture_pixels(view, g.center, g.radius, view.sphere_visible(sc, sr) && boost_textures);
+            let mut usage = Vec::new();
+            for f in g.faces.iter().filter(|f| f.pass != Pass::Hidden) {
+                note_face_usage(&mut usage, f, px, true);
+            }
+            if matches!(g.geom, Some(GeomKey::Mesh { .. })) {
+                self.sets.dirty.insert(idx);
+            }
+            for (id, px, _) in usage {
+                self.textures.reveal(&id, px);
+            }
+        }'''
+
+[[patch]]
+id = "occl-stream-reveal-texture"
+why = "the level a revealed texture's size asks for, at once (recompute_wants' rule for one texture)"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+find = '''    /// Like `note_usage`, for what memory pressure never lowers (as
+    /// Firestorm's boosted textures: HUDs, sky, terrain).'''
+replace = '''// aurora-local-patch: occl-stream-reveal-texture
+    /// Like `note_usage`, for a face that shows again after it stayed hidden
+    /// behind others (occlusion_streaming.rs): the level its size on screen
+    /// asks for is taken now, as `recompute_wants` takes it at its next pass,
+    /// so that the finer level is asked for at once; a download already
+    /// waiting moves up with it. Never lowers anything.
+    pub fn reveal(&mut self, id: &Uuid, px: f32) {
+        let step = self.pressure.step();
+        let paused = self.background.paused();
+        let full = self.full_resolution && step == 0;
+        let TextureStreamer {
+            entries,
+            todo,
+            counts,
+            moved,
+            ..
+        } = self;
+        let Some(e) = entries.get_mut(id) else {
+            return;
+        };
+        if px > e.need_px {
+            e.need_px = px;
+        }
+        // (the drawing paused behind, or a texture loaded whole anyway)
+        if paused || e.keep_pixels || e.refs == 0 {
+            return;
+        }
+        let dropped = texture_budget::dropped(step);
+        let full_px = full_size(e).map_or(512, |(w, h)| w.max(h)) as f32;
+        let (want, _) = wanted(full_px, e.info.map(|i| i.levels), e, dropped);
+        let want = if full && e.source == TexSource::Asset { 0 } else { want };
+        if want >= e.want {
+            return;
+        }
+        e.want = want;
+        e.seen_px = e.seen_px.max(e.fixed_px.max(e.capped(e.need_px / dropped.0)));
+        if e.fetching && !e.urgent && e.fetch_key != 0 && !e.cancelled {
+            let (_, now) = Self::rank(e);
+            if fetch_priority::changed(e.sent, now) {
+                e.sent = now;
+                moved.push((e.fetch_key, now));
+            }
+        }
+        Self::settle(todo, counts, *id, e);
+    }
+
+    /// Like `note_usage`, for what memory pressure never lowers (as
+    /// Firestorm's boosted textures: HUDs, sky, terrain).'''
+
+[[patch]]
+id = "occl-stream-reveal-texture-test"
+why = "reveal gives what the next pass would, never lowers"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+find = '''    #[test]
+    fn the_maximum_resolution_caps_after_the_memory_pressure() {'''
+replace = '''// aurora-local-patch: occl-stream-reveal-texture-test
+    #[test]
+    fn a_revealed_texture_wants_at_once_what_the_next_pass_would_give() {
+        let id = Uuid::from_u128(1);
+        for (px, decoded) in [(4000.0, Some(5)), (300.0, None), (60.0, Some(5)), (900.0, Some(3))] {
+            let mut revealed = pressed(0, vec![(1, Entry { want: 5, ..large(decoded) })]);
+            revealed.reveal(&id, px);
+            let mut passed = pressed(0, vec![(1, Entry { want: 5, ..large(decoded) })]);
+            passed.note_usage(&id, px);
+            passed.recompute_wants();
+            assert_eq!(revealed.entries[&id].want, passed.entries[&id].want, "{px} px");
+        }
+        // never lower than it wants already
+        let mut s = pressed(0, vec![(1, Entry { want: 0, ..large(Some(0)) })]);
+        s.reveal(&id, 10.0);
+        assert_eq!(s.entries[&id].want, 0);
+        // a texture loaded whole keeps doing so
+        let kept = Entry {
+            want: 5,
+            keep_pixels: true,
+            ..large(None)
+        };
+        let mut s = pressed(0, vec![(1, kept)]);
+        s.reveal(&id, 4000.0);
+        assert_eq!(s.entries[&id].want, 5);
+    }
+
+    #[test]
+    fn the_maximum_resolution_caps_after_the_memory_pressure() {'''
+
+[[patch]]
+id = "occl-stream-settings"
+why = "the switch and the delay"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub occlusion_culling: bool,"
+replace = '''pub occlusion_culling: bool,
+    // aurora-local-patch: occl-stream-settings
+    /// Occlusion streaming (Preferences › Graphics, under Occlusion; local
+    /// patch set): objects that stay hidden behind others load their
+    /// textures as out of view and keep their mesh detail until they show
+    /// again (scene/occlusion_streaming.rs). On; used only with the
+    /// occlusion on.
+    pub occlusion_streaming: bool,
+    /// How long an object must stay hidden first: 2 s, 0.5 to 10 s.
+    pub occlusion_streaming_delay_s: f32,'''
+
+[[patch]]
+id = "occl-stream-settings-default"
+why = "on, 2 s"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "            occlusion_culling: true,"
+replace = '''occlusion_culling: true,
+            occlusion_streaming: true, // aurora-local-patch: occl-stream-settings-default
+            occlusion_streaming_delay_s: crate::scene::occlusion_streaming::DEFAULT_DELAY_S,'''
+
+[[patch]]
+id = "occl-stream-settings-render"
+why = "the renderer reads the bits back only when both are on"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "            occlusion: self.occlusion_culling,"
+replace = '''occlusion: self.occlusion_culling,
+            object_occlusion: self.occlusion_culling && self.occlusion_streaming, // aurora-local-patch: occl-stream-settings-render'''
+
+[[patch]]
+id = "occl-stream-settings-sanitize"
+why = "the delay bounded on load"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub(crate) fn sanitized(mut self) -> Settings {"
+replace = '''pub(crate) fn sanitized(mut self) -> Settings {
+        // aurora-local-patch: occl-stream-settings-sanitize
+        self.occlusion_streaming_delay_s = crate::scene::occlusion_streaming::bounded_delay(self.occlusion_streaming_delay_s);'''
+
+[[patch]]
+id = "occl-stream-env"
+why = "AURORA_OCCLUSION_STREAMING and its delay, for a launch"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "apply_test_overrides"
+find = '''    if let Ok(v) = std::env::var("AURORA_OCCLUSION") {
+        settings.occlusion_culling = v != "0";
+    }'''
+replace = '''if let Ok(v) = std::env::var("AURORA_OCCLUSION") {
+        settings.occlusion_culling = v != "0";
+    }
+    // aurora-local-patch: occl-stream-env
+    if let Ok(v) = std::env::var("AURORA_OCCLUSION_STREAMING") {
+        settings.occlusion_streaming = v != "0";
+    }
+    if let Some(v) = std::env::var("AURORA_OCCLUSION_STREAMING_DELAY")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
+        settings.occlusion_streaming_delay_s = crate::scene::occlusion_streaming::bounded_delay(v);
+    }'''
+
+[[patch]]
+id = "occl-stream-app"
+why = "the scene follows the settings each frame"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "            self.scene.tree_lod_factor = self.settings.tree_lod_factor;"
+replace = '''self.scene.tree_lod_factor = self.settings.tree_lod_factor;
+            // aurora-local-patch: occl-stream-app
+            self.scene.occl_stream.configure(
+                self.settings.occlusion_culling && self.settings.occlusion_streaming,
+                self.settings.occlusion_streaming_delay_s,
+            );'''
+
+[[patch]]
+id = "occl-stream-options"
+why = "the switch and the delay behind the Occlusion cog"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = '''            &field!(occlusion_culling),
+        );'''
+replace = '''&field!(occlusion_culling),
+        );
+        // aurora-local-patch: occl-stream-options
+        let off = !cx.s.occlusion_culling;
+        cx.subs(off, |cx| {
+            cx.toggle(
+                tr!("ui-options-occlusion-streaming"),
+                tr!("ui-options-occlusion-streaming-hint"),
+                &field!(occlusion_streaming),
+            );
+            cx.greyed(!cx.s.occlusion_streaming);
+            cx.slider(
+                tr!("ui-options-occlusion-streaming-delay"),
+                tr!("ui-options-occlusion-streaming-delay-hint"),
+                &field!(occlusion_streaming_delay_s),
+                crate::scene::occlusion_streaming::MIN_DELAY_S..=crate::scene::occlusion_streaming::MAX_DELAY_S,
+                " s",
+            );
+        });'''
+
+[[patch]]
+id = "occl-stream-options-test"
+why = "the rows behind the Occlusion cog (at the end of the file)"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "regex"
+pattern = '''\n\Z'''
+replace = """
+
+
+// aurora-local-patch: occl-stream-options-test
+#[test]
+fn the_occlusion_streaming_rows_are_behind_the_occlusion_cog() {
+    let mut frames = Frames::new();
+    let (mut s, mut st, mut r) = (Settings::default(), OptionsUi::default(), OptionsResult::default());
+    assert!(s.occlusion_streaming && s.occlusion_streaming_delay_s == 2.0, "on, 2 s");
+    let occlusion = aurora_i18n::tr!("ui-options-occlusion");
+    let streaming = aurora_i18n::tr!("ui-options-occlusion-streaming");
+    let delay = aurora_i18n::tr!("ui-options-occlusion-streaming-delay");
+    let (tab, mut texts) = (0..8)
+        .find_map(|tab| {
+            let mut texts = Vec::new();
+            for _ in 0..3 {
+                texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, tab, Vec::new());
+            }
+            texts.iter().any(|t| t.source == occlusion).then_some((tab, texts))
+        })
+        .expect("the occlusion row");
+    assert!(!texts.iter().any(|t| t.source == streaming), "behind its cog at first");
+    let row = texts.iter().find(|t| t.source == occlusion).expect("the occlusion row").rect;
+    let cog = texts
+        .iter()
+        .find(|t| t.source == "2" && (t.rect.center().y - row.center().y).abs() < 6.0 && t.rect.left() > row.right())
+        .expect("its cog, two rows")
+        .rect;
+    for events in click(cog.center() - egui::vec2(6.0, 0.0)) {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, tab, events);
+    }
+    for _ in 0..2 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, tab, Vec::new());
+    }
+    assert!(texts.iter().any(|t| t.source == streaming), "the switch, once the cog is open");
+    assert!(texts.iter().any(|t| t.source == delay), "and its delay");
+}
+"""
+
+[[patch]]
+id = "occl-stream-text-en"
+why = "the switch's and the delay's texts, under Occlusion's"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '''^ui-options-occlusion = [^\n]*$'''
+replace = '''\g<0>
+# // aurora-local-patch: occl-stream-text-en
+ui-options-occlusion-streaming = Lighter loading behind walls
+ui-options-occlusion-streaming-hint = Objects that stay hidden behind others load their textures as if out of view and keep their mesh detail, then sharpen when they show again. Avatars, what they wear and selected objects are left alone.
+ui-options-occlusion-streaming-delay = Hidden for
+ui-options-occlusion-streaming-delay-hint = How long an object must stay hidden before it loads less (2 s by default)'''
+
+[[patch]]
+id = "occl-stream-text-fr"
+why = "the switch's and the delay's texts, under Occlusion's"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '''^ui-options-occlusion = [^\n]*$'''
+replace = '''\g<0>
+# // aurora-local-patch: occl-stream-text-fr
+ui-options-occlusion-streaming = Chargement allégé derrière les murs
+ui-options-occlusion-streaming-hint = Les objets qui restent cachés derrière d'autres chargent leurs textures comme hors champ et gardent leur niveau de détail, puis se précisent dès qu'ils réapparaissent. Les avatars, ce qu'ils portent et les objets sélectionnés ne sont pas concernés.
+ui-options-occlusion-streaming-delay = Caché depuis
+ui-options-occlusion-streaming-delay-hint = Durée pendant laquelle un objet doit rester caché avant de moins se charger (2 s par défaut)'''
+
+[[patch]]
+id = "occl-stream-text-ja"
+why = "the switch's and the delay's texts, under Occlusion's"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '''^ui-options-occlusion = [^\n]*$'''
+replace = '''\g<0>
+# // aurora-local-patch: occl-stream-text-ja
+ui-options-occlusion-streaming = 壁の向こうの読み込みを軽く
+ui-options-occlusion-streaming-hint = 他の物に隠れたままのオブジェクトは、テクスチャを視野外と同じ扱いで読み込み、メッシュの詳細度を保ちます。再び見えるとすぐに鮮明になります。アバター、その装着物、選択中のオブジェクトは対象外です。
+ui-options-occlusion-streaming-delay = 隠れている時間
+ui-options-occlusion-streaming-delay-hint = 読み込みを減らすまでに隠れ続ける必要がある時間です（既定は２秒）。'''
+
+[[patch]]
+id = "occl-stream-testing-table"
+why = "the forced switch and delay"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "| `AURORA_NO_OCCLUSION=1` | Turns off GPU occlusion |"
+replace = '''| `AURORA_NO_OCCLUSION=1` | Turns off GPU occlusion |
+| `AURORA_OCCLUSION_STREAMING=0` or `1`, `AURORA_OCCLUSION_STREAMING_DELAY=<s>` | Overrides "Lighter loading behind walls" and its "Hidden for" delay (Graphics, under Occlusion; local patch set) <!-- // aurora-local-patch: occl-stream-testing-table --> |'''
+
+[[patch]]
+id = "occl-stream-testing-details"
+why = "what they do and what to read"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "- **`AURORA_DEMO_VIEWER_STATS=1`** (`aurora_net::viewer_stats`,"
+replace = '''<!-- // aurora-local-patch: occl-stream-testing-details -->
+- **`AURORA_OCCLUSION_STREAMING=0|1`**, **`AURORA_OCCLUSION_STREAMING_DELAY=<s>`**
+  (local patch set, `scene/occlusion_streaming.rs`): for this launch only,
+  the switch and the delay (0.5 to 10 s) of Preferences › Graphics, under
+  "Occlusion". On, an object the GPU occlusion test finds hidden behind
+  others for the delay (at once if it was never seen) has its textures
+  noted as out of view and keeps the mesh detail level it shows; one frame
+  that sees it again gives it back the levels its size on screen asks for.
+  With `AURORA_PROFILE=1` the log gets a line a second, `occlusion
+  streaming: … verdicts, … objects hidden behind others (… counted as
+  hidden), … revealed`. Compare the `texture load:` line (bytes
+  downloaded, decodes by level) of a run with `0` and one with `1`, for
+  example with `AURORA_DEMO_STREAM`'s `wall`.
+- **`AURORA_DEMO_VIEWER_STATS=1`** (`aurora_net::viewer_stats`,'''
+
+[[patch]]
+id = "occl-stream-testing-demo-table"
+why = "the wall of the streaming demo"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "| `AURORA_DEMO_STREAM=<n>[,<wave>][,leave][,j2k=<folder>][,net=<ms>][,size=<m>]` | Streaming stutter test; with `net=`, textures downloaded from a local server |"
+replace = "| `AURORA_DEMO_STREAM=<n>[,<wave>][,leave][,j2k=<folder>][,net=<ms>][,size=<m>][,wall[=<s>]]` | Streaming stutter test; with `net=`, textures downloaded from a local server; `wall`: behind a wall (local patch set) <!-- // aurora-local-patch: occl-stream-testing-demo-table --> |"
+
+[[patch]]
+id = "occl-stream-testing-demo-details"
+why = "the wall's details"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''    for finer levels, as the walls and floors of a region do. 400 objects
+    of 3 m give levels close to those of a grid arrival.'''
+replace = '''for finer levels, as the walls and floors of a region do. 400 objects
+    of 3 m give levels close to those of a grid arrival.
+  <!-- // aurora-local-patch: occl-stream-testing-demo-details -->
+  - With `,wall` (local patch set), a 30 m high wall stands between the
+    start view and the objects, sent before them, for the occlusion
+    streaming (`AURORA_OCCLUSION_STREAMING`); with `,wall=<s>` it is
+    removed `s` seconds after the first wave. Use it with `j2k=` (the
+    levels then follow the size on screen). The log gives the textures by
+    level when the wall goes (`demo stream: wall removed, textures by
+    level …`), then how long until nothing is left to download or decode
+    (`demo stream: … s after the wall went, textures by level …`).'''
+
+[[patch]]
+id = "occl-stream-demo-option"
+why = "the wall option, its object"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+find = "/// Bytes of downloaded data held by texture `i` once loaded: about what"
+replace = '''// aurora-local-patch: occl-stream-demo-option
+/// `wall[=<s>]` in the variable's value (local patch set, occlusion
+/// streaming): a wall between the start view and the objects; removed `s`
+/// seconds after the first wave when given. None: no wall.
+fn wall_option(value: &str) -> Option<Option<Duration>> {
+    value.split(',').map(str::trim).find_map(|p| {
+        if p == "wall" {
+            return Some(None);
+        }
+        let s = p
+            .strip_prefix("wall=")?
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|s| s.is_finite() && *s >= 0.0)?;
+        Some(Some(Duration::from_secs_f32(s)))
+    })
+}
+
+/// Local id of the wall.
+const WALL_LOCAL_ID: u32 = FIRST_LOCAL_ID - 1;
+
+/// The wall: 30 m high, a little wider than the field of `n` objects of
+/// `size`, standing between the start view and it.
+fn wall_event(n: u32, size: f32) -> NetEvent {
+    let side = (n as f32).sqrt().ceil().max(1.0);
+    let (x, y) = (143.0, 126.0);
+    let wall = prim(
+        WALL_LOCAL_ID,
+        Vec3::new(x, y, height(x, y) + 14.0),
+        Quat::IDENTITY,
+        Vec3::new(1.0, side * size * SPACING + 10.0, 30.0),
+        shape(LL_PCODE_PATH_LINE, LL_PCODE_PROFILE_SQUARE, 100, 0, 0),
+        te([0.55, 0.57, 0.62, 1.0], 0, false, 0.0),
+        ExtraParams::default(),
+        "",
+    );
+    NetEvent::ObjectUpdates {
+        handle: HANDLE,
+        objects: vec![wall],
+    }
+}
+
+/// Bytes of downloaded data held by texture `i` once loaded: about what'''
+
+[[patch]]
+id = "occl-stream-demo-fields"
+why = "the wall's state"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+find = '''    /// A GPU recovery happened since the last `tick` ([`Self::gpu_reset`]).
+    gpu_lost: bool,'''
+replace = '''/// A GPU recovery happened since the last `tick` ([`Self::gpu_reset`]).
+    gpu_lost: bool,
+    // aurora-local-patch: occl-stream-demo-fields
+    /// `,wall[=<s>]`: the wall, and when it is removed; whether it was
+    /// sent, when it went, whether the end of the loading after it was
+    /// told, and whether nothing was under way at the previous look.
+    wall: Option<Option<Duration>>,
+    wall_sent: bool,
+    wall_removed_at: Option<Instant>,
+    wall_settled: bool,
+    wall_idle_before: bool,'''
+
+[[patch]]
+id = "occl-stream-demo-init"
+why = "read from the variable"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+find = '''            gpu_lost: false,
+            recovering: None,
+        }'''
+replace = '''gpu_lost: false,
+            recovering: None,
+            wall: wall_option(value), // aurora-local-patch: occl-stream-demo-init
+            wall_sent: false,
+            wall_removed_at: None,
+            wall_settled: false,
+            wall_idle_before: false,
+        }'''
+
+[[patch]]
+id = "occl-stream-demo-step"
+why = "the wall sent, removed, and the loading after it told"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+find = "    /// `,leave`: the objects removed and their textures released a second"
+replace = '''// aurora-local-patch: occl-stream-demo-step
+    /// The scenario's textures by the level they show: discard 0 to 5, then
+    /// those that show nothing yet.
+    fn by_level(&self, textures: &TextureStreamer) -> [u32; 7] {
+        let mut out = [0; 7];
+        for i in 0..self.next {
+            out[textures.decoded_level(&texture(i)).map_or(6, |d| usize::from(d.min(5)))] += 1;
+        }
+        out
+    }
+
+    /// `,wall[=<s>]`: the wall sent before the first wave, removed after its
+    /// delay, then the end of the loading it held back told.
+    fn wall_step(&mut self, frame: u64, world: &mut crate::world::World, textures: &TextureStreamer, now: Instant) {
+        let Some(remove_after) = self.wall else {
+            return;
+        };
+        if !self.wall_sent {
+            self.wall_sent = true;
+            world.apply(wall_event(self.n, self.size));
+            log::info!("demo stream: a wall between the view and the objects");
+            return;
+        }
+        let (Some(after), Some(started)) = (remove_after, self.started) else {
+            return;
+        };
+        match self.wall_removed_at {
+            None if now.duration_since(started) >= after => {
+                self.wall_removed_at = Some(now);
+                world.apply(NetEvent::ObjectsKilled {
+                    handle: HANDLE,
+                    local_ids: vec![WALL_LOCAL_ID],
+                });
+                log::info!(
+                    "demo stream: wall removed, textures by level (discard 0..5, none) {:?}",
+                    self.by_level(textures)
+                );
+            }
+            Some(at) if !self.wall_settled && frame.is_multiple_of(10) => {
+                let idle = textures.stats.decoding == 0 && textures.stats.pending_upload == 0 && textures.stats.fetching == 0;
+                let settled = std::mem::replace(&mut self.wall_idle_before, idle);
+                if idle && settled && now.duration_since(at) >= Duration::from_millis(500) {
+                    self.wall_settled = true;
+                    log::info!(
+                        "demo stream: {:.2} s after the wall went, textures by level (discard 0..5, none) {:?}",
+                        now.duration_since(at).as_secs_f32(),
+                        self.by_level(textures)
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `,leave`: the objects removed and their textures released a second'''
+
+[[patch]]
+id = "occl-stream-demo-tick"
+why = "driven each frame, before the waves"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+fn = "tick"
+find = '''        let now = Instant::now();
+        if std::mem::take(&mut self.gpu_lost) {'''
+replace = '''let now = Instant::now();
+        self.wall_step(frame, world, textures, now); // aurora-local-patch: occl-stream-demo-tick
+        if std::mem::take(&mut self.gpu_lost) {'''
+
+[[patch]]
+id = "occl-stream-demo-test"
+why = "the option read, the wall's object"
+paths = ["crates/aurora-viewer/src/demo_stream.rs"]
+op = "literal"
+find = '''    #[test]
+    fn downloaded_data_weighs_like_a_j2c_file() {'''
+replace = '''// aurora-local-patch: occl-stream-demo-test
+    #[test]
+    fn the_wall_option_is_read() {
+        assert_eq!(wall_option("400,400,j2k=f"), None);
+        assert_eq!(wall_option("400,400,wall"), Some(None));
+        assert_eq!(wall_option("400, wall=8, j2k=f"), Some(Some(Duration::from_secs(8))));
+        assert_eq!(wall_option("400,wall=soon"), None);
+        // the counts before it are read as before
+        assert_eq!(parse("400,400,wall=8"), (400, 400, false));
+        let NetEvent::ObjectUpdates { objects, .. } = wall_event(400, 2.0) else {
+            panic!("one update");
+        };
+        assert_eq!(objects[0].local_id, WALL_LOCAL_ID);
+    }
+
+    #[test]
+    fn downloaded_data_weighs_like_a_j2c_file() {'''

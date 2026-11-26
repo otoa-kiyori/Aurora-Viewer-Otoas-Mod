@@ -1,0 +1,796 @@
+# The mirror pass made cheaper, with no change to a mirror on the screen
+# (Aurora's own; the Legacy Viewer skips its hero probe's faces while an
+# occlusion query of the probe's bounding cube finds it hidden, a frame or
+# more late: LLHeroProbeManager::update, indra/newview/llheroprobemanager.cpp,
+# `!mProbes[0]->mOccluded`; LLReflectionMap::doOcclusion,
+# indra/newview/llreflectionmap.cpp).
+#
+# The planar mirror's pass draws the scene again from the mirror's camera,
+# into an image up to the world's size (Preferences' mirror quality), for
+# one reader: mirror_tap (common.wgsl) gives that image to the surfaces
+# inside the probe's box, in front of its plane or at most 0.5 / 9.5 m
+# behind it, glossier than 0.75. Its cost follows the pixels it shades.
+# Now (crates/aurora-render/src/mirror_pass.rs):
+# - Behind the mirror. The reflection passes' fragment shaders that shade
+#   before their clip (fs_reflect, fs_terrain, fs_terrain_pbr; fs_reflect_blend
+#   clipped first already, fs_sky has no clip) drop, before any shading,
+#   the fragments so far behind the clip plane that their whole quad is too
+#   (reflection_behind: the distance below minus four times its fine
+#   derivatives and a millimetre); the others go through the late clip as
+#   before, so the pixels kept and their shading are the same, and no quad
+#   that keeps a lane loses one for its texture derivatives (naga writes
+#   discard as OpKill / discard_fragment). Hardware clip distances would need
+#   an optional device feature and two variants of the scene module. The
+#   water reflection, the water's exterior, the probes and the panorama
+#   share those shaders: the early test only drops what their late clip
+#   drops (a clip plane of zero drops nothing), so they take it too. The
+#   main view's terrain (fs_terrain without the G-buffer) takes a uniform
+#   branch out of it. The mirror's draws wholly behind its clip plane (by
+#   more than the clip's centimetre, plus a millimetre) are culled: the GPU
+#   bin (CullFrame::mirror's sixth plane, which accepted everything), the
+#   CPU lists and the blended list. Shadows are not concerned.
+# - Left out. The volume where mirror_tap gives the image (the box cut by
+#   that plane) projected on the screen: off the screen (two pixels of
+#   margin), the frame is one without a mirror, at once; less than 2 world
+#   pixels on its shorter side in the user's view, the same once 0.5 s
+#   have passed since it last was not (drawn again at once when it grows
+#   back). Then mirror_tap's surfaces take the probes, as with no mirror. The
+#   same volume is tested on the GPU against the Hi-Z pyramid of the main
+#   view's phase 1 depth (what was drawn last frame, drawn again from this
+#   frame's camera, so surely there), in the same frame, before anything
+#   reads the pass's draws: hidden, its CPU-built draws, its GPU bin's
+#   count and its sky get no instance (shaders/mirror_test.wgsl). The pass
+#   then clears its image and draws nothing that any pixel on the screen
+#   reads. The verdict is read back a frame or two late, never waited for.
+#   The mirror chosen stays the nearest one in view (find_mirror): a mirror
+#   left out does not hand the pass to the next one, which keeps the probes
+#   it has today.
+# - The screen area only. The pass's scissor keeps the volume's screen
+#   rect, a texel of rounding, the 0.05 fade band mirror_tap gives rays
+#   leaving the image, and a texel for the filter; its culling takes that
+#   sub-frustum (GPU bin, CPU lists, blended list); mirror_tap fades the
+#   rays that leave the rect as those that leave the image. A surface flat
+#   on the mirror reads its own point of the screen, inside the rect:
+#   unchanged. A glossy surface inside the volume and not parallel to the
+#   mirror (normal map, curved object) can reflect a ray out of the rect:
+#   it fades to the probes there, where it showed the mirror image before.
+#   A side of the scissor at the image's edge, a camera inside the volume
+#   (or any point of it behind the camera plane): as before. The image is
+#   still cleared whole every frame. Viewport, resolution, update rate,
+#   reach and lighting are unchanged.
+# - Occlusion streaming (121): what stands in front of the mirror keeps its
+#   textures only while the mirror is drawn and not found hidden, and a
+#   second after.
+#
+# Cost: a few plane and rect computations a frame on the render thread; one
+# workgroup of 64 lanes, a 16 byte copy and its readback when the occlusion
+# test runs; the bind group is made again only when the indirect buffer,
+# the counts or the pyramid change. With the mirrors off or no mirror, the
+# frame does what it did.
+#
+# Profile (AURORA_PROFILE=1): `perf summary` gets `mirror_drawn`,
+# `mirror_offscreen`, `mirror_tiny`, `mirror_hidden`, `mirror_draws` and
+# `mirror_area` (docs/TESTING.md).
+#
+# Tests: mirror_pass.rs (plane side for mirrors facing every axis and
+# tilted, the cull plane against the fragment clip, the early discard's
+# quads, the screen rect and its sub-frustum in front, oblique, partly off
+# the screen, behind and inside the volume, the scissor's margin, the skip
+# and its hold, the exemption's hold, the verdicts, the test shader and the
+# reflection shaders through naga for SPIR-V and MSL), frame_profile.rs
+# (the profile segment).
+
+[[patch]]
+id = "mirror-pass-module"
+why = "the plan, the culling planes, the scissor, the occlusion test and the statistics of the mirror pass, with their tests"
+paths = ["crates/aurora-render/src/mirror_pass.rs"]
+op = "add_file"
+source = "files/mirror-pass/mirror_pass.rs"
+
+[[patch]]
+id = "mirror-pass-shader"
+why = "goes with mirror-pass-module: the occlusion test of the mirror's volume against the Hi-Z pyramid"
+paths = ["crates/aurora-render/src/shaders/mirror_test.wgsl"]
+op = "add_file"
+source = "files/mirror-pass/mirror_test.wgsl"
+
+[[patch]]
+id = "mirror-pass-mod"
+why = "declare the module (its own comment line keeps the sorted group after it)"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = '''pub mod main_thread;
+mod motion_debug;'''
+replace = '''pub mod main_thread;
+// aurora-local-patch: mirror-pass-mod
+pub mod mirror_pass;
+mod motion_debug;'''
+
+# ------------------------------------------------------------- shaders
+
+[[patch]]
+id = "mirror-pass-frame-field"
+why = "the screen rect the mirror pass draws, for mirror_tap (after mirror_view_proj: the frame's last member stays where the layout test reads it)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    mirror_view_proj: [[f32; 4]; 4],"
+replace = '''mirror_view_proj: [[f32; 4]; 4],
+    mirror_rect: [f32; 4], // aurora-local-patch: mirror-pass-frame-field'''
+
+[[patch]]
+id = "mirror-pass-wgsl-frame"
+why = "goes with mirror-pass-frame-field"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "    mirror_view_proj: mat4x4<f32>, // the mirror pass's camera (mirror_tex)"
+replace = '''mirror_view_proj: mat4x4<f32>, // the mirror pass's camera (mirror_tex)
+    // aurora-local-patch: mirror-pass-wgsl-frame
+    mirror_rect: vec4<f32>,     // the screen rect the mirror pass draws (uv lo.xy, hi.xy; 1e4: open)'''
+
+[[patch]]
+id = "mirror-pass-wgsl-tap"
+why = "rays leaving the screen rect the mirror pass draws fade to the probes as those leaving the image"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+fn = "mirror_tap"
+find = '''    let out = max(max(-uv.x, uv.x - 1.0), max(-uv.y, uv.y - 1.0));
+    w *= clamp(1.0 - out * 20.0, 0.0, 1.0);'''
+replace = '''let out_image = max(max(-uv.x, uv.x - 1.0), max(-uv.y, uv.y - 1.0));
+    // aurora-local-patch: mirror-pass-wgsl-tap
+    // the pass draws the screen rect of the volume above only (mirror_pass.rs):
+    // the rays leaving that rect fade back the same way. A surface flat on
+    // the mirror reads its own point, inside the rect; with every side open
+    // (1e4) nothing changes
+    let rect = frame.mirror_rect;
+    let out = max(out_image, max(max(rect.x - uv.x, uv.x - rect.z), max(rect.y - uv.y, uv.y - rect.w)));
+    w *= clamp(1.0 - out * 20.0, 0.0, 1.0);'''
+
+[[patch]]
+id = "mirror-pass-wgsl-behind"
+why = "the reflection passes drop what lies well behind their clip plane before shading it, whole quads only"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''fn reflection_clip(world_pos: vec3<f32>) -> bool {
+    return in_reflection_pass() && dot(frame.clip_plane.xyz, world_pos) + frame.clip_plane.w < 0.0;
+}'''
+replace = '''fn reflection_clip(world_pos: vec3<f32>) -> bool {
+    return in_reflection_pass() && dot(frame.clip_plane.xyz, world_pos) + frame.clip_plane.w < 0.0;
+}
+
+// aurora-local-patch: mirror-pass-wgsl-behind
+/// Reflection passes, before any shading: the fragment lies so far behind
+/// the clip plane that its whole quad does, every lane of which
+/// `reflection_clip` drops after its shading anyway. Its row and column
+/// neighbours are within its fine derivatives; four times them and a
+/// millimetre also cover the fourth lane, unless the depth changes fourfold
+/// between two pixels of the quad (within a third of a pixel of the
+/// surface's vanishing line); coarse derivatives (one lane's for the quad,
+/// as Metal's dfdx may give) cover it the same (mirror_pass.rs tests both).
+/// So a quad that keeps a lane keeps all of them
+/// for that lane's texture derivatives: naga writes `discard` as OpKill
+/// (SPIR-V) and discard_fragment (MSL), after which a lane need not take
+/// part in them. The fragments kept and their shading stay the same; the
+/// work behind the mirror or under the water goes. Out of the reflection
+/// passes (the main view's terrain): a uniform branch, nothing else.
+fn reflection_behind(world_pos: vec3<f32>) -> bool {
+    if (!in_reflection_pass()) {
+        return false;
+    }
+    let d = dot(frame.clip_plane.xyz, world_pos) + frame.clip_plane.w;
+    return d < -4.0 * fwidthFine(d) - 1e-3;
+}'''
+
+[[patch]]
+id = "mirror-pass-wgsl-reflect"
+why = "goes with mirror-pass-wgsl-behind: the reflection passes' objects"
+paths = ["crates/aurora-render/src/shaders/object.wgsl"]
+op = "literal"
+find = '''fn fs_reflect(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let rec = records[in.record];'''
+replace = '''fn fs_reflect(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // aurora-local-patch: mirror-pass-wgsl-reflect
+    // well behind the clip plane: gone before the shading (reflection_behind)
+    if (reflection_behind(in.world_pos)) {
+        discard;
+    }
+    let rec = records[in.record];'''
+
+[[patch]]
+id = "mirror-pass-wgsl-terrain"
+why = "goes with mirror-pass-wgsl-behind: the reflection passes' terrain"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''fn fs_terrain(in: TerrainOut) -> @location(0) vec4<f32> {
+    let col = terrain_color(in);'''
+replace = '''fn fs_terrain(in: TerrainOut) -> @location(0) vec4<f32> {
+    // aurora-local-patch: mirror-pass-wgsl-terrain
+    // well behind the clip plane: gone before the shading (reflection_behind)
+    if (reflection_behind(in.world_pos)) {
+        discard;
+    }
+    let col = terrain_color(in);'''
+
+[[patch]]
+id = "mirror-pass-wgsl-terrain-pbr"
+why = "goes with mirror-pass-wgsl-behind: the reflection passes' PBR terrain"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+find = '''fn fs_terrain_pbr(in: TerrainPbrOut) -> @location(0) vec4<f32> {
+    let shaded = terrain_pbr_shaded(in);'''
+replace = '''fn fs_terrain_pbr(in: TerrainPbrOut) -> @location(0) vec4<f32> {
+    // aurora-local-patch: mirror-pass-wgsl-terrain-pbr
+    // well behind the clip plane: gone before the shading (reflection_behind)
+    if (reflection_behind(in.world_pos)) {
+        discard;
+    }
+    let shaded = terrain_pbr_shaded(in);'''
+
+# ------------------------------------------------------------- CPU lists
+
+[[patch]]
+id = "mirror-pass-cull-to-view"
+why = "the CPU lists culled by a set of planes: the mirror's sub-frustum and clip plane"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''fn cull_to_view(view_proj: Mat4, list: &[ShadowCaster]) -> Vec<DrawCmd> {
+    let planes = crate::gpu_cull::view_planes(view_proj).map(|p| p.to_array());
+    list.iter()
+        .filter(|c| crate::gpu_cull::sphere_in(&planes, c.center, c.radius))
+        .map(|c| c.cmd)
+        .collect()
+}'''
+replace = '''fn cull_to_view(view_proj: Mat4, list: &[ShadowCaster]) -> Vec<DrawCmd> {
+    cull_to_planes(&crate::gpu_cull::view_planes(view_proj).map(|p| p.to_array()), list)
+}
+
+// aurora-local-patch: mirror-pass-cull-to-view
+/// Draws of `list` whose bounding sphere touches every one of `planes` (the
+/// mirror pass's: its scissor's sub-frustum and its clip plane,
+/// mirror_pass::cull_planes).
+fn cull_to_planes(planes: &[[f32; 4]; 6], list: &[ShadowCaster]) -> Vec<DrawCmd> {
+    list.iter()
+        .filter(|c| crate::gpu_cull::sphere_in(planes, c.center, c.radius))
+        .map(|c| c.cmd)
+        .collect()
+}'''
+
+[[patch]]
+id = "mirror-pass-blend-order"
+why = "the mirror's blended list culled by its planes"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''/// The mirror's blended faces (`DrawLists::reflection_blend`) that its view
+/// of `view_proj` touches: the first `rigged` of `list` in their order, then
+/// the others back to front from the mirror's camera at `eye` (its own
+/// distances, not the main view's: what is near the main camera may be far in
+/// the mirror). Equal distances keep their order.
+fn mirror_blend_order(view_proj: Mat4, eye: Vec3, list: &[DrawCmd], rigged: usize) -> [Vec<DrawCmd>; 2] {
+    let rigged = rigged.min(list.len());
+    let first = cull_cmds_to_view(view_proj, &list[..rigged]);
+    let mut rest = cull_cmds_to_view(view_proj, &list[rigged..]);'''
+replace = '''/// The mirror's blended faces (`DrawLists::reflection_blend`) that its
+/// culling `planes` let through (mirror_pass::cull_planes): the first
+/// `rigged` of `list` in their order, then the others back to front from the
+/// mirror's camera at `eye` (its own distances, not the main view's: what is
+/// near the main camera may be far in the mirror). Equal distances keep their
+/// order.
+// aurora-local-patch: mirror-pass-blend-order
+fn mirror_blend_order(planes: &[[f32; 4]; 6], eye: Vec3, list: &[DrawCmd], rigged: usize) -> [Vec<DrawCmd>; 2] {
+    let rigged = rigged.min(list.len());
+    let first = cull_cmds_to_planes(planes, &list[..rigged]);
+    let mut rest = cull_cmds_to_planes(planes, &list[rigged..]);'''
+
+[[patch]]
+id = "mirror-pass-cull-cmds"
+why = "goes with mirror-pass-cull-to-view: the terrain and blended lists"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''fn cull_cmds_to_view(view_proj: Mat4, list: &[DrawCmd]) -> Vec<DrawCmd> {
+    let planes = crate::gpu_cull::view_planes(view_proj).map(|p| p.to_array());
+    list.iter()
+        .filter(|c| {
+            c.bounds[3] <= 0.0 || crate::gpu_cull::sphere_in(&planes, Vec3::new(c.bounds[0], c.bounds[1], c.bounds[2]), c.bounds[3])
+        })
+        .copied()
+        .collect()
+}'''
+replace = '''fn cull_cmds_to_view(view_proj: Mat4, list: &[DrawCmd]) -> Vec<DrawCmd> {
+    cull_cmds_to_planes(&crate::gpu_cull::view_planes(view_proj).map(|p| p.to_array()), list)
+}
+
+// aurora-local-patch: mirror-pass-cull-cmds
+/// Draws of `list` whose `bounds` touch every one of `planes` (radius 0:
+/// always kept).
+fn cull_cmds_to_planes(planes: &[[f32; 4]; 6], list: &[DrawCmd]) -> Vec<DrawCmd> {
+    list.iter()
+        .filter(|c| c.bounds[3] <= 0.0 || crate::gpu_cull::sphere_in(planes, Vec3::new(c.bounds[0], c.bounds[1], c.bounds[2]), c.bounds[3]))
+        .copied()
+        .collect()
+}'''
+
+[[patch]]
+id = "mirror-pass-blend-order-test"
+why = "goes with mirror-pass-blend-order: its test gives the planes of the same view"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''        let [rigged, rest] = mirror_blend_order(proj * view, eye, &list, 3);
+        let records = |l: &[DrawCmd]| l.iter().map(|c| c.record).collect::<Vec<_>>();
+        assert_eq!(records(&rigged), [1, 2]);
+        assert_eq!(records(&rest), [5, 7, 4]);
+        // more rigged than entries: all of them rigged, nothing left over
+        let [rigged, rest] = mirror_blend_order(proj * view, eye, &list[..2], 9);'''
+replace = '''let planes = crate::gpu_cull::view_planes(proj * view).map(|p| p.to_array()); // aurora-local-patch: mirror-pass-blend-order-test
+        let [rigged, rest] = mirror_blend_order(&planes, eye, &list, 3);
+        let records = |l: &[DrawCmd]| l.iter().map(|c| c.record).collect::<Vec<_>>();
+        assert_eq!(records(&rigged), [1, 2]);
+        assert_eq!(records(&rest), [5, 7, 4]);
+        // more rigged than entries: all of them rigged, nothing left over
+        let [rigged, rest] = mirror_blend_order(&planes, eye, &list[..2], 9);'''
+
+# ------------------------------------------------------------- the backend
+
+[[patch]]
+id = "mirror-pass-field"
+why = "the mirror pass's state in the backend"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    occlusion: crate::occlusion::Occlusion,"
+replace = '''occlusion: crate::occlusion::Occlusion,
+    // aurora-local-patch: mirror-pass-field
+    /// The mirror pass's plan, occlusion test and statistics (mirror_pass.rs).
+    mirror_pass: crate::mirror_pass::MirrorPass,'''
+
+[[patch]]
+id = "mirror-pass-new"
+why = "goes with mirror-pass-field"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        let occlusion = crate::occlusion::Occlusion::new(&device);"
+replace = '''let occlusion = crate::occlusion::Occlusion::new(&device);
+        let mirror_pass = crate::mirror_pass::MirrorPass::new(&device); // aurora-local-patch: mirror-pass-new'''
+
+[[patch]]
+id = "mirror-pass-init"
+why = "goes with mirror-pass-field"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            indirect_cpu: Vec::new(),
+            occlusion,'''
+replace = '''indirect_cpu: Vec::new(),
+            occlusion,
+            mirror_pass, // aurora-local-patch: mirror-pass-init'''
+
+[[patch]]
+id = "mirror-pass-harvest"
+why = "the occlusion test's verdicts read back, at the start of a frame"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        self.occlusion.harvest();"
+replace = '''self.occlusion.harvest();
+        self.mirror_pass.harvest(); // aurora-local-patch: mirror-pass-harvest'''
+
+[[patch]]
+id = "mirror-pass-plan"
+why = "the mirror left out when nothing on the screen can show it, else drawn in its volume's screen rect"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        let mirror = f.mirror.filter(|_| self.targets.mirror.is_some());"
+replace = '''let mirror = f.mirror.filter(|_| self.targets.mirror.is_some());
+        // aurora-local-patch: mirror-pass-plan
+        // the mirror pass (mirror_pass.rs): left out when the volume where
+        // mirror_tap gives its image is off the screen, or thinner than two
+        // pixels in the user's view, the frame then one without a mirror
+        // (the probes show); else drawn in that volume's screen rect
+        let mirror_image = self.targets.mirror.as_ref().map(|t| (t.width, t.height));
+        let mirror_plan = match (&mirror, mirror_image) {
+            (Some(m), Some(image)) => Some(self.mirror_pass.plan(
+                m,
+                f.proj * f.view,
+                fu.proj * fu.view,
+                world_size,
+                image,
+                !external_output && snapshot.is_none(),
+                Instant::now(),
+            )),
+            _ => None,
+        };
+        let mirror = mirror.filter(|_| mirror_plan.is_some_and(|p| p.drawn()));'''
+
+[[patch]]
+id = "mirror-pass-tap-rect"
+why = "goes with mirror-pass-plan: mirror_tap's rect"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            main.mirror_view_proj = (f.proj * f.view * reflection_matrix(n, -n.dot(m.point))).to_cols_array_2d();"
+replace = '''main.mirror_view_proj = (f.proj * f.view * reflection_matrix(n, -n.dot(m.point))).to_cols_array_2d();
+            // aurora-local-patch: mirror-pass-tap-rect
+            // the screen rect the pass draws: mirror_tap fades the rays
+            // leaving it as those leaving the image
+            main.mirror_rect = mirror_plan.map_or(crate::mirror_pass::OPEN_RECT, |p| p.rect);'''
+
+[[patch]]
+id = "mirror-pass-keep-behind"
+why = "the clip's centimetre behind the mirror shared with its culling"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            let mut u = refl_frame(self, n, -n.dot(m.point), 0.01, true);"
+replace = '''// aurora-local-patch: mirror-pass-keep-behind
+            let mut u = refl_frame(self, n, -n.dot(m.point), crate::mirror_pass::KEEP_BEHIND, true);'''
+
+[[patch]]
+id = "mirror-pass-planes-var"
+why = "goes with mirror-pass-planes"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        let mut mirror_eye = Vec3::ZERO;"
+replace = '''let mut mirror_eye = Vec3::ZERO;
+        // the mirror pass's culling (mirror_pass::cull_planes)
+        let mut mirror_planes = [[0.0f32; 4]; 6]; // aurora-local-patch: mirror-pass-planes-var'''
+
+[[patch]]
+id = "mirror-pass-planes"
+why = "the mirror pass's culling planes: its scissor's sub-frustum and its clip plane"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            self.queue.write_buffer(&self.refl_buffers[1], 0, bytemuck::bytes_of(&u));"
+replace = '''self.queue.write_buffer(&self.refl_buffers[1], 0, bytemuck::bytes_of(&u));
+            // aurora-local-patch: mirror-pass-planes
+            // its culling, GPU bin and CPU lists alike: the scissor's
+            // sub-frustum, and the clip plane for what lies wholly behind
+            // the mirror
+            let narrow = mirror_plan.map_or(Mat4::IDENTITY, |p| p.narrow);
+            mirror_planes = crate::mirror_pass::cull_planes(mirror_vp, narrow, n.extend(-n.dot(m.point)));'''
+
+[[patch]]
+id = "mirror-pass-cull-frame"
+why = "goes with mirror-pass-planes: the GPU bin"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            frame.groups[3] = self.shelter_slot as u32;"
+replace = '''frame.groups[3] = self.shelter_slot as u32;
+            // aurora-local-patch: mirror-pass-cull-frame
+            if mirror.is_some() {
+                frame.mirror = mirror_planes;
+            }'''
+
+[[patch]]
+id = "mirror-pass-lists"
+why = "goes with mirror-pass-planes: the CPU list and the blended list"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            rg.refl_mirror = push(cpu, &cull_to_view(mirror_vp, &lists.reflection));
+            let [rigged, rest] = mirror_blend_order(mirror_vp, mirror_eye, &lists.reflection_blend, lists.reflection_blend_rigged);'''
+replace = '''// aurora-local-patch: mirror-pass-lists
+            rg.refl_mirror = push(cpu, &cull_to_planes(&mirror_planes, &lists.reflection));
+            let [rigged, rest] = mirror_blend_order(&mirror_planes, mirror_eye, &lists.reflection_blend, lists.reflection_blend_rigged);'''
+
+[[patch]]
+id = "mirror-pass-terrain-lists"
+why = "goes with mirror-pass-planes: the terrain; the pass's CPU-built lists together"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            rg.refl_terrain_mirror = push(cpu, &cull_cmds_to_view(mirror_vp, &lists.reflection_terrain));
+            rg.refl_terrain_pbr_mirror = push(cpu, &cull_cmds_to_view(mirror_vp, &lists.reflection_terrain_pbr));
+        }'''
+replace = '''// aurora-local-patch: mirror-pass-terrain-lists
+            rg.refl_terrain_mirror = push(cpu, &cull_cmds_to_planes(&mirror_planes, &lists.reflection_terrain));
+            rg.refl_terrain_pbr_mirror = push(cpu, &cull_cmds_to_planes(&mirror_planes, &lists.reflection_terrain_pbr));
+        }
+        // the mirror pass's CPU-built lists, for its occlusion test and its
+        // statistics (none without a mirror)
+        let mirror_lists = [
+            rg.refl_mirror,
+            rg.refl_terrain_mirror,
+            rg.refl_terrain_pbr_mirror,
+            rg.refl_mirror_blend[0],
+            rg.refl_mirror_blend[1],
+        ];'''
+
+[[patch]]
+id = "mirror-pass-test"
+why = "the occlusion test of the mirror's volume, after the Hi-Z pyramid and before anything reads the pass's draws"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth prepass 2"),'''
+replace = '''// aurora-local-patch: mirror-pass-test
+            // the mirror pass empties itself in this frame when this depth
+            // (what was drawn last frame, so surely there) hides the whole
+            // volume where mirror_tap could show its image (mirror_pass.rs)
+            if let (Some(rect), Some(hiz)) = (mirror_plan.and_then(|p| p.test), self.occlusion.hiz_view()) {
+                self.mirror_pass.encode_test(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &rect,
+                    hiz,
+                    world_size,
+                    &self.indirect,
+                    gpu_on.then(|| (cull.counts(), BIN_REFL_MIRROR)),
+                    mirror_lists,
+                );
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth prepass 2"),'''
+
+[[patch]]
+id = "mirror-pass-scissor"
+why = "the mirror pass draws its volume's screen rect only, its sky with its other draws"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''            pass.set_viewport(0.0, 0.0, t.width as f32, t.height as f32, 0.0, 1.0);
+            bind_mesh(&mut pass, bg);
+            pass.set_pipeline(&self.pipelines.refl_sky);
+            pass.draw(0..3, 0..1);'''
+replace = '''pass.set_viewport(0.0, 0.0, t.width as f32, t.height as f32, 0.0, 1.0);
+            // aurora-local-patch: mirror-pass-scissor
+            // the mirror's pass draws its volume's screen rect only, and its
+            // sky goes with its other draws when the occlusion test empties
+            // them (mirror_pass.rs); the image is still cleared whole
+            let mirror_now = bin == BIN_REFL_MIRROR;
+            if let Some([x, y, w, h]) = mirror_plan.and_then(|p| p.scissor).filter(|_| mirror_now) {
+                pass.set_scissor_rect(x, y, w, h);
+            }
+            bind_mesh(&mut pass, bg);
+            pass.set_pipeline(&self.pipelines.refl_sky);
+            match self.mirror_pass.sky_draw().filter(|_| mirror_now) {
+                Some(sky) => pass.draw_indirect(sky, 0),
+                None => pass.draw(0..3, 0..1),
+            }'''
+
+[[patch]]
+id = "mirror-pass-after-submit"
+why = "goes with mirror-pass-harvest: the verdict copied this frame mapped after the submit"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        self.occlusion.after_submit();"
+replace = '''self.occlusion.after_submit();
+        self.mirror_pass.after_submit(); // aurora-local-patch: mirror-pass-after-submit'''
+
+[[patch]]
+id = "mirror-pass-stats"
+why = "the mirror pass's statistics: drawn or left out and why, its test, its draws and scissor"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        stats.mirror = mirror.is_some();"
+replace = '''stats.mirror = mirror.is_some();
+        // aurora-local-patch: mirror-pass-stats
+        // (the GPU bin's draws read back a frame or two late)
+        let mirror_bin = if gpu.is_some() { self.cull.last.bins[BIN_REFL_MIRROR] } else { 0 };
+        let mirror_draws = mirror_lists.iter().map(|r| r.1).sum::<u32>() + mirror_bin;
+        stats.mirror_pass = self.mirror_pass.stats(mirror_plan.as_ref(), mirror_draws);'''
+
+[[patch]]
+id = "mirror-pass-stats-field"
+why = "goes with mirror-pass-stats"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    pub water_reflection: bool,
+    pub mirror: bool,'''
+replace = '''pub water_reflection: bool,
+    pub mirror: bool,
+    // aurora-local-patch: mirror-pass-stats-field
+    /// The mirror pass: drawn or left out and why, its occlusion test, its
+    /// draws and scissor (mirror_pass.rs).
+    pub mirror_pass: crate::mirror_pass::MirrorStats,'''
+
+[[patch]]
+id = "mirror-pass-stats-carry"
+why = "goes with mirror-pass-stats: a frame with no result keeps the state, not the verdicts"
+paths = ["crates/aurora-render/src/main_thread.rs"]
+op = "literal"
+find = "                mirror: self.last_stats.mirror,"
+replace = '''mirror: self.last_stats.mirror,
+                mirror_pass: self.last_stats.mirror_pass.carried(), // aurora-local-patch: mirror-pass-stats-carry'''
+
+# ------------------------------------------------------------- the viewer
+
+[[patch]]
+id = "mirror-pass-shown"
+why = "occlusion streaming's mirror exemption only while the mirror is drawn and seen"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    pub mirror_plane: Option<(Vec3, Vec3)>,"
+replace = '''pub mirror_plane: Option<(Vec3, Vec3)>,
+    // aurora-local-patch: mirror-pass-shown
+    /// Whether the renderer drew that mirror lately and did not find it
+    /// hidden (it leaves out a mirror nothing on the screen shows,
+    /// aurora_render::mirror_pass): only then does what stands in front of
+    /// it keep its textures for it (occlusion streaming).
+    pub mirror_shown: aurora_render::mirror_pass::Shown,'''
+
+[[patch]]
+id = "mirror-pass-shown-init"
+why = "goes with mirror-pass-shown"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "            mirror_plane: None,"
+replace = '''mirror_plane: None,
+            mirror_shown: Default::default(), // aurora-local-patch: mirror-pass-shown-init'''
+
+[[patch]]
+id = "mirror-pass-shown-note"
+why = "goes with mirror-pass-shown: the renderer's last word on the mirror"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "        self.scene.mirror_plane = mirror.as_ref().map(|m| (m.point, m.normal));"
+replace = '''self.scene.mirror_plane = mirror.as_ref().map(|m| (m.point, m.normal));
+        // aurora-local-patch: mirror-pass-shown-note
+        // the renderer's last word on its mirror (a frame or two late; a
+        // frame that had none says nothing): left out or found hidden, what
+        // stands in front of it keeps its textures a second more
+        self.scene
+            .mirror_shown
+            .note(mirror.is_some() && !self.last_render.mirror_pass.left_out(), Instant::now());'''
+
+[[patch]]
+id = "mirror-pass-exempt"
+why = "goes with mirror-pass-shown"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = "        let mirror_plane = self.mirror_plane;"
+replace = '''let mirror_plane = self.mirror_plane;
+        let mirror_exempt = self.mirror_shown.exempt(); // aurora-local-patch: mirror-pass-exempt'''
+
+[[patch]]
+id = "mirror-pass-exempt-usage"
+why = "goes with mirror-pass-shown: patch 121's exemption of what stands in front of the mirror"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "build_lists"
+find = "                        || mirror_plane.is_some_and(|(p, n)| n.dot(sc - p) > -sr),"
+replace = '''// aurora-local-patch: mirror-pass-exempt-usage
+                        || (mirror_exempt && mirror_plane.is_some_and(|(p, n)| n.dot(sc - p) > -sr)),'''
+
+# ------------------------------------------------------------- profile
+
+[[patch]]
+id = "mirror-pass-profile-fields"
+why = "the mirror pass in the profile's sums"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''    particles: u64,
+    occluded: u64,'''
+replace = '''particles: u64,
+    occluded: u64,
+    // aurora-local-patch: mirror-pass-profile-fields
+    /// The mirror pass (aurora_render::mirror_pass): frames that drew it,
+    /// that left it out off the screen, tiny; occlusion verdicts read back,
+    /// those that found it hidden; the draws and the scissor's share of the
+    /// frames that drew it.
+    mirror_frames: [u32; 3],
+    mirror_verdicts: [u32; 2],
+    mirror_draws: u64,
+    mirror_area: f32,'''
+
+[[patch]]
+id = "mirror-pass-profile-add"
+why = "goes with mirror-pass-profile-fields"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = "        p.occluded += render.occluded.unwrap_or(0) as u64;"
+replace = '''p.occluded += render.occluded.unwrap_or(0) as u64;
+        // aurora-local-patch: mirror-pass-profile-add
+        let mirror = &render.mirror_pass;
+        if mirror.found {
+            match mirror.skip {
+                None => {
+                    p.mirror_frames[0] += 1;
+                    p.mirror_draws += mirror.draws as u64;
+                    p.mirror_area += mirror.area;
+                }
+                Some(aurora_render::mirror_pass::MirrorSkip::OffScreen) => p.mirror_frames[1] += 1,
+                Some(aurora_render::mirror_pass::MirrorSkip::Tiny) => p.mirror_frames[2] += 1,
+            }
+        }
+        p.mirror_verdicts[0] += mirror.verdicts;
+        p.mirror_verdicts[1] += mirror.hidden;'''
+
+[[patch]]
+id = "mirror-pass-profile-line"
+why = "goes with mirror-pass-profile-fields: in the profile line before the draws"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''    let s = &p.scene;
+    let _ = write!(
+        out,
+        " | draws='''
+replace = '''// aurora-local-patch: mirror-pass-profile-line
+    // the mirror pass: shares of the frames that drew it or left it out (off
+    // the screen, tiny), of the occlusion verdicts that found it hidden,
+    // then the draws and the scissor's share of a frame that drew it
+    let mirror_n = p.mirror_frames[0].max(1) as f32;
+    let _ = write!(
+        out,
+        " | mirror_drawn={:.2} mirror_offscreen={:.2} mirror_tiny={:.2} mirror_hidden={:.2} mirror_draws={:.0} mirror_area={:.2}",
+        p.mirror_frames[0] as f32 / n,
+        p.mirror_frames[1] as f32 / n,
+        p.mirror_frames[2] as f32 / n,
+        p.mirror_verdicts[1] as f32 / p.mirror_verdicts[0].max(1) as f32,
+        p.mirror_draws as f32 / mirror_n,
+        p.mirror_area / mirror_n,
+    );
+    let s = &p.scene;
+    let _ = write!(
+        out,
+        " | draws='''
+
+[[patch]]
+id = "mirror-pass-profile-test"
+why = "goes with mirror-pass-profile-line: what the segment says of drawn, left out and hidden frames"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''    /// What the blended faces draw and what a lit fragment may walk, and
+    /// which of the compared paths drew the frames.'''
+replace = '''// aurora-local-patch: mirror-pass-profile-test
+    /// The mirror pass's segment: shares of the frames, of the verdicts,
+    /// and per frame that drew it.
+    #[test]
+    fn summary_tells_what_became_of_the_mirror() {
+        use aurora_render::mirror_pass::{MirrorSkip, MirrorStats};
+        let mut p = FrameProfile::new(true);
+        let t = Instant::now();
+        let drawn = MirrorStats {
+            found: true,
+            tested: true,
+            verdicts: 1,
+            draws: 30,
+            area: 0.25,
+            ..Default::default()
+        };
+        let mut lines = Vec::new();
+        for i in 0..=50u64 {
+            let mirror = match i % 5 {
+                0 | 1 => drawn,
+                2 => MirrorStats { hidden: 1, ..drawn },
+                3 => MirrorStats {
+                    found: true,
+                    skip: Some(MirrorSkip::OffScreen),
+                    ..Default::default()
+                },
+                _ => MirrorStats::default(),
+            };
+            let render = RenderStats {
+                mirror_pass: mirror,
+                ..Default::default()
+            };
+            p.lap_at(Lap::Sync, t + ms(i * 20));
+            if let Some(l) = p.end_frame_at(&render, &SceneCounts::default(), &Parts::default(), t + ms(i * 20)) {
+                lines.push(l);
+            }
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let l = &lines[0];
+        // 51 frames: 31 drew it (10 of them hidden), 10 off the screen
+        assert!(
+            l.contains(
+                " | mirror_drawn=0.61 mirror_offscreen=0.20 mirror_tiny=0.00 mirror_hidden=0.32 mirror_draws=30 mirror_area=0.25 | draws="
+            ),
+            "{l}"
+        );
+    }
+
+    /// What the blended faces draw and what a lit fragment may walk, and
+    /// which of the compared paths drew the frames.'''
+
+[[patch]]
+id = "mirror-pass-docs"
+why = "goes with mirror-pass-profile-line: the guide's profile keys"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''    refraction and SSR (the cut-out pass and the submerged water particles
+    are counted with it), and SSR;'''
+replace = '''refraction and SSR (the cut-out pass and the submerged water particles
+    are counted with it), and SSR;
+  - `mirror_drawn`, `mirror_offscreen`, `mirror_tiny`: the share of the
+    frames whose mirror (the nearest hero probe in view) had its pass
+    drawn, or was left out because the volume where it can show is off the
+    screen, or less than 2 pixels across in the user's view (the probes
+    show instead, as with no mirror); `mirror_hidden`: the share of the
+    occlusion tests read back (a frame or two late) that found that volume
+    behind the main view's depth, the pass then drawing nothing;
+    `mirror_draws` and `mirror_area`: per frame that drew the pass, its
+    draws (those of the GPU bin read back late) and the share of the mirror
+    image inside its scissor (local patch set)
+    <!-- // aurora-local-patch: mirror-pass-docs -->;'''

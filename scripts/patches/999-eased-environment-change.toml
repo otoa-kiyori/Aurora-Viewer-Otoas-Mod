@@ -1,0 +1,171 @@
+# An environment change eases in and out: its progress follows a cosine
+# curve, (1 - cos(pi p)) / 2 of its linear progress p, so it starts slowly,
+# speeds up, and slows down to its end, over exactly its own time (the
+# manual transition, the server's and the parcel's 5 s, the fast 1 s, an
+# altitude zone's); a change of 0 s stays instant. No setting, no
+# interface, nothing sent.
+#
+# The Legacy Viewer's change is linear (LLSettingsBlenderTimeDelta::
+# calculateBlend, indra/llinventory/llsettingsbase.cpp: the time spent over
+# the span): a deliberate difference, wanted for a softer start and end.
+#
+# One place: the selector's fade (EnvSelector::frame, world/eep_env.rs)
+# maps its progress once (`eased_progress`), and everything the change
+# drives takes that value: the blended sky and water (SkyFrame::fade_to_with,
+# WaterFrame::fade_to_with, whose lerp carries patch 123's kind shares when
+# it is there) and patch 998's texture shares through its clock
+# (TextureClock::advance: a late texture rises at twice the linear pace
+# until it meets the eased progress, which never outruns it, the curve's
+# fastest pace being pi / 2 the linear one, then follows it). A day cycle's
+# own keyframe blending is continuous time and is not eased. A change begun
+# over a running one starts from the picture shown with its own eased
+# progress from 0: no value jumps, the picture's pace drops to 0 there and
+# picks up again.
+#
+# Switching it off (moving this file out) gives the linear change back; it
+# needs nothing of patches 123 and 124, and they need nothing of it (the
+# whole-frame tests of patch 123 bound a frame's move by pi / 2 the linear
+# pace, which a linear change keeps too). It edits patch 998's selector
+# tests, so it sorts after it.
+#
+# Tests: the eased progress itself (0, 1/2 and 1, symmetric, monotonic, at
+# most pi / 2 the linear pace, soft ends, out of range and not a number);
+# patch 998's selector tests that asserted a linear share now assert the
+# eased one (the share of a change to another day, the share and a value at
+# a quarter, half and three quarters of a change, two cloud layers over
+# 29 s, a late texture).
+
+[[patch]]
+id = "eased-environment-change-fn"
+why = "the eased progress of a change, beside the selector's fade"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''#[derive(Debug, Clone, Copy)]
+struct Fade {'''
+replace = '''// aurora-local-patch: eased-environment-change-fn
+/// The progress of an environment change for its linear progress `p`
+/// (0..=1): (1 - cos(pi p)) / 2, slow at the start and the end, a half at
+/// half time, exactly 0 and 1 at the ends; not a number counts as 0. The
+/// Legacy Viewer's is linear (LLSettingsBlenderTimeDelta::calculateBlend,
+/// indra/llinventory/llsettingsbase.cpp): a softer start and end, on purpose.
+pub fn eased_progress(p: f32) -> f32 {
+    if p.is_nan() || p <= 0.0 {
+        0.0
+    } else if p >= 1.0 {
+        1.0
+    } else {
+        (1.0 - (std::f32::consts::PI * p).cos()) * 0.5
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Fade {'''
+
+[[patch]]
+id = "eased-environment-change-progress"
+why = "the change's one eased progress drives everything it blends (values, kind shares, texture shares and their clock)"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''let t = ((input.now - f.start) as f32 / f.duration).clamp(0.0, 1.0);'''
+replace = '''// aurora-local-patch: eased-environment-change-progress
+                // (eased, `eased_progress`: everything below takes this one value)
+                let t = eased_progress(((input.now - f.start) as f32 / f.duration).clamp(0.0, 1.0));'''
+
+[[patch]]
+id = "eased-environment-change-test"
+why = "the eased progress's own test"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''pub(super) mod tests {
+    use super::*;'''
+replace = '''pub(super) mod tests {
+    use super::*;
+
+    // aurora-local-patch: eased-environment-change-test
+    /// The selector's eased progress: 0, 1/2 and 1 at the start, the middle
+    /// and the end, symmetric, monotonic, never faster than pi / 2 the
+    /// linear pace, with soft ends.
+    #[test]
+    fn the_change_progress_is_eased() {
+        assert_eq!(eased_progress(0.0), 0.0);
+        assert_eq!(eased_progress(1.0), 1.0);
+        assert!((eased_progress(0.5) - 0.5).abs() < 1e-6);
+        let n = 1000;
+        let mut last = 0.0;
+        for i in 1..=n {
+            let p = i as f32 / n as f32;
+            let e = eased_progress(p);
+            assert!(e >= last, "{p}");
+            assert!((e + eased_progress(1.0 - p) - 1.0).abs() < 1e-5, "symmetric at {p}");
+            assert!(e - last <= std::f32::consts::FRAC_PI_2 / n as f32 + 1e-6, "{p}");
+            last = e;
+        }
+        // the first and the last steps are small: the change starts and ends
+        // softly
+        assert!(eased_progress(0.01) < 0.001 && 1.0 - eased_progress(0.99) < 0.001);
+        // out of range and not a number
+        assert_eq!(eased_progress(-1.0), 0.0);
+        assert_eq!(eased_progress(2.0), 1.0);
+        assert_eq!(eased_progress(f32::NAN), 0.0);
+    }'''
+
+# ------------------------------------------------------------ the selector's tests
+
+[[patch]]
+id = "eased-environment-change-test-day"
+why = "patch 998's test of a change to another day: the share is the eased progress"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''            let t = ((now - 10.0) / 5.0) as f32;'''
+replace = '''let t = eased_progress(((now - 10.0) / 5.0) as f32); // aurora-local-patch: eased-environment-change-test-day'''
+
+[[patch]]
+id = "eased-environment-change-test-duration"
+why = "patch 998's test of the change's own duration: the share and the values follow the eased progress"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''            for part in [0.25f32, 0.5, 0.75] {
+                let (sky, water) = sel.frame(&input(start + f64::from(part * duration)));
+                let s = sky.shown_textures().cloud;
+                assert_eq!((s.first, s.next.id), (from, id(9)), "{duration} at {part}");
+                assert!((s.blend - part).abs() < 1e-4, "{duration} at {part}: {}", s.blend);
+                // the frame's own offset, lerped by the same ratio
+                let x = before.cloud_pos_density1.x;
+                assert!(
+                    (sky.cloud_pos_density1.x - (x + (0.5 - x) * part)).abs() < 1e-4,'''
+replace = '''for part in [0.25f32, 0.5, 0.75] {
+                let (sky, water) = sel.frame(&input(start + f64::from(part * duration)));
+                let s = sky.shown_textures().cloud;
+                // aurora-local-patch: eased-environment-change-test-duration
+                let eased = eased_progress(part);
+                assert_eq!((s.first, s.next.id), (from, id(9)), "{duration} at {part}");
+                assert!((s.blend - eased).abs() < 1e-4, "{duration} at {part}: {}", s.blend);
+                // the frame's own offset, lerped by the same ratio
+                let x = before.cloud_pos_density1.x;
+                assert!(
+                    (sky.cloud_pos_density1.x - (x + (0.5 - x) * eased)).abs() < 1e-4,'''
+
+[[patch]]
+id = "eased-environment-change-test-scroll"
+why = "patch 998's test of two layers scrolling over a 29 s change: the share is the eased progress"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''            let t = ((now - start) / 29.0) as f32;'''
+replace = '''let t = eased_progress(((now - start) / 29.0) as f32); // aurora-local-patch: eased-environment-change-test-scroll'''
+
+[[patch]]
+id = "eased-environment-change-test-scroll-message"
+why = "goes with eased-environment-change-test-scroll"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''assert!((c.blend - t).abs() < 1e-4, "linear: {t} {}", c.blend);'''
+replace = '''assert!((c.blend - t).abs() < 1e-4, "eased: {t} {}", c.blend); // aurora-local-patch: eased-environment-change-test-scroll-message'''
+
+[[patch]]
+id = "eased-environment-change-test-late"
+why = "patch 998's test of a late texture: the water follows the eased progress, the late texture never passes it"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''            let t = (((now - 10.0) / 5.0) as f32).min(1.0);'''
+replace = '''let t = eased_progress(((now - 10.0) / 5.0) as f32); // aurora-local-patch: eased-environment-change-test-late'''
+

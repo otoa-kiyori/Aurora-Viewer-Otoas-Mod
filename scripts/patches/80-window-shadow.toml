@@ -1,0 +1,205 @@
+# A "Window shadow" slider: how strong the drop shadow under every window,
+# menu, tooltip and overlay panel is, in Preferences › Appearance › Skin ›
+# Windows.
+#
+# Upstream's Theme::apply (theme.rs) gives egui one fixed shadow,
+# `window_shadow` (4 points down, 14 of blur, 35 % of the bar colour), and
+# the same as `popup_shadow`; high contrast sets both to none. Every
+# surface reads it from the visuals: widgets::Floater, egui windows, the
+# menus and tooltips (popup_shadow), widgets::overlay_frame and the loading
+# screen's map tile. So one value in Theme::apply drives them all. The
+# name plates (their own mesh), the dragged item's ghost (drag_ghost, a
+# stronger "lifted" cue) and the alerts' breathing glow are not window
+# shadows and stay as upstream wrote them.
+#
+# Here (files/window-shadow/window_shadow.rs) a strength from 0 to 2,
+# shown as 0 to 200 %: 0 is no shadow, 1 (100 %, the default) is
+# upstream's shadow exactly, 2 a large soft one (10 down, 40 of blur, 2 of
+# spread, 70 %); each half is linear between its ends. High contrast still
+# forces none. The settings field (`window_shadow`) is new: older settings
+# files load with the default (the struct is `#[serde(default)]`). It is
+# applied at start and with every change of the preferences, so dragging
+# the slider updates the windows live. AURORA_DEMO_WINDOW_SHADOW=<0..2>
+# sets it for a demo run, never saved.
+#
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "window-shadow-module"
+why = "the strength, its scale and its tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/window_shadow.rs"]
+source = "files/window-shadow/window_shadow.rs"
+
+[[patch]]
+id = "window-shadow-mod"
+why = "declare the module (in rustfmt's order, after window_hold); set like high_contrast"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = "mod window_hold;"
+replace = """mod window_hold;
+mod window_shadow; // aurora-local-patch: window-shadow-mod"""
+
+# --- the theme
+
+[[patch]]
+id = "window-shadow-theme"
+why = "the windows' and pop-ups' shadow of the chosen strength (the default gives upstream's, the high contrast branch below still clears it)"
+paths = ["crates/aurora-viewer/src/theme.rs"]
+op = "literal"
+fn = "apply"
+find = """        v.window_shadow = egui::Shadow {
+            offset: [0, 4],
+            blur: 14,
+            spread: 0,
+            color: p.bar.gamma_multiply(0.35),
+        };"""
+replace = """// aurora-local-patch: window-shadow-theme
+        v.window_shadow = crate::window_shadow::shadow(crate::window_shadow::current(), p.bar);"""
+
+# --- the setting
+
+[[patch]]
+id = "window-shadow-setting"
+why = "the strength, in settings.json (absent from older files: the default)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub interface_colors: crate::interface_colors::InterfaceColors,"
+replace = """pub interface_colors: crate::interface_colors::InterfaceColors,
+    // aurora-local-patch: window-shadow-setting
+    /// Preferences › Appearance › Skin: the strength of the windows' and
+    /// pop-ups' shadow, 0 (none) to 2; 1 is the theme's own
+    /// (`crate::window_shadow`; local patch set).
+    pub window_shadow: f32,"""
+
+[[patch]]
+id = "window-shadow-setting-default"
+why = "goes with window-shadow-setting"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "interface_colors: Default::default(),"
+replace = """interface_colors: Default::default(),
+            window_shadow: crate::window_shadow::DEFAULT, // aurora-local-patch: window-shadow-setting-default"""
+
+[[patch]]
+id = "window-shadow-setting-sanitize"
+why = "a hand-edited file keeps the strength in range"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+fn = "sanitized"
+find = "self.chat_bubble_opacity = if self.chat_bubble_opacity.is_finite() {"
+replace = """self.window_shadow = crate::window_shadow::clamp(self.window_shadow); // aurora-local-patch: window-shadow-setting-sanitize
+        self.chat_bubble_opacity = if self.chat_bubble_opacity.is_finite() {"""
+
+# --- applied at start and after each change
+
+[[patch]]
+id = "window-shadow-start"
+why = "before the skin's theme is applied for the first time"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "crate::interface_colors::set(wanted_interface_colors(&settings));"
+replace = """crate::interface_colors::set(wanted_interface_colors(&settings));
+        crate::window_shadow::set(crate::window_shadow::wanted(&settings)); // aurora-local-patch: window-shadow-start"""
+
+[[patch]]
+id = "window-shadow-change"
+why = "every change of the preferences applies the theme again: the slider updates the windows as it is dragged"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.skin.theme.apply(&self.egui_ctx, text_scale(&self.settings));"
+replace = """crate::window_shadow::set(crate::window_shadow::wanted(&self.settings)); // aurora-local-patch: window-shadow-change
+            self.skin.theme.apply(&self.egui_ctx, text_scale(&self.settings));"""
+
+# --- Preferences
+
+[[patch]]
+id = "window-shadow-prefs-row"
+why = "Appearance › Skin, after the interface colours and the opacity sliders (the windows' look); greyed while high contrast, which has no shadow"
+paths = ["crates/aurora-viewer/src/ui/options/pages/appearance.rs"]
+op = "literal"
+fn = "page"
+find = """            interface_colors(cx);
+            opacity(cx);
+            cx.group(tr!("extra-skin"), |cx| {"""
+replace = """interface_colors(cx);
+            opacity(cx);
+            // aurora-local-patch: window-shadow-prefs-row
+            cx.group(tr!("common-windows"), |cx| {
+                cx.greyed(crate::high_contrast::current());
+                cx.row(
+                    tr!("ui-options-window-shadow"),
+                    tr!("ui-options-window-shadow-help"),
+                    &field!(window_shadow),
+                    |ui, s| {
+                        let top = crate::window_shadow::MAX_STRENGTH * 100.0;
+                        let mut percent = (s.window_shadow * 100.0).round();
+                        let changed = super::super::slider_whole(ui, &mut percent, 0.0..=top, "%");
+                        if changed {
+                            s.window_shadow = crate::window_shadow::clamp(percent / 100.0);
+                        }
+                        changed
+                    },
+                );
+            });
+            cx.group(tr!("extra-skin"), |cx| {"""
+
+[[patch]]
+id = "window-shadow-text-en"
+why = "the row's texts (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-interface-colors-accent-adjusted = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: window-shadow-text-en
+ui-options-window-shadow = Window shadow
+ui-options-window-shadow-help = The soft shadow under windows, menus, tooltips and panels. 0 % for none, 100 % for the usual look, up to 200 % for a larger, darker shadow. High contrast has no shadow.'''
+
+[[patch]]
+id = "window-shadow-text-fr"
+why = "goes with window-shadow-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-interface-colors-accent-adjusted = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: window-shadow-text-fr
+ui-options-window-shadow = Ombre des fenêtres
+ui-options-window-shadow-help = L’ombre douce sous les fenêtres, les menus, les infobulles et les panneaux. 0 % pour aucune, 100 % pour l’aspect habituel, jusqu’à 200 % pour une ombre plus grande et plus sombre. Le contraste élevé n’a pas d’ombre.'''
+
+[[patch]]
+id = "window-shadow-text-ja"
+why = "goes with window-shadow-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-interface-colors-accent-adjusted = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: window-shadow-text-ja
+ui-options-window-shadow = ウィンドウの影
+ui-options-window-shadow-help = ウィンドウ、メニュー、ツールチップ、パネルの下に表示される柔らかい影です。0%で影なし、100%で通常の表示、最大200%でより大きく濃い影になります。ハイコントラストでは影は表示されません。'''
+
+# --- docs
+
+[[patch]]
+id = "window-shadow-testing-table"
+why = "docs/TESTING.md: the demo variable, in the table beside AURORA_DEMO_COLORS"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_DEMO_COLORS=[^\n]*$'
+replace = '''\g<0>
+| `AURORA_DEMO_WINDOW_SHADOW=<0..2>` | Window shadow strength of this run (Preferences › Appearance › Skin; local patch set), never saved <!-- // aurora-local-patch: window-shadow-testing-table --> |'''
+
+[[patch]]
+id = "window-shadow-testing-details"
+why = "docs/TESTING.md: what the demo variable shows"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^- \*\*`AURORA_DEMO_CONTRAST=1\|0`\*\*'
+replace = '''- **`AURORA_DEMO_WINDOW_SHADOW=<0..2>`** (local patch set): the strength
+  of the shadow under the windows, menus, tooltips and overlay panels for
+  this run, as Preferences › Appearance › Skin › Window shadow sets it
+  (0 none, 1 the usual one, 2 a larger, darker one), without touching the
+  saved settings. High contrast still has none.
+  <!-- // aurora-local-patch: window-shadow-testing-details -->
+\g<0>'''

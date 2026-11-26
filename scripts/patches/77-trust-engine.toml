@@ -1,0 +1,913 @@
+# TRust as a second web engine beside Chromium (stages 1 to 3).
+#
+# Otoa's choice (2026-11-11/12): web pages are shown by TRust, a Rust web
+# engine, run by our own host program `aurora-trust-host` (a separate local
+# repository, not part of this one), one process per page, in
+# place of SLPlugin + the CEF plugin; Chromium is the fall back. Her goal:
+# browsing the Internet with an engine under our control rather than
+# Google's. Preferences › Media › Plugins › Web pages: "TRust, then
+# Chromium" (the default), "TRust only" or "Chromium only". One rule for
+# the three surfaces that show pages: in-world faces (and parcel media),
+# HUDs, and the viewer's web windows (files/trust-engine/engine_choice.rs,
+# with its tests). Video and music types keep their player (GStreamer on
+# Linux).
+#
+# - aurora-media: the plugin name `media_plugin_trust` launches the host
+#   program directly (files/trust-engine/trust_host.rs): an explicit path
+#   from the preferences, else `<data>/trust-host/aurora-trust-host`;
+#   AURORA_TRUST_HOST=<path> wins (tests). The plugin socket is a Unix socket
+#   pair given to the host as descriptor 3, not upstream's loopback TCP
+#   port: no localhost rule in the firewall, which sees only the page's own
+#   web traffic (the host needs an Internet rule of its own in Portmaster).
+#   The messages and the shared memory are upstream's.
+# - Routing: "TRust, then Chromium" gives TRust http(s), `data:`, `about:`
+#   and `file:` pages (engine_choice.rs `TRUST_SCHEMES`); anything else goes
+#   to Chromium. "TRust only" sends every page to TRust, which refuses what
+#   it cannot load at once (`engine_unsupported`). "Always use Chromium for
+#   these sites" (Preferences › Media) sends listed sites to Chromium in
+#   both TRust settings.
+# - The host (its own repository) fetches pages itself with TRust's TLS
+#   (WebPKI, Mozilla roots), runs scripts and animations, takes the mouse,
+#   the wheel, keys and text into forms, reports links to other protocols
+#   (`secondlife:`) as `click_nofollow` and new windows as `click_href`, and
+#   shows its own error page for a page that cannot be fetched.
+# - Fall back to Chromium ("TRust, then Chromium" only): when the host does
+#   not start, crashes or stops answering (upstream's PluginFailed) and when
+#   it refuses the page itself (`media_browser:engine_unsupported`: a
+#   response that is no page for TRust, a failure of its script engine or
+#   raster), which becomes a PluginFailed. Never for HTTP, DNS or TLS
+#   errors. Logged at info. Remembered per site for the session. Only the
+#   address carries over. The relaunch is upstream's own "another plugin
+#   for this face" rule.
+# - "Open with Chromium" / "Try with TRust": a face's media controls and
+#   the engine line above a web window's page (files/trust-engine,
+#   ui/media.rs and ui/web_view.rs hooks), for the session.
+# - Cookies: TRust pages are memory-only, except on the sites of patch 76's
+#   kept cookies list: a TRust profile of their own,
+#   `<cache>/trust-sites/<domain>/`, separate from Chromium's; the
+#   profiles of sites taken off the list (all of them with "Chromium
+#   only") are deleted. Web windows still get the OpenID cookie before
+#   their first page (upstream's set_cookie), which the host stores.
+# - "Chromium only" starts no host, drops running ones at the next frame,
+#   and deletes `<cache>/trust-run/`, `<cache>/trust-sites/` and the host
+#   log (`<viewer log name>.trust-host.log`). At every start, run folders of
+#   viewers that no longer run are deleted.
+# - The two `== "media_plugin_cef"` checks (Linux stream volume of a world
+#   page; a browser reports no "loaded" status) now mean "a browser plugin".
+# - AURORA_WEB_ENGINE=trust|chromium|trust-then-chromium overrides the
+#   setting for one launch (tests), without saving it.
+#
+# Needs 76-cef-site-profiles (its launch hooks are the anchors, its list
+# and its matching rule are reused). Apply or skip the whole file, not one
+# patch of it.
+
+# --- aurora-media: the host program and its socket
+
+[[patch]]
+id = "trust-engine-media-module"
+why = "the TRust host's plugin name, paths, launch, run folders and their sweep, with tests"
+op = "add_file"
+paths = ["crates/aurora-media/src/trust_host.rs"]
+source = "files/trust-engine/trust_host.rs"
+
+[[patch]]
+id = "trust-engine-media-mod"
+why = "declare it"
+paths = ["crates/aurora-media/src/lib.rs"]
+op = "literal"
+find = "mod stream_volume;"
+replace = """mod stream_volume;
+pub mod trust_host; // aurora-local-patch: trust-engine-media-mod"""
+
+[[patch]]
+id = "trust-engine-ipc-field"
+why = "the plugin socket is a TCP connection (SLPlugin) or a Unix socket pair (the TRust host)"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+find = '''
+listener: Option<TcpListener>,
+    stream: Option<TcpStream>,'''
+replace = '''
+listener: Option<TcpListener>,
+    stream: Option<IpcStream>, // aurora-local-patch: trust-engine-ipc-field'''
+
+[[patch]]
+id = "trust-engine-ipc-exit"
+why = "goes with trust-engine-ipc-field: the exit thread closes either socket after the grace, as it closed the TCP one"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+find = "fn end_in_background(child: Child, stream: Option<TcpStream>, grace: Duration)"
+replace = '''// aurora-local-patch: trust-engine-ipc-exit
+fn end_in_background(child: Child, stream: Option<IpcStream>, grace: Duration)'''
+
+[[patch]]
+id = "trust-engine-ipc-accept"
+why = "goes with trust-engine-ipc-field: SLPlugin's accepted connection"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+fn = "idle"
+find = "self.stream = Some(stream);"
+replace = "self.stream = Some(IpcStream::Tcp(stream)); // aurora-local-patch: trust-engine-ipc-accept"
+
+[[patch]]
+id = "trust-engine-ipc-test"
+why = "goes with trust-engine-ipc-field: the tests' loopback process"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+fn = "running"
+find = "stream: Some(stream),"
+replace = "stream: Some(IpcStream::Tcp(stream)), // aurora-local-patch: trust-engine-ipc-test"
+
+[[patch]]
+id = "trust-engine-ipc-stream"
+why = "the socket type, and the launch of a plugin program that speaks the protocol itself"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+find = "impl Drop for PluginProcess {"
+replace = '''// aurora-local-patch: trust-engine-ipc-stream
+/// The plugin socket: SLPlugin's loopback TCP connection, or the Unix socket
+/// pair of a plugin program started directly (the TRust host,
+/// trust_host.rs; local patch set).
+enum IpcStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+}
+
+impl Read for IpcStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            IpcStream::Tcp(s) => s.read(buf),
+            #[cfg(unix)]
+            IpcStream::Unix(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for IpcStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            IpcStream::Tcp(s) => s.write(buf),
+            #[cfg(unix)]
+            IpcStream::Unix(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            IpcStream::Tcp(s) => s.flush(),
+            #[cfg(unix)]
+            IpcStream::Unix(s) => s.flush(),
+        }
+    }
+}
+
+impl PluginProcess {
+    /// Start `program`, a plugin that speaks the protocol itself (no
+    /// SLPlugin, no library to load), with `args`. Its end of a Unix
+    /// socket pair is its descriptor 3; it says hello at once, so the
+    /// process starts connected.
+    #[cfg(unix)]
+    pub fn launch_host(program: &Path, args: &[std::ffi::OsString], env: &[(String, String)]) -> std::io::Result<PluginProcess> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+        ours.set_nonblocking(true)?;
+        let fd = theirs.as_raw_fd();
+        let mut cmd = Command::new(program);
+        cmd.args(args).envs(env.iter().map(|(name, value)| (name, value)));
+        // SAFETY: between fork and exec only async-signal-safe calls on the
+        // child's own descriptor table: its end of the pair becomes
+        // descriptor 3, kept across exec (dup2 clears close-on-exec; the
+        // fcntl covers the case where it already was 3)
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(fd, 3) == -1 || libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn()?;
+        drop(theirs);
+        log::info!("media: launched {} (socket pair)", program.display());
+        Ok(PluginProcess {
+            listener: None,
+            stream: Some(IpcStream::Unix(ours)),
+            child: Some(child),
+            state: ProcState::Connected,
+            input: MessageFramer::default(),
+            output: Vec::new(),
+            heartbeat: Instant::now() + LAUNCH_TIMEOUT,
+            blocked: false,
+            plugin_file: program.to_string_lossy().into_owned(),
+            plugin_dir: program.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default(),
+            shm: HashMap::new(),
+            received: VecDeque::new(),
+            sleep_time: 0.01,
+            exit_deadline: None,
+            plugin_version: String::new(),
+            cpu_usage: 0.0,
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn launch_host(_program: &Path, _args: &[std::ffi::OsString], _env: &[(String, String)]) -> std::io::Result<PluginProcess> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "plugin programs need a Unix socket pair",
+        ))
+    }
+}
+
+impl Drop for PluginProcess {'''
+
+[[patch]]
+id = "trust-engine-host-file"
+why = "TRust's plugin is the host program, not a library of the pack"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+fn = "launch_with"
+find = "let file = paths.plugin_file(plugin);"
+replace = '''// aurora-local-patch: trust-engine-host-file
+        // TRust's plugin is a program of its own (trust_host.rs), not a
+        // library of the pack: a missing one is the same NotFound
+        let file = if plugin == crate::trust_host::PLUGIN {
+            paths.trust_host().unwrap_or_default()
+        } else {
+            paths.plugin_file(plugin)
+        };'''
+
+[[patch]]
+id = "trust-engine-host-launch"
+why = "the host is started directly, with its socket pair, instead of SLPlugin"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+fn = "launch_with"
+find = "let process = PluginProcess::launch(&paths.launcher, &paths.plugin_dir, &file, &env)?;"
+replace = '''// aurora-local-patch: trust-engine-host-launch
+        let process = if plugin == crate::trust_host::PLUGIN {
+            crate::trust_host::launch(&file, &env)?
+        } else {
+            PluginProcess::launch(&paths.launcher, &paths.plugin_dir, &file, &env)?
+        };'''
+
+[[patch]]
+id = "trust-engine-stream-volume"
+why = "a world page's stream tag is for a browser plugin, whichever engine (no effect on TRust's stage-1 host: no sound in its sandbox)"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+fn = "launch_with"
+find = '''let stream_volume = (in_world && plugin == "media_plugin_cef").then(crate::stream_volume::StreamVolume::new);'''
+replace = '''// aurora-local-patch: trust-engine-stream-volume
+        let stream_volume = (in_world && crate::trust_host::is_browser(plugin)).then(crate::stream_volume::StreamVolume::new);'''
+
+[[patch]]
+id = "trust-engine-unsupported"
+why = "the host's refusal of a page is a failed plugin, so the viewer can give the page to Chromium"
+paths = ["crates/aurora-media/src/media.rs"]
+op = "literal"
+fn = "receive_browser"
+find = '''"link_hovered" => self.hover_text = m.string("title"),'''
+replace = '''"link_hovered" => self.hover_text = m.string("title"),
+            // aurora-local-patch: trust-engine-unsupported
+            // the TRust host cannot show this page (trust_host.rs)
+            "engine_unsupported" if self.plugin_name == crate::trust_host::PLUGIN && !self.failed => {
+                self.failed = true;
+                let reason = m.string("reason");
+                self.events
+                    .push(MediaEvent::PluginFailed(format!("{}{reason}", crate::trust_host::UNSUPPORTED)));
+            }'''
+
+# --- the viewer: the choice, the setting, its start and its changes
+
+[[patch]]
+id = "trust-engine-choice"
+why = "the one rule for the three surfaces, the session's memory of fall backs and the sweeps, with tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/media/engine_choice.rs"]
+source = "files/trust-engine/engine_choice.rs"
+
+[[patch]]
+id = "trust-engine-choice-mod"
+why = "declare it"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "pub mod cef_cache;"
+replace = """pub mod cef_cache;
+pub mod engine_choice; // aurora-local-patch: trust-engine-choice-mod"""
+
+[[patch]]
+id = "trust-engine-settings"
+why = "the engine and the host program, in settings.json (absent from older files: their defaults)"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "pub plugin_dir: String,"
+replace = """pub plugin_dir: String,
+    // aurora-local-patch: trust-engine-settings
+    /// Local addition (local patch set, media/engine_choice.rs): the engine
+    /// of web pages. Default: TRust, then Chromium.
+    pub web_engine: engine_choice::WebEngine,
+    /// Local addition: the aurora-trust-host program (empty: automatic,
+    /// `<data>/trust-host/aurora-trust-host`).
+    pub trust_host: String,
+    /// Local addition: "Always use Chromium for these sites" (a domain,
+    /// with or without its subdomains, as the kept cookies list).
+    pub web_engine_chromium_sites: Vec<site_profiles::KeptSite>,"""
+
+[[patch]]
+id = "trust-engine-plugin-name"
+why = "the face's controls ask which engine shows the page"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = """pub fn is_time_media(&self) -> bool {"""
+replace = """// aurora-local-patch: trust-engine-plugin-name
+    /// The plugin showing this media, while one runs (local patch set,
+    /// media/engine_choice.rs: the face's engine button).
+    pub fn plugin_name(&self) -> Option<&str> {
+        self.plugin.as_ref().map(|p| p.plugin_name.as_str())
+    }
+
+    pub fn is_time_media(&self) -> bool {"""
+
+[[patch]]
+id = "trust-engine-settings-default"
+why = "goes with trust-engine-settings"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "plugin_dir: String::new(),"
+replace = """plugin_dir: String::new(),
+            web_engine: engine_choice::WebEngine::TrustThenChromium, // aurora-local-patch: trust-engine-settings-default
+            trust_host: String::new(),
+            web_engine_chromium_sites: Vec::new(),"""
+
+[[patch]]
+id = "trust-engine-configure-start"
+why = "the launches read the setting from the start"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "crate::link_trust::configure(&settings.trusted_sites);"
+replace = """crate::link_trust::configure(&settings.trusted_sites);
+        crate::media::engine_choice::configure(&settings.media, &settings.keep_cookies_sites); // aurora-local-patch: trust-engine-configure-start"""
+
+[[patch]]
+id = "trust-engine-configure-change"
+why = "and after each change of the preferences (a restore included)"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "crate::link_trust::configure(&self.settings.trusted_sites);"
+replace = """crate::link_trust::configure(&self.settings.trusted_sites);
+            crate::media::engine_choice::configure(&self.settings.media, &self.settings.keep_cookies_sites); // aurora-local-patch: trust-engine-configure-change"""
+
+[[patch]]
+id = "trust-engine-sweep"
+why = "at start: the hosts' places, and the run folders of viewers that no longer run removed"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = ".spawn(move || media::private_profile::sweep(&private_profiles));"
+replace = """.spawn(move || media::private_profile::sweep(&private_profiles));
+    media::engine_choice::init_paths(&settings::cache_dir(), &logging::log_path()); // aurora-local-patch: trust-engine-sweep"""
+
+# --- in-world faces, HUDs and parcel media (media/update.rs)
+
+[[patch]]
+id = "trust-engine-in-world"
+why = "the engine of a web page on a face or a HUD"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = "let plugin_name = aurora_media::plugin_for_mime(&m.mime);"
+replace = '''// aurora-local-patch: trust-engine-in-world
+            // the engine of a web page: TRust or Chromium (media/engine_choice.rs)
+            let surface = match m.key {
+                MediaKey::Prim { object, .. } if self.objects.get(&object).is_some_and(|om| om.hud) => {
+                    crate::media::engine_choice::Surface::Hud
+                }
+                _ => crate::media::engine_choice::Surface::Face,
+            };
+            let plugin_name = crate::media::engine_choice::choose_now(aurora_media::plugin_for_mime(&m.mime), &m.url, surface);'''
+
+[[patch]]
+id = "trust-engine-in-world-profile"
+why = "a TRust page of a site on the kept cookies list opens its own kept TRust profile"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''MediaPlugin::launch_in_world(paths, plugin_name, m.width, m.height, browser, "") // aurora-local-patch: cef-site-profiles-in-world'''
+replace = '''crate::media::engine_choice::launch(plugin_name, &m.url, || {
+                        MediaPlugin::launch_in_world(paths, plugin_name, m.width, m.height, browser, "") // aurora-local-patch: cef-site-profiles-in-world // aurora-local-patch: trust-engine-in-world-profile
+                    })'''
+
+[[patch]]
+id = "trust-engine-in-world-start"
+why = "a host that does not start: Chromium takes the page at the next launch slot"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''Err(e) => {
+                        log::warn!("media: cannot start {plugin_name}: {e}");
+                        m.failed = Some(e.to_string());
+                        continue;
+                    }'''
+replace = '''Err(e) => {
+                        // aurora-local-patch: trust-engine-in-world-start
+                        if crate::media::engine_choice::fall_back(plugin_name, &m.url, surface, &e.to_string()) {
+                            continue;
+                        }
+                        log::warn!("media: cannot start {plugin_name}: {e}");
+                        m.failed = Some(e.to_string());
+                        continue;
+                    }'''
+
+[[patch]]
+id = "trust-engine-in-world-flag"
+why = "goes with trust-engine-in-world-failed"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = "let mut close = false;"
+replace = """let mut close = false;
+            let mut fell_back = false; // aurora-local-patch: trust-engine-in-world-flag"""
+
+[[patch]]
+id = "trust-engine-in-world-failed"
+why = "a host that crashed, stopped answering or refused the page: Chromium, not a failed face"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''MediaEvent::PluginFailed(e) => {
+                        log::warn!("media: plugin failed for {}: {e}", sanitize(&m.url));
+                        m.failed = Some(e);
+                    }'''
+replace = '''MediaEvent::PluginFailed(e) => {
+                        // aurora-local-patch: trust-engine-in-world-failed
+                        if crate::media::engine_choice::fall_back(&p.plugin_name, &m.url, surface, &e) {
+                            fell_back = true;
+                        } else {
+                            log::warn!("media: plugin failed for {}: {e}", sanitize(&m.url));
+                            m.failed = Some(e);
+                        }
+                    }'''
+
+[[patch]]
+id = "trust-engine-in-world-relaunch"
+why = "the fallen-back page is relaunched at its address, as upstream relaunches a face whose plugin changed"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''if m.failed.is_some() {
+                m.plugin = None;
+                m.texture.ready = false;
+            }'''
+replace = '''if m.failed.is_some() {
+                m.plugin = None;
+                m.texture.ready = false;
+            }
+            // aurora-local-patch: trust-engine-in-world-relaunch
+            if fell_back {
+                m.plugin = None;
+                m.texture.ready = false;
+                m.nav_pending = true;
+                m.status = MediaStatus::None;
+            }'''
+
+[[patch]]
+id = "trust-engine-loaded"
+why = "a browser plugin, whichever engine, reports no loaded status of its own in upstream's rule"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "drive_plugins"
+find = '''if complete && m.status == MediaStatus::Loading && p.plugin_name == "media_plugin_cef" {'''
+replace = '''// aurora-local-patch: trust-engine-loaded
+                        if complete && m.status == MediaStatus::Loading && aurora_media::trust_host::is_browser(&p.plugin_name) {'''
+
+# --- the viewer's web windows (ui/web_view.rs)
+
+[[patch]]
+id = "trust-engine-web-view-field"
+why = "the fall back's notice, shown above the page"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = """/// The sign-up commands the page sent, for its window to take.
+    pub join_requests: Vec<JoinRequest>,
+}"""
+replace = """/// The sign-up commands the page sent, for its window to take.
+    pub join_requests: Vec<JoinRequest>,
+    // aurora-local-patch: trust-engine-web-view-field
+    /// Why TRust could not show the page that Chromium shows now (local
+    /// patch set, media/engine_choice.rs).
+    engine_notice: Option<String>,
+}"""
+
+[[patch]]
+id = "trust-engine-web-view-notice"
+why = "the engine line above a web page: shown with TRust (Open with Chromium), or with Chromium after a fall back or the user's choice (Try with TRust)"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "insert_fn_start"
+fn = "show"
+impl = "WebView"
+expect_sig = 'size: Vec2, \) -> egui::Response'
+body = '''
+// the page's engine line (local patch set, 77-trust-engine): which engine
+// shows the page, and the button to the other one
+const NOTICE_H: f32 = 24.0;
+use crate::media::engine_choice::{self, Switch};
+let switch = self
+    .plugin
+    .as_ref()
+    .and_then(|p| engine_choice::switch_now(&p.plugin_name, &self.url));
+let line = match (&self.engine_notice, switch) {
+    (Some(reason), _) => Some((aurora_i18n::tr!("media-trust-fell-back"), Some(reason.clone()), Switch::ToTrust)),
+    (None, Some(Switch::ToChromium)) => Some((aurora_i18n::tr!("media-trust-shown"), None, Switch::ToChromium)),
+    (None, Some(Switch::ToTrust)) => Some((aurora_i18n::tr!("media-chromium-chosen"), None, Switch::ToTrust)),
+    (None, None) => None,
+};
+let size = match line {
+    Some((text, reason, to)) => {
+        let mut pressed = false;
+        ui.allocate_ui_with_layout(
+            Vec2::new(size.x, NOTICE_H),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(Vec2::new(size.x, NOTICE_H));
+                let label = ui.label(egui::RichText::new(text).size(12.0).color(pal.muted));
+                if let Some(reason) = reason {
+                    label.on_hover_text(reason);
+                }
+                let tip = match to {
+                    Switch::ToChromium => aurora_i18n::tr!("media-open-with-chromium"),
+                    Switch::ToTrust => aurora_i18n::tr!("media-trust-try-again"),
+                };
+                pressed = super::widgets::action_button(
+                    ui,
+                    pal,
+                    "arrows-exchange",
+                    tip,
+                    super::widgets::ActionKind::Flat,
+                    Vec2::new(0.0, 20.0),
+                )
+                .clicked();
+            },
+        );
+        if pressed {
+            match to {
+                Switch::ToChromium => engine_choice::open_with_chromium(&self.url),
+                Switch::ToTrust => engine_choice::retry(&self.url),
+            }
+            self.engine_notice = None;
+            self.plugin = None;
+            self.profile = None;
+            self.cookie_set = false;
+            self.nav_pending = true;
+        }
+        Vec2::new(size.x, (size.y - NOTICE_H).max(16.0))
+    }
+    None => size,
+};
+'''
+
+[[patch]]
+id = "trust-engine-web-view"
+why = "the engine of a web window's page (the private search browser too)"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''let launched = match (&private, paths) {
+                (Err(e), _) => Some(Err(std::io::Error::new(e.kind(), e.to_string()))),
+                // aurora-local-patch: cef-site-profiles-web-view
+                (Ok(Some(settings)), Some(paths)) => Some(MediaPlugin::launch(paths, "media_plugin_cef", px.0, px.1, settings, "")), // aurora-local-patch: cef-site-profiles-web-view (private)
+                (Ok(None), Some(paths)) => Some(crate::media::site_profiles::launch(
+                    "media_plugin_cef",
+                    &self.url,
+                    browser,
+                    |browser| MediaPlugin::launch(paths, "media_plugin_cef", px.0, px.1, browser, ""), // aurora-local-patch: cef-site-profiles-web-view
+                )),'''
+replace = '''// aurora-local-patch: trust-engine-web-view
+            let engine = crate::media::engine_choice::choose_now(
+                crate::media::engine_choice::CEF_PLUGIN,
+                &self.url,
+                crate::media::engine_choice::Surface::Window,
+            );
+            let launched = match (&private, paths) {
+                (Err(e), _) => Some(Err(std::io::Error::new(e.kind(), e.to_string()))),
+                // aurora-local-patch: cef-site-profiles-web-view
+                (Ok(Some(settings)), Some(paths)) => Some(MediaPlugin::launch(paths, engine, px.0, px.1, settings, "")), // aurora-local-patch: cef-site-profiles-web-view (private)
+                (Ok(None), Some(paths)) => Some(crate::media::site_profiles::launch(engine, &self.url, browser, |browser| {
+                    crate::media::engine_choice::launch(engine, &self.url, || {
+                        MediaPlugin::launch(paths, engine, px.0, px.1, browser, "") // aurora-local-patch: cef-site-profiles-web-view (trust-engine-web-view: a kept site's TRust profile)
+                    })
+                })),'''
+
+[[patch]]
+id = "trust-engine-web-view-started"
+why = "a page TRust shows again has no notice"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = """                        self.plugin = Some(p);
+                        self.size = px;"""
+replace = """if p.plugin_name == crate::media::engine_choice::TRUST_PLUGIN {
+                            self.engine_notice = None; // aurora-local-patch: trust-engine-web-view-started
+                        }
+                        self.plugin = Some(p);
+                        self.size = px;"""
+
+[[patch]]
+id = "trust-engine-web-view-start"
+why = "a host that does not start: Chromium takes the window's page at the next frame"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''Err(e) => {
+                        log::warn!("web view: cannot start the browser: {e}");
+                        self.failed = Some(e.to_string());
+                    }'''
+replace = '''Err(e) => {
+                        // aurora-local-patch: trust-engine-web-view-start
+                        if crate::media::engine_choice::fall_back(
+                            engine,
+                            &self.url,
+                            crate::media::engine_choice::Surface::Window,
+                            &e.to_string(),
+                        ) {
+                            self.engine_notice = Some(e.to_string());
+                            ui.ctx().request_repaint();
+                        } else {
+                            log::warn!("web view: cannot start the browser: {e}");
+                            self.failed = Some(e.to_string());
+                        }
+                    }'''
+
+[[patch]]
+id = "trust-engine-web-view-switch"
+why = "a change of the setting (or of the page's site) moves a running page to the engine now chosen"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''let Some(p) = self.plugin.as_mut() else {
+            let text = match &self.failed {'''
+replace = '''// aurora-local-patch: trust-engine-web-view-switch
+        if let Some(p) = self.plugin.as_ref()
+            && crate::media::engine_choice::is_browser(&p.plugin_name)
+            && p.plugin_name
+                != crate::media::engine_choice::choose_now(
+                    crate::media::engine_choice::CEF_PLUGIN,
+                    &self.url,
+                    crate::media::engine_choice::Surface::Window,
+                )
+        {
+            self.plugin = None;
+            self.profile = None;
+            self.cookie_set = false;
+            self.nav_pending = true;
+            ui.ctx().request_repaint();
+        }
+        let Some(p) = self.plugin.as_mut() else {
+            let text = match &self.failed {'''
+
+[[patch]]
+id = "trust-engine-web-view-flag"
+why = "goes with trust-engine-web-view-failed"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = """p.idle();
+        for ev in p.take_events() {"""
+replace = """p.idle();
+        let mut fell_back: Option<String> = None; // aurora-local-patch: trust-engine-web-view-flag
+        for ev in p.take_events() {"""
+
+[[patch]]
+id = "trust-engine-web-view-failed"
+why = "a host that crashed, stopped answering or refused the page: Chromium, with the notice"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''MediaEvent::PluginFailed(e) => {
+                    log::warn!("web view: browser stopped: {e}");
+                    self.failed = Some(e);
+                }'''
+replace = '''MediaEvent::PluginFailed(e) => {
+                    // aurora-local-patch: trust-engine-web-view-failed
+                    if crate::media::engine_choice::fall_back(&p.plugin_name, &self.url, crate::media::engine_choice::Surface::Window, &e) {
+                        fell_back = Some(e);
+                    } else {
+                        log::warn!("web view: browser stopped: {e}");
+                        self.failed = Some(e);
+                    }
+                }'''
+
+[[patch]]
+id = "trust-engine-web-view-relaunch"
+why = "the fallen-back page is relaunched with Chromium at the next frame, at the window's address"
+paths = ["crates/aurora-viewer/src/ui/web_view.rs"]
+op = "literal"
+find = '''if self.failed.is_some() {
+            self.plugin = None;
+            self.profile = None;
+            return resp;
+        }'''
+replace = '''// aurora-local-patch: trust-engine-web-view-relaunch
+        if let Some(reason) = fell_back {
+            self.engine_notice = Some(reason);
+            self.plugin = None;
+            self.profile = None;
+            self.cookie_set = false;
+            self.nav_pending = true;
+            ui.ctx().request_repaint();
+            return resp;
+        }
+        if self.failed.is_some() {
+            self.plugin = None;
+            self.profile = None;
+            return resp;
+        }'''
+
+# --- a face's media controls (ui/media.rs)
+
+[[patch]]
+id = "trust-engine-face-switch"
+why = "Open with Chromium on a face TRust shows, Try with TRust on one Chromium shows after a fall back or that choice"
+paths = ["crates/aurora-viewer/src/ui/media.rs"]
+op = "literal"
+find = '''} else if button(ui, p, icons, "refresh", aurora_i18n::tr!("ui-media-reload"), m.is_loaded()) {
+                            m.reload();
+                        }'''
+replace = '''} else if button(ui, p, icons, "refresh", aurora_i18n::tr!("ui-media-reload"), m.is_loaded()) {
+                            m.reload();
+                        }
+                        // aurora-local-patch: trust-engine-face-switch
+                        // the page's engine (media/engine_choice.rs): the
+                        // next frame relaunches the face with the other one
+                        let switch = m
+                            .plugin_name()
+                            .and_then(|name| crate::media::engine_choice::switch_now(name, &m.url));
+                        match switch {
+                            Some(crate::media::engine_choice::Switch::ToChromium)
+                                if button(ui, p, icons, "arrows-exchange", aurora_i18n::tr!("media-open-with-chromium"), true) =>
+                            {
+                                crate::media::engine_choice::open_with_chromium(&m.url);
+                            }
+                            Some(crate::media::engine_choice::Switch::ToTrust)
+                                if button(ui, p, icons, "arrows-exchange", aurora_i18n::tr!("media-trust-try-again"), true) =>
+                            {
+                                crate::media::engine_choice::retry(&m.url);
+                            }
+                            _ => {}
+                        }'''
+
+# --- Preferences › Media › Plugins
+
+[[patch]]
+id = "trust-engine-prefs-module"
+why = "the engine's three choices and the host program's path"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/ui/options/web_engine.rs"]
+source = "files/trust-engine/web_engine.rs"
+
+[[patch]]
+id = "trust-engine-prefs-mod"
+why = "declare it beside the pages (it uses Cx)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "regex"
+pattern = '(\nmod [a-z_]+;[^\n]*)\n\npub use pages::privacy;'
+replace = '''\1
+mod web_engine; // aurora-local-patch: trust-engine-prefs-mod
+
+pub use pages::privacy;'''
+
+[[patch]]
+id = "trust-engine-prefs-rows"
+why = "at the top of the Plugins group, where the engines live"
+paths = ["crates/aurora-viewer/src/ui/options/pages/media.rs"]
+op = "literal"
+find = '''cx.group(tr!("ui-options-plugins"), |cx| {'''
+replace = '''cx.group(tr!("ui-options-plugins"), |cx| {
+        super::super::web_engine::rows(cx); // aurora-local-patch: trust-engine-prefs-rows'''
+
+[[patch]]
+id = "trust-engine-text-en"
+why = "the rows' and the notice's texts (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-plugins-folder-automatic = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: trust-engine-text-en
+ui-options-web-engine = Web pages
+ui-options-web-engine-help = The engine that shows web pages on faces, on HUDs and in the viewer's web windows. TRust, then Chromium: TRust first, and Chromium when TRust cannot show a page (that site then stays with Chromium until the next start). TRust keeps no cookies, except for the sites of Keep cookies for these sites. Videos and music keep their own player.
+ui-options-web-engine-trust-then-chromium = TRust, then Chromium
+ui-options-web-engine-trust = TRust only
+ui-options-web-engine-chromium = Chromium only
+ui-options-trust-host = TRust program
+ui-options-trust-host-help = The aurora-trust-host program that shows pages with TRust. Blank: the one in the viewer's data folder (trust-host).
+media-trust-fell-back = Shown with Chromium: TRust could not show this page.
+media-trust-try-again = Try with TRust
+media-trust-shown = Shown with TRust
+media-chromium-chosen = Shown with Chromium for this site until the next start
+media-open-with-chromium = Open with Chromium
+ui-options-web-engine-chromium-sites = Always use Chromium for these sites
+ui-options-web-engine-chromium-sites-hint = Pages of these sites (on a face, a HUD or in a window) are always shown with Chromium, whichever TRust setting is chosen. A page belongs to the site of the address it opens.
+ui-options-web-engine-chromium-sites-none = No site: TRust shows every page it can.
+ui-options-web-engine-chromium-sites-add = Add
+ui-options-web-engine-chromium-sites-add-hint = A site, for example marketplace.secondlife.com
+ui-options-web-engine-chromium-sites-remove = Remove this site
+ui-options-web-engine-chromium-sites-subdomains = Subdomains
+ui-options-web-engine-chromium-sites-subdomains-hint = On: { $domain } and all its subdomains. Off: { $domain } and www.{ $domain } only.
+ui-options-web-engine-chromium-sites-duplicate = { $domain } is already in the list.
+ui-options-web-engine-chromium-sites-invalid = Not a site: type a domain such as example.org.'''
+
+[[patch]]
+id = "trust-engine-text-fr"
+why = "goes with trust-engine-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-plugins-folder-automatic = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: trust-engine-text-fr
+ui-options-web-engine = Pages web
+ui-options-web-engine-help = Le moteur qui affiche les pages web sur les faces, sur les HUD et dans les fenêtres web du viewer. TRust, puis Chromium : TRust d'abord, et Chromium quand TRust ne peut pas afficher une page (ce site reste alors avec Chromium jusqu'au prochain démarrage). TRust ne garde aucun cookie, sauf pour les sites de Garder les cookies de ces sites. Les vidéos et la musique gardent leur propre lecteur.
+ui-options-web-engine-trust-then-chromium = TRust, puis Chromium
+ui-options-web-engine-trust = TRust seulement
+ui-options-web-engine-chromium = Chromium seulement
+ui-options-trust-host = Programme TRust
+ui-options-trust-host-help = Le programme aurora-trust-host qui affiche les pages avec TRust. Vide : celui du dossier de données du viewer (trust-host).
+media-trust-fell-back = Affichée avec Chromium : TRust n'a pas pu afficher cette page.
+media-trust-try-again = Réessayer avec TRust
+media-trust-shown = Affichée avec TRust
+media-chromium-chosen = Affichée avec Chromium pour ce site jusqu'au prochain démarrage
+media-open-with-chromium = Ouvrir avec Chromium
+ui-options-web-engine-chromium-sites = Toujours utiliser Chromium pour ces sites
+ui-options-web-engine-chromium-sites-hint = Les pages de ces sites (sur une face, un HUD ou dans une fenêtre) sont toujours affichées avec Chromium, quel que soit le réglage TRust choisi. Une page appartient au site de l'adresse qu'elle ouvre.
+ui-options-web-engine-chromium-sites-none = Aucun site : TRust affiche toutes les pages qu'il peut.
+ui-options-web-engine-chromium-sites-add = Ajouter
+ui-options-web-engine-chromium-sites-add-hint = Un site, par exemple marketplace.secondlife.com
+ui-options-web-engine-chromium-sites-remove = Retirer ce site
+ui-options-web-engine-chromium-sites-subdomains = Sous-domaines
+ui-options-web-engine-chromium-sites-subdomains-hint = Activé : { $domain } et tous ses sous-domaines. Désactivé : { $domain } et www.{ $domain } seulement.
+ui-options-web-engine-chromium-sites-duplicate = { $domain } est déjà dans la liste.
+ui-options-web-engine-chromium-sites-invalid = Ce n'est pas un site : saisissez un domaine comme example.org.'''
+
+[[patch]]
+id = "trust-engine-text-ja"
+why = "goes with trust-engine-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-plugins-folder-automatic = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: trust-engine-text-ja
+ui-options-web-engine = Webページ
+ui-options-web-engine-help = 面、ＨＵＤ、ビューアのWebウィンドウでWebページを表示するエンジンです。「TRust、次にChromium」：まずTRustで表示し、TRustで表示できないページはChromiumで表示します（そのサイトは次の起動までChromiumのままです）。TRustはCookieを保持しません（「Cookieを保持するサイト」のサイトを除く）。動画と音楽はそれぞれのプレーヤーで再生されます。
+ui-options-web-engine-trust-then-chromium = TRust、次にChromium
+ui-options-web-engine-trust = TRustのみ
+ui-options-web-engine-chromium = Chromiumのみ
+ui-options-trust-host = TRustプログラム
+ui-options-trust-host-help = TRustでページを表示するaurora-trust-hostプログラムです。空欄：ビューアのデータフォルダ（trust-host）にあるものを使います。
+media-trust-fell-back = Chromiumで表示しています。TRustではこのページを表示できませんでした。
+media-trust-try-again = TRustで再試行
+media-trust-shown = TRustで表示しています
+media-chromium-chosen = 次の起動まで、このサイトはChromiumで表示します
+media-open-with-chromium = Chromiumで開く
+ui-options-web-engine-chromium-sites = 常にChromiumを使うサイト
+ui-options-web-engine-chromium-sites-hint = これらのサイトのページ（面、ＨＵＤ、ウィンドウ）は、TRustの設定にかかわらず常にChromiumで表示します。ページは最初に開くアドレスのサイトに属します。
+ui-options-web-engine-chromium-sites-none = サイトはありません。TRustで表示できるページはすべてTRustで表示します。
+ui-options-web-engine-chromium-sites-add = 追加
+ui-options-web-engine-chromium-sites-add-hint = サイト（例：marketplace.secondlife.com）
+ui-options-web-engine-chromium-sites-remove = このサイトを削除
+ui-options-web-engine-chromium-sites-subdomains = サブドメイン
+ui-options-web-engine-chromium-sites-subdomains-hint = オン：{ $domain }とそのすべてのサブドメイン。オフ：{ $domain }とwww.{ $domain }のみ。
+ui-options-web-engine-chromium-sites-duplicate = { $domain }はすでにリストにあります。
+ui-options-web-engine-chromium-sites-invalid = サイトではありません。example.orgのようなドメインを入力してください。'''
+
+# --- docs: the two variables
+
+[[patch]]
+id = "trust-engine-docs"
+why = "AGENTS.md §4: a new AURORA_* variable gets its line in docs/TESTING.md"
+paths = ["docs/TESTING.md"]
+op = "regex"
+pattern = '^\| `AURORA_DEMO_MEDIA_CLICK_FRAME=<n>` \| [^\n]*$'
+replace = '''\g<0>
+| `AURORA_TRUST_HOST=<path>` | The TRust host program, instead of the preferences' path (local patch set) <!-- // aurora-local-patch: trust-engine-docs --> |
+| `AURORA_WEB_ENGINE=trust`, `chromium` or `trust-then-chromium` | The engine of web pages for this launch, without saving it (local patch set) |'''
+
+[[patch]]
+id = "trust-engine-docs-details"
+why = "goes with trust-engine-docs: what to look for"
+paths = ["docs/TESTING.md"]
+op = "regex"
+pattern = '^- \*\*`AURORA_DEMO_MEDIA=mini`\*\*: [^\n]*$'
+replace = '''- **`AURORA_WEB_ENGINE` and `AURORA_TRUST_HOST`** (local patch set,
+  77-trust-engine; <!-- // aurora-local-patch: trust-engine-docs-details -->): with
+  `AURORA_DEMO_MEDIA=data:text/html,...` and `AURORA_WEB_ENGINE=trust`, the
+  demo prim shows the page through `aurora-trust-host` (a process per page,
+  `media: launched … (socket pair)` in the log; the host's own log is the
+  viewer log's name with `.trust-host.log`). With `trust-then-chromium`,
+  killing the host's page process hands the face to Chromium at once
+  (`TRust could not show a page … shown with Chromium`). With
+  `chromium`, no host runs and `<cache>/trust-run/` is deleted. The host
+  shows web pages (its own fetch and TLS; it needs an Internet rule in the
+  firewall), `data:`, `about:` and `file:` pages, with scripts, CSS
+  animations, canvas and input; with the default setting an address of
+  another protocol goes straight to Chromium (`media_plugin_cef for …` in
+  the log), with `trust` the host refuses it at once. A document TRust
+  does not lay out (JSON, PDF) falls back the same way; an HTTP error,
+  a DNS or TLS failure does not: TRust shows its error page. With
+  `AURORA_DEMO_WEB_BROWSER=https://…` the web window's engine line reads
+  "Shown with TRust" with an "Open with Chromium" button; after it, or
+  after a fall back, "Try with TRust". A site in Preferences › Media ›
+  "Always use Chromium for these sites" never starts the host.
+\g<0>'''

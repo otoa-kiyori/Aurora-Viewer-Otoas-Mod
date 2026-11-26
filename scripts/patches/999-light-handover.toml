@@ -1,0 +1,477 @@
+# During an environment change the sky's light hands over from the
+# source's (the sun, the moon or none) to the target's at the change's own
+# progress, so that nothing switches in one frame where the sun or the moon
+# crosses the horizon on the way. Still skies and day cycles are as before
+# to the bit. No setting, no interface, nothing sent.
+#
+# The Legacy Viewer lights by the sun while it is above the horizon, else by
+# the moon while it is, else by nothing (LLSettingsSky::getLightDirection,
+# getIsSunUp, getIsMoonUp, getSunMoonGlowFactor, calculateLightSettings;
+# indra/llinventory/llsettingssky.cpp; skyV.glsl's 0.7 for the moon;
+# atmosphericsFuncs.glsl's sun_up_factor): the light's direction, the sky's
+# light (the moon's x 0.7), the objects' light, the haze's and the classic
+# lighting's diffuse light, the glow and the rainbow and halo switch in one
+# frame. Right for a still sky and a day cycle; an environment change that
+# sweeps the sun through the horizon (a night to a day) shows it as a step
+# of the whole frame (measured on the GPU: the sky +0.5 stop and the sand
+# -0.9 stop in one frame for a classic night to a modern day, about 2 stops
+# for a night under no moon).
+#
+# Now (files/light-handover/light_handover.rs, module doc): the selector's
+# fade (EnvSelector::frame, patch 998's fade_to_with) gives the blended
+# frame a handover (SkyFrame::light): the sun's and the moon's shares, lerped
+# from each side's own (1 or 0; the shares shown, for a change begun over a
+# running one) at the change's progress (eased by patch 999-eased), and the
+# light's direction, turned from the source's light to the target's along
+# the shorter great circle at the same progress. Not the blended sun's or
+# moon's direction: they are often opposite each other, with no way between.
+# world/env.rs takes every switched value as the shares' mix of what each
+# light gives: the sky's light (1, 0.7, 0.7), the glow factor (1, the moon's
+# brightness x 0.25, 0), the objects' light and the rainbow's and halo's
+# strength (1, 1, 0), the diffuse light (the sun's, the moon's x its
+# brightness x 0.6, the dark's 0.001 x 0.6), along the one direction. A
+# body's light along a direction below the horizon is none (its attenuation
+# exp(-a / z) goes to 0 at the horizon), so a change from or to a sky lit by
+# nothing takes the light through the horizon at no strength: the traced
+# shadows' and lights' switch (renderer traced_light_up) and the classic
+# ambient's |n.l| cross it where there is no light to switch. The renderer
+# gets the shares (SkyParams::handover; the frame's sun_color.w, 1 off a
+# handover): the sky's and the clouds' glow is the sun's at its share
+# (common.wgsl sky_atmos and clouds.rs Lighting::new, where the Legacy
+# Viewer's `glow_factor < 1` select gives the moon none), the sky rays'
+# strength (patch 114's source choice) and moon factor (patch 123's
+# rays_moon) follow the shares, and the water caustics drop their gate on
+# the true sun's height (the light already carries its day factor) while
+# the light hands over. A change between two skies lit by the same light
+# carries no handover, unless the blended frame itself crosses a horizon on
+# the way (a low sun turned round): that light then stays the light, from
+# where the blended frame has it.
+#
+# Every consumer of the switched values, for the record: world/env.rs
+# Environment::build (the light, light_norm, the path length, the diffuse
+# light, the objects' light, both lighting models' colours, the haze, the
+# sky's light, the glow factor, the rainbow and the halo) and through
+# Environment::sun_dir and SkyParams::light_norm the renderer's shadow
+# cascades, the probes' shadow, the contact shadows, the traced shadows and
+# lights, the panorama, the volumetric clouds, the water's ks and glint,
+# the grass, the rain and every surface shader (common.wgsl ll_atmos_core,
+# ll_classic_sun_ambient, the HDR lighting, the haze glow on surfaces);
+# common.wgsl sky_atmos (the dome, the Legacy cloud layer) and
+# water_caustic_light; clouds.rs Lighting::new; patch 114's ray source
+# (app.rs) and patch 123's ray moon factor (sky_mode.rs rays_moon). The
+# stars, the Aurora night sky, the bodies' discs, the moon's horizon fade
+# and the sun's `day` factor read the true sun and moon, which do not
+# switch.
+#
+# A difference from the Legacy Viewer during a change only: its light
+# switches at the horizon; here it moves from one sky's light to the
+# other's. Mid-change, the light (and its glow, centred on it) may sit where
+# neither disc is: from a moon at the zenith to a sun at 61 degrees it stays
+# high while the blended sun rises from below the horizon.
+#
+# Test variable: AURORA_LIGHT_HANDOVER=0 leaves every change as before
+# (docs/TESTING.md), for captures with and without it in one build.
+#
+# Cost: none without a change (the same paths, the frame's handover None
+# and the shaders' lane at 1, read in two branches that take the old way);
+# during a change a few multiplications a frame on the CPU, and on the GPU
+# one comparison more in the sky's glow and the caustics.
+#
+# Measured on the GPU (demo mode, AURORA_DEMO_SKY_CHANGE, reflection
+# probes level 3 with 32 slots, mirrors and water reflections on; a capture
+# every frame, 40 to 210 ms apart while capturing; the largest step between
+# two captures inside the change, without this patch -> with it): a classic
+# night under a high moon to a modern day over 29 s, the sky 0.58 -> 0.05
+# stop, the ground 0.48 -> 0.04, a matte slab 0.32 -> 0.01; back, the sky
+# 0.63 -> 0.12, the ground 0.44 -> 0.07; a night under no moon to the day,
+# the sky 1.23 -> 0.23 (a ramp over about 6 frames, 0.04 a frame at 60
+# frames a second), and back 1.27 -> 0.13. Over 5 s the steps become ramps
+# of up to 0.64 stop between captures 64 ms apart (0.17 a frame at 60), where
+# a step of 0.7 to 1.6 stop was; the sand under shallow water, 0.92 -> 0.18
+# (moon-up night to day) and 0.73 -> 0.32 (no-moon night to day). Left as
+# they were, the same with and without: patch 123's lighting model switch at
+# the start or the end of a change between a classic and a modern sky (matte
+# faces about 1 to 1.5 stop in one frame) and the glossy floor's reflections
+# refreshing (0.15 to 0.4 stop between captures). Still skies (the sun 2
+# degrees up, 2 and 3 degrees down under a moon or none, classic and modern;
+# the nights and the day) match the build without it within the run-to-run
+# noise of the demo: region levels as close as two runs of one build are
+# (0.005 stop or less on the sky and the ground, up to 0.25 on panels crossed
+# by particles or lit by the probes); no two runs of one build give the same
+# pixels, so the identity to the bit rests on the unit tests. The frame and
+# GPU times with and without it, still or changing, are within the same
+# noise (GPU 2.1 to 2.8 ms, frame 17.9 to 22.0 ms, at one window size).
+#
+# It edits patch 998's selector (the hook, required) and lines of patches
+# 114 and 123 (optional: without them those steps are left out), so it sorts
+# after 999-eased-environment-change and before 999-performance. Switching
+# it off (moving this file out) needs nothing else: no other patch reads it.
+# It replaces the former 124-sun-moon-handover, which faded the light out
+# below the horizon by the sun's height (a dip mid-change, and still twilight
+# skies about 1.9 stops darker).
+#
+# Tests: world/light_handover.rs (still skies, the sun and the moon from
+# the nadir to the zenith and a hair from the horizon, classic and modern:
+# no handover, the switched values those of the Legacy choice to the bit,
+# against its formulas written out; a day cycle's blend: none; 5 s and 29 s
+# changes through the selector, a classic night under a high moon and under
+# none to a modern day and back: the first frame is the source's light and
+# the last the target's to the bit, shares within 0..1, the direction
+# turning and the sky's light, the glow factor and the objects' light moving
+# by at most their span at the change's fastest pace, and no light colour,
+# hemisphere, haze or sky light stepping by more than 0.15 stop (5 s) or
+# 0.05 stop (29 s) a frame, where the same frames without the handover step
+# by more than 0.3; a low sun dipping on the way stays the light; a change
+# over a change starts from the shown shares and direction, and an edited
+# body drops them; the direction's way (exact ends, the shorter arc, opposite
+# directions through the horizon, opposite sun and moon over the zenith);
+# each light's own mix and diffuse light).
+
+[[patch]]
+id = "light-handover-module"
+why = "the handover of the light during a change: shares, direction, mixes, the selector's hook, the rays; the tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/world/light_handover.rs"]
+source = "files/light-handover/light_handover.rs"
+
+[[patch]]
+id = "light-handover-mod"
+why = "the world's module"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = '''pub mod legacy_lists;
+pub mod lookat;'''
+replace = '''pub mod legacy_lists;
+pub mod light_handover; // aurora-local-patch: light-handover-mod
+pub mod lookat;'''
+
+[[patch]]
+id = "light-handover-sky-field"
+why = "the blended frame carries the handover"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''    pub texture_fade: Option<super::eep_fade::Stamped<super::eep_fade::SkyFade>>,'''
+replace = '''pub texture_fade: Option<super::eep_fade::Stamped<super::eep_fade::SkyFade>>,
+    // aurora-local-patch: light-handover-sky-field
+    /// While an environment change hands the light over between the sun,
+    /// the moon and none, its shares and direction (world/light_handover.rs);
+    /// None for a frame lit by its own light.
+    pub light: Option<super::light_handover::Handover>,'''
+
+[[patch]]
+id = "light-handover-sky-default"
+why = "goes with light-handover-sky-field"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''texture_fade: None, // aurora-local-patch: env-texture-fade-sky-default'''
+replace = '''texture_fade: None, // aurora-local-patch: env-texture-fade-sky-default
+            light: None,        // aurora-local-patch: light-handover-sky-default'''
+
+[[patch]]
+id = "light-handover-sky-parse"
+why = "goes with light-handover-sky-field"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''texture_fade: None, // aurora-local-patch: env-texture-fade-sky-parse'''
+replace = '''texture_fade: None, // aurora-local-patch: env-texture-fade-sky-parse
+        light: None,        // aurora-local-patch: light-handover-sky-parse'''
+
+[[patch]]
+id = "light-handover-sky-lerp"
+why = "a day cycle's keyframes do not hand over: the plain blend carries none"
+paths = ["crates/aurora-viewer/src/world/eep.rs"]
+op = "literal"
+find = '''// SkyFrame::fade_to in world/eep_fade.rs)
+            texture_fade: None,'''
+replace = '''// SkyFrame::fade_to in world/eep_fade.rs)
+            texture_fade: None,
+            light: None, // aurora-local-patch: light-handover-sky-lerp'''
+
+[[patch]]
+id = "light-handover-selector"
+why = "the change's blended frame gets its handover at the change's progress (patch 998's fade)"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''(f.sky.fade_to_with(&sky, t, sky_shares), f.water.fade_to_with(&water, t, shares[5]))'''
+replace = '''// aurora-local-patch: light-handover-selector
+                    // (the light hands over from the source's to the target's
+                    // at the same progress, world/light_handover.rs)
+                    let blended = f.sky.fade_to_with(&sky, t, sky_shares);
+                    (
+                        super::light_handover::with_handover(blended, &f.sky, &sky, t),
+                        f.water.fade_to_with(&water, t, shares[5]),
+                    )'''
+
+# ------------------------------------------------------------ the renderer
+
+[[patch]]
+id = "light-handover-params"
+why = "the renderer knows the shares while the light hands over (the glow, the rays, the caustics)"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''    pub object_sunlight: Vec3,'''
+replace = '''pub object_sunlight: Vec3,
+    // aurora-local-patch: light-handover-params
+    /// While an environment change hands the light over between the sun,
+    /// the moon and none (the viewer's world/light_handover.rs), the sun's
+    /// and the moon's shares of it; None otherwise.
+    pub handover: Option<[f32; 2]>,'''
+
+[[patch]]
+id = "light-handover-params-default"
+why = "goes with light-handover-params"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''            object_sunlight: Vec3::new(0.7342, 0.7815, 0.8999),'''
+replace = '''object_sunlight: Vec3::new(0.7342, 0.7815, 0.8999),
+            handover: None, // aurora-local-patch: light-handover-params-default'''
+
+[[patch]]
+id = "light-handover-frame"
+why = "the shaders' lane: the sun's share while the light hands over, 1 otherwise (it was always 1)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''        u.sun_color = f.sun_color.extend(1.0).to_array();'''
+replace = '''// aurora-local-patch: light-handover-frame
+        // (w: the sun's share while the light hands over, world/light_handover.rs
+        // in the viewer; 1 otherwise, as it always was)
+        u.sun_color = f.sun_color.extend(f.sky.handover.map_or(1.0, |h| h[0])).to_array();'''
+
+[[patch]]
+id = "light-handover-wgsl-frame"
+why = "goes with light-handover-frame: the lane's meaning"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    sun_color: vec4<f32>,       // rgb radiance'''
+replace = '''    sun_color: vec4<f32>,       // rgb radiance, w the sun's share while the light hands over in a change (1 otherwise) // aurora-local-patch: light-handover-wgsl-frame'''
+
+[[patch]]
+id = "light-handover-glow"
+why = "the sky's and the Legacy cloud layer's glow: the sun's at its share while the light hands over (the moon has none: the select below)"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''    if (for_clouds) {
+        haze_glow *= glow_factor;
+        haze_glow = select(haze_glow + 0.25, 0.0, glow_factor < 1.0);
+    } else {'''
+replace = '''    // aurora-local-patch: light-handover-glow
+    // (while an environment change hands the light over, the sun's glow at
+    // its share, frame.sun_color.w below 1: the Legacy Viewer gives the moon
+    // none, the selects below, which a share would step at 1)
+    if (frame.sun_color.w < 1.0) {
+        haze_glow = frame.sun_color.w * (haze_glow + 0.25);
+    } else if (for_clouds) {
+        haze_glow *= glow_factor;
+        haze_glow = select(haze_glow + 0.25, 0.0, glow_factor < 1.0);
+    } else {'''
+
+[[patch]]
+id = "light-handover-caustics"
+why = "the water caustics' gate on the true sun's height is left out while the light hands over: the light and its day factor already go to none"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = '''frame.sky_sun.z<0.05 || frame.sun_dir.w<0.01){return vec3<f32>(0.0);}'''
+replace = '''(frame.sky_sun.z<0.05 && frame.sun_color.w>=1.0) || frame.sun_dir.w<0.01){return vec3<f32>(0.0);} // aurora-local-patch: light-handover-caustics'''
+
+[[patch]]
+id = "light-handover-clouds"
+why = "the volumetric clouds' glow, as the sky's"
+paths = ["crates/aurora-render/src/clouds.rs"]
+op = "literal"
+find = '''        let glow = if s.sun_moon_glow_factor < 1.0 {
+            0.0
+        } else {'''
+replace = '''// aurora-local-patch: light-handover-clouds
+        // (while the light hands over, the sun's glow at its share: the
+        // moon's has none, the select below)
+        let glow = if let Some([sun, _]) = s.handover {
+            (s.glow.x.max(0.0).powf(s.glow.z) + 0.25) * sun
+        } else if s.sun_moon_glow_factor < 1.0 {
+            0.0
+        } else {'''
+
+[[patch]]
+id = "light-handover-rays-moon"
+why = "the sky rays' moon factor (patch 123's rays_moon) follows the shares, not the true sun's height"
+paths = ["crates/aurora-render/src/sky_mode.rs"]
+op = "literal"
+required = false
+find = '''    let moon = sky.sun_dir.z < 0.0;
+    if !moon {'''
+replace = '''// aurora-local-patch: light-handover-rays-moon
+    // (while the light hands over, the share that is not the sun's)
+    if let Some([sun, _]) = sky.handover {
+        let hdr = if ll_mode == 0.0 { 1.0 } else { blending(sky).unwrap_or(0.0) };
+        return (1.0 - sun).clamp(0.0, 1.0) * hdr;
+    }
+    let moon = sky.sun_dir.z < 0.0;
+    if !moon {'''
+
+[[patch]]
+id = "light-handover-app-rays"
+why = "the sky rays' source and strength (patch 114) follow the shares while the light hands over"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+required = false
+find = '''self.settings.directional_rays(env.sky.sun_dir.z >= 0.0, env.sky.moon_dir.z >= 0.0)'''
+replace = '''crate::world::light_handover::rays(&self.settings, &env.sky), // aurora-local-patch: light-handover-app-rays'''
+
+# ------------------------------------------------------------ world/env.rs
+
+[[patch]]
+id = "light-handover-env-light"
+why = "the light's direction: the handover's while a change hands it over, else the Legacy choice"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        let light = if sun_up {
+            sun
+        } else if moon_up {
+            moon
+        } else {
+            Vec3::NEG_Z
+        };'''
+replace = '''// aurora-local-patch: light-handover-env-light
+        // (while an environment change hands the light over, its shares and
+        // direction, world/light_handover.rs: every value the Legacy choice
+        // switches below is the shares' mix; None, the Legacy choice)
+        let hand = sky.light_handover();
+        let light = if let Some(h) = hand {
+            h.dir
+        } else if sun_up {
+            sun
+        } else if moon_up {
+            moon
+        } else {
+            Vec3::NEG_Z
+        };'''
+
+[[patch]]
+id = "light-handover-env-diffuse"
+why = "the diffuse light at the shares: each light's own along the one direction, none from a body below the horizon"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        let moon_diffuse = sky.sunlight * exp3(-light_atten * lighty) * transmittance * moon_brightness;'''
+replace = '''let moon_diffuse = sky.sunlight * exp3(-light_atten * lighty) * transmittance * moon_brightness;
+        // aurora-local-patch: light-handover-env-diffuse
+        let hand_diffuse = hand.map(|h| h.diffuse(sky.sunlight * transmittance, light_atten, lighty, sky.moon_brightness));'''
+
+[[patch]]
+id = "light-handover-env-diffuse-use"
+why = "goes with light-handover-env-diffuse: the classic lighting's light and the haze"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+expect = 2
+find = '''let diffuse = if sun_up { sun_diffuse } else { moon_diffuse * 0.6 };'''
+replace = '''let diffuse = hand_diffuse.unwrap_or(if sun_up { sun_diffuse } else { moon_diffuse * 0.6 }); // aurora-local-patch: light-handover-env-diffuse-use'''
+
+[[patch]]
+id = "light-handover-env-objects"
+why = "the objects' light at the shares (the dark's none)"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''        let object_sunlight = if sun_up || moon_up {
+            normalized_light(sky.sunlight)'''
+replace = '''// aurora-local-patch: light-handover-env-objects
+        let object_sunlight = if let Some(h) = hand {
+            normalized_light(sky.sunlight) * h.lit()
+        } else if sun_up || moon_up {
+            normalized_light(sky.sunlight)'''
+
+[[patch]]
+id = "light-handover-env-sky"
+why = "the sky's and the clouds' light at the shares (the moon's and the dark's x 0.7); the renderer is told the shares"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            sunlight: if sun_up { sky.sunlight } else { sky.sunlight * 0.7 },
+            object_sunlight,'''
+replace = '''// aurora-local-patch: light-handover-env-sky
+            sunlight: match hand {
+                Some(h) => sky.sunlight * h.sky_scale(),
+                None => {
+                    if sun_up {
+                        sky.sunlight
+                    } else {
+                        sky.sunlight * 0.7
+                    }
+                }
+            },
+            object_sunlight,
+            handover: hand.map(|h| [h.sun, h.moon]),'''
+
+[[patch]]
+id = "light-handover-env-glow"
+why = "the glow factor at the shares"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            sun_moon_glow_factor: if sun_up {
+                1.0'''
+replace = '''// aurora-local-patch: light-handover-env-glow
+            sun_moon_glow_factor: if let Some(h) = hand {
+                h.glow_factor(sky.moon_brightness)
+            } else if sun_up {
+                1.0'''
+
+[[patch]]
+id = "light-handover-env-rainbow"
+why = "the rainbow's strength at the shares"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            moisture_level: if sun_up || moon_up { sky.moisture_level } else { 0.0 },'''
+replace = '''// aurora-local-patch: light-handover-env-rainbow
+            moisture_level: match hand {
+                Some(h) => sky.moisture_level * h.lit(),
+                None => {
+                    if sun_up || moon_up {
+                        sky.moisture_level
+                    } else {
+                        0.0
+                    }
+                }
+            },'''
+
+[[patch]]
+id = "light-handover-env-halo"
+why = "the halo's strength at the shares"
+paths = ["crates/aurora-viewer/src/world/env.rs"]
+op = "literal"
+find = '''            ice_level: if sun_up || moon_up { sky.ice_level } else { 0.0 },'''
+replace = '''// aurora-local-patch: light-handover-env-halo
+            ice_level: match hand {
+                Some(h) => sky.ice_level * h.lit(),
+                None => {
+                    if sun_up || moon_up {
+                        sky.ice_level
+                    } else {
+                        0.0
+                    }
+                }
+            },'''
+
+# ------------------------------------------------------------ docs
+
+[[patch]]
+id = "light-handover-doc"
+why = "the test variable in the demo table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''| `AURORA_DEMO_SKY_CHANGE=<sky A>;<sky B>[;<seconds>[;<frame>]]` | A change from one given sky to another through the environment selector <!-- // aurora-local-patch: demo-sky-change-doc --> |'''
+replace = '''| `AURORA_DEMO_SKY_CHANGE=<sky A>;<sky B>[;<seconds>[;<frame>]]` | A change from one given sky to another through the environment selector <!-- // aurora-local-patch: demo-sky-change-doc --> |
+| `AURORA_LIGHT_HANDOVER=0` | An environment change switches the light between the sun and the moon at the horizon, as before <!-- // aurora-local-patch: light-handover-doc --> |'''
+
+[[patch]]
+id = "light-handover-details"
+why = "what the test variable compares"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''  <!-- // aurora-local-patch: demo-sky-change-details -->'''
+replace = '''  <!-- // aurora-local-patch: demo-sky-change-details -->
+- **`AURORA_LIGHT_HANDOVER=0`**: during an environment change the sky's
+  light (the sun, the moon or none) hands over from the source sky's to the
+  target's at the change's progress, its direction turning from one to the
+  other (`world/light_handover.rs`); with `0` it switches in one frame where
+  the blended sun or moon crosses the horizon, as before. Still skies are
+  the same either way. Compare a night to a day with
+  `AURORA_DEMO_SKY_CHANGE` and a capture every frame around the crossing:
+  with `0` the sky, the haze and the lit ground step there; without it they
+  move smoothly. A night under no moon: its `moon=-45` key.
+  <!-- // aurora-local-patch: light-handover-details -->'''
