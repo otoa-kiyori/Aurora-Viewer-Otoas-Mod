@@ -1,0 +1,82 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "Equ": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Eri": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "MuscaBorealis": {
+   "drawing": "adapted",
+   "label": "made",
+   "reveal": "made"
+  },
+  "Noctua": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "TelescopiumHerschelii": {
+   "drawing": "adapted",
+   "label": "made",
+   "reveal": "made"
+  }
+ },
+ "format": 1,
+ "names": {
+  "*": {
+   "MuscaBorealis": "unknown",
+   "Noctua": "unknown",
+   "TelescopiumHerschelii": "unknown"
+  }
+ },
+ "notes": {
+  "Equ": {
+   "drawing": "card 15: the card's line work, star marks and lettering removed, a new outline where the wash had swallowed it"
+  },
+  "Eri": {
+   "drawing": "a new drawing of the whole river; card 28 looked at for the subject only"
+  },
+  "MuscaBorealis": {
+   "drawing": "card 16: the card's line work, star marks and lettering removed, the marks' holes in the body filled with its tone"
+  },
+  "Noctua": {
+   "drawing": "card 32: the card's line work, cut from the snake, star marks and lettering removed, a new outline where the card's was missing"
+  },
+  "TelescopiumHerschelii": {
+   "drawing": "card 8: the card's line work, star marks removed, a new outline round the tube"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set additions1824"
+}

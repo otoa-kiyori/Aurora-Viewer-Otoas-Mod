@@ -1,0 +1,19 @@
+{
+ "credits": [
+  {
+   "holder": "OpenClipart (uploader Firkin)",
+   "work": "Vector traces of the 32 Urania's Mirror cards (items 234009 to 234041), cut into figures and placed on the stars",
+   "licence": "CC0 1.0",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-24",
+   "note": "Changes for this viewer: the cards' colour washes, paper, star marks and lettering removed; ink of neighbouring figures erased; figures refitted to the stars, name positions moved; stray pieces cleared on Aur, Cap, Lep, UMa, CVn, CrA, Crv, Sex, Tel; wiped star marks inside Com and Lac filled from the body tone; 12 figures shown as lines only; drawing order added."
+  },
+  {
+   "holder": "Sidney Hall, engraver: Urania's Mirror (London, 1824)",
+   "work": "The original engraved constellation cards",
+   "licence": "Public domain (published 1824)",
+   "imported": "2026-11-24",
+   "note": "The traces very likely follow the restorations by Adam Cuerden on Wikimedia Commons, who requests attribution (inferred from file names, not stated by the source)."
+  }
+ ]
+}

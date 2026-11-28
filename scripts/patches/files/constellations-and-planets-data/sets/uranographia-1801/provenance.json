@@ -1,0 +1,303 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "Ant": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Aps": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ara": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Car": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cen": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cir": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Dor": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Felis": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Gru": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Hor": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Hya": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Hyi": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ind": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lup": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Mus": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Pav": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Phe": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Pic": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "PsA": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Pup": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ret": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "TrA": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Tuc": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Vel": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Vol": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {
+  "*": {
+   "Felis": "unknown"
+  }
+ },
+ "notes": {
+  "Ant": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Aps": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Ara": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Car": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them; joined from two or three plates"
+  },
+  "Cen": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them; joined from two plates"
+  },
+  "Cir": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Dor": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Felis": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Gru": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Hor": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Hya": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them; joined from two plates"
+  },
+  "Hyi": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Ind": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Lup": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Mus": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Pav": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Phe": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Pic": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "PsA": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Pup": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them; joined from two or three plates"
+  },
+  "Ret": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "TrA": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Tuc": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  },
+  "Vel": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them; joined from two or three plates"
+  },
+  "Vol": {
+   "drawing": "cut from the plate scans: star marks, grid and lettering removed and filled with texture copied from beside them"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set uranographia-1801"
+}

@@ -1,0 +1,111 @@
+# The keyboard walks and turns the avatar while the joystick flycam is on.
+#
+# Upstream returns from update_move_input as soon as the flycam steps, so no
+# key, nor any button of the Controls window, reaches the avatar. The Legacy
+# Viewer also ends the flycam on avatar movement (LLAgentCamera::resetView,
+# indra/newview/llagentcamera.cpp); this private build deliberately keeps it.
+#
+# The flycam step now only steps the camera and update_move_input goes on, with
+# three things held back while it is on:
+#  - the "moving brings the camera back" reset (it ends the flycam: snap-back);
+#  - the camera keys (Alt + arrows, the Controls window's orbit and pan, the
+#    viewfinder pad): they would move the follow camera nobody is looking at;
+#  - the SpaceMouse axes counted as "jump" by the crouch toggle.
+# The SpaceMouse itself still never drives the avatar: joystick_avatar returns
+# early while the flycam is active. Camera.update returns early on a flycam, so
+# the follow camera is not updated, and AgentUpdate keeps sending the flycam's
+# position. Escape, "Reset camera" and Alt+Shift+F still end it.
+#
+# In VR (upstream's VR flycam, c0b5233c) the movement keys fly the flycam
+# itself, so there upstream's behaviour is kept unchanged: the keys go to the
+# flycam and nothing reaches the avatar.
+#
+# The Game Controls fly camera (upstream's, app/game_control.rs) is separate
+# and unaffected: while it flies, update_move_input still returns before this
+# patch's code (the `game_control.flycam` branch). Game Controls avatar input
+# (game_control_avatar) stays out while any fly camera is on, as upstream: with
+# the joystick flycam only the keyboard and the Controls window reach the
+# avatar.
+
+[[patch]]
+id = "flycam-keys-step"
+why = "outside VR the flycam step only steps the camera; it no longer wipes the keyboard input and its timers (in VR the keys fly the flycam, as upstream)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "joystick_flycam_step"
+find = '''self.input = MoveInput::default();
+        self.fb_since = None;
+        self.lr_since = None;
+        self.up_since = None;
+        if self.vr_camera.is_none() {
+            self.turn_since = None;
+        }'''
+replace = '''// aurora-local-patch: flycam-keys-step
+        // outside VR the keyboard keeps walking the avatar: update_move_input goes on
+        if self.vr_camera.is_some() {
+            self.input = MoveInput::default();
+            self.fb_since = None;
+            self.lr_since = None;
+            self.up_since = None;
+        }'''
+
+[[patch]]
+id = "flycam-keys-call"
+why = "update_move_input goes on after the flycam step outside VR, and remembers whether the flycam is on"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "update_move_input"
+find = '''if self.joystick.active {
+            i.turn_held = turn_held(&mut self.turn_since, &i);
+            self.joystick_flycam_step(&i, dt);
+            return;
+        }'''
+replace = '''// aurora-local-patch: flycam-keys-call
+        let flycam = self.joystick.active;
+        if flycam && self.vr_camera.is_some() {
+            i.turn_held = turn_held(&mut self.turn_since, &i);
+            self.joystick_flycam_step(&i, dt);
+            return;
+        }
+        if flycam {
+            self.joystick_flycam_step(&i, dt);
+        }'''
+
+[[patch]]
+id = "flycam-keys-crouch"
+why = "the SpaceMouse's camera axes are not the avatar's jump for the crouch toggle"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "update_move_input"
+find = "let joystick_up = self.camera.free().is_none() && (self.joystick.motion.axes[2] > 0.0 || self.joystick.motion.jump || self.joystick.motion.rise);"
+replace = '''// aurora-local-patch: flycam-keys-crouch
+        let joystick_up = self.camera.free().is_none()
+            && !flycam
+            && (self.joystick.motion.axes[2] > 0.0 || self.joystick.motion.jump || self.joystick.motion.rise);'''
+
+[[patch]]
+id = "flycam-keys-reset"
+why = "walking must not bring the camera back to the avatar (resetView ends the flycam)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "update_move_input"
+find = """            i.resets_camera(self.crouch_toggle.latched())
+        };"""
+replace = """i.resets_camera(self.crouch_toggle.latched())
+        };
+        // aurora-local-patch: flycam-keys-reset
+        let moving = moving && !flycam;"""
+
+[[patch]]
+id = "flycam-keys-camera-keys"
+why = "the camera keys, the viewfinder pad and the gamepad's avatar camera would move the follow camera hidden behind the flycam (upstream returned before them too)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "update_move_input"
+find = "self.input = i;"
+replace = '''self.input = i;
+        // aurora-local-patch: flycam-keys-camera-keys
+        if flycam {
+            self.cam_key_since.fill(None);
+            return;
+        }'''

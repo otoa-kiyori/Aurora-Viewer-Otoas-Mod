@@ -1,0 +1,350 @@
+# A motion the simulator signals again while it plays keeps playing, like the
+# Legacy Viewer's LLMotionController::startMotion
+# (indra/llcharacter/llmotioncontroller.cpp).
+#
+# A mesh head's expression HUD plays Bento face animations through the head's
+# script, and the same script (or another one) plays some animations again and
+# again: the simulator sends a new sequence id for them every few seconds
+# (LLVOAvatar::processAnimationStateChanges then calls startMotion). Aurora
+# kept a re-signalled loop, but stopped a re-signalled one-shot and started a
+# fresh instance first in the motion list: newest, it took the shared face
+# joints back from an expression of the same priority started after it (the
+# blender ranks equal priorities newest first). The Legacy Viewer replaces the
+# instance only while it blends (LLMotion::isBlending: easing in or out) or has
+# a stop time, unless the character is paused; otherwise "if the motion is
+# already active and allows deprecation, then let it keep playing": same clock,
+# same place. An expression (LLEmote::canDeprecate is false) always restarts; a
+# finished one-shot starts again. Upstream issue #2898 ("Cant use Lelutka axis
+# face hud") has the same symptom.
+#
+# Kept as Aurora does: a re-signalled loop with the same continuous start is
+# kept even while it eases in (the Legacy Viewer would replace it), and a
+# motion already easing out during a pause gets a new instance (the Legacy
+# Viewer would keep the fading one and lose the new start).
+#
+# A non-looping animation of 0 s (a one-frame pose, as many Bento face
+# expressions are) ends itself, as in the Legacy Viewer: LLKeyframeMotion::
+# onUpdate returns false once its time passes its 0 s duration, and
+# LLMotionController::updateMotionsByType stops it and asks the simulator to
+# stop it. Upstream now ends such a pose itself in Controller::sync, once its
+# start (Motion::activation) has passed. What stays ours: the pose ends at the
+# sync after the one that put it in (Motion::inserted,
+# Motion::zero_duration_ended), so it is always drawn once, even when its
+# signalled start lies before that sync in synchronized mode (upstream would
+# stop it at the very sync that inserts it, before it is drawn); and a
+# re-signalled pose that has been drawn counts as ended (the rule above), so
+# a clicked expression starts again in front. Its pose is held where no other
+# motion drives the joints. 0 s loops are unchanged.
+#
+# The one-shot's timed stop moves into Motion::one_shot_end, used by the
+# weight pass and by the new rule. Tests: files/anim-restart-legacy/.
+# Demo: AURORA_DEMO_EMOTE=<expression>,self,pose plays the carrier as a 0 s
+# one-shot on our own avatar: one "own animation timed stop" log line a round.
+# Retire this whole file once upstream ports the rule: its patches then report
+# DRIFT or ALREADY. Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "anim-restart-legacy-motion"
+why = "Motion::one_shot_end (the timed stop) and Motion::keeps_playing_when_resignalled (the startMotion rule)"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = "fn stop_at(&mut self, now: Instant) {"
+replace = """// aurora-local-patch: anim-restart-legacy-motion
+    /// When a one-shot stops itself (mSendStopTimestamp,
+    /// LLMotionController::activateMotionInstance): at its ease-out, or at
+    /// its authored end when the ease-out would fall inside the ease-in:
+    /// LLMotionController::updateMotionsByType requests no timed stop during
+    /// ease-in, LLKeyframeMotion::onUpdate runs to the end instead (the stock
+    /// pre-jump lasts 0.333333 s, not 0.133333 s, #1637). None for a loop.
+    fn one_shot_end(&self) -> Option<Instant> {
+        let a = &self.anim.anim;
+        (!a.looping && a.duration > 0.0).then(|| {
+            let duration = f64::from(a.duration);
+            let ease_out_start = (duration - f64::from(a.ease_out)).max(0.0);
+            let finish = if ease_out_start < f64::from(a.ease_in) {
+                duration
+            } else {
+                ease_out_start
+            };
+            self.activation + Duration::from_secs_f64(finish)
+        })
+    }
+
+    /// Port of LLMotionController::startMotion
+    /// (indra/llcharacter/llmotioncontroller.cpp, originally LGPL 2.1) for an
+    /// active instance whose signal changed (a new sequence id,
+    /// LLVOAvatar::processAnimationStateChanges): it is replaced only while it
+    /// blends (LLMotion::isBlending: last frame's weight below 1, easing in)
+    /// or has a stop time; otherwise it keeps playing, with its clock and its
+    /// place among the newer motions. Nothing is replaced while the character
+    /// is paused (mPaused). An expression always starts again
+    /// (LLEmote::canDeprecate is false). A one-shot past its timed stop counts
+    /// as stopped even before this frame's weight pass marks it, and so does
+    /// a 0 s one-shot that has been drawn once.
+    fn keeps_playing_when_resignalled(&self, now: Instant, paused: bool) -> bool {
+        if self.stop.is_some() || default_motions::emote_param(&self.id).is_some() {
+            return false;
+        }
+        paused || (self.weight >= 1.0 && self.one_shot_end().is_none_or(|end| now < end) && !self.zero_duration_ended(now))
+    }
+
+    /// A non-looping motion of 0 s ends itself on its first update after
+    /// the start: LLKeyframeMotion::onUpdate returns
+    /// `mLastLoopedTime <= mDuration`, false as soon as its time passes 0,
+    /// and LLMotionController::updateMotionsByType then stops it and asks
+    /// the simulator to stop it (requestStopMotion). It is drawn at the sync
+    /// that put it in and ends at the next one. A 0 s loop never ends
+    /// (onUpdate holds its time at 0).
+    fn zero_duration_ended(&self, now: Instant) -> bool {
+        let a = &self.anim.anim;
+        !a.looping && a.duration <= 0.0 && now > self.inserted
+    }
+
+    fn stop_at(&mut self, now: Instant) {"""
+
+[[patch]]
+id = "anim-restart-legacy"
+why = "a re-signalled one-shot that has eased in and is not stopping keeps playing in place; only the Legacy Viewer's cases start a new instance"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """self.signals.insert(signal.id, *signal);
+                    continue;
+                }
+                m.stop_at(now);
+            }"""
+replace = """self.signals.insert(signal.id, *signal);
+                    continue;
+                }
+                // aurora-local-patch: anim-restart-legacy
+                // LLMotionController::startMotion: an active instance that
+                // has eased in keeps playing (Motion::keeps_playing_when_resignalled).
+                if m.keeps_playing_when_resignalled(now, frozen.is_some()) {
+                    self.signals.insert(signal.id, *signal);
+                    continue;
+                }
+                m.stop_at(now);
+            }"""
+
+[[patch]]
+id = "anim-restart-legacy-end-use"
+why = "the weight pass takes the one-shot's timed stop from Motion::one_shot_end, the rule the re-signal check uses"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """let a = &m.anim.anim;
+            // LLMotionController::updateMotionsByType does not request a
+            // timed stop during ease-in. If mSendStopTimestamp falls there,
+            // LLKeyframeMotion::onUpdate runs to the authored end instead.
+            // In particular, the stock pre-jump must last 0.333333 s, not
+            // duration - ease_out = 0.133333 s (#1637).
+            if m.stop.is_none() && !a.looping && a.duration > 0.0 {
+                let duration = f64::from(a.duration);
+                let ease_out_start = (duration - f64::from(a.ease_out)).max(0.0);
+                let finish = if ease_out_start < f64::from(a.ease_in) {
+                    duration
+                } else {
+                    ease_out_start
+                };
+                let end = m.activation + Duration::from_secs_f64(finish);
+                if now >= end {
+                    m.stop_at(end);
+                    if !m.internal && !preview.is_some_and(|(target, _)| target.is_none_or(|id| id == m.id)) {
+                        completed.push(m.id);
+                    }
+                }
+            }"""
+replace = """// A one-shot stops itself at its timed stop (Motion::one_shot_end).
+            // aurora-local-patch: anim-restart-legacy-end-use
+            if m.stop.is_none()
+                && let Some(end) = m.one_shot_end()
+                && now >= end
+            {
+                m.stop_at(end);
+                if !m.internal && !preview.is_some_and(|(target, _)| target.is_none_or(|id| id == m.id)) {
+                    completed.push(m.id);
+                }
+            }"""
+
+[[patch]]
+id = "anim-restart-legacy-doc"
+why = "the sync comment says which re-signalled motions keep playing"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+required = false
+fn = "sync"
+find = "// A motion easing out is left to finish while a new instance starts."
+replace = """// A motion easing out is left to finish while a new instance starts;
+        // an active one that has eased in keeps playing (startMotion).
+        // aurora-local-patch: anim-restart-legacy-doc"""
+
+# ------------------------------------------------------- 0 s one-shots
+
+[[patch]]
+id = "anim-restart-legacy-inserted-field"
+why = "Motion::inserted: the sync that put the instance in, after which a 0 s one-shot ends"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = """internal: bool,
+    recovery: Option<legacy_grounding::Recovery>,
+}"""
+replace = """internal: bool,
+    recovery: Option<legacy_grounding::Recovery>,
+    /// The sync that put this instance in (its clock, paused or not): a
+    /// 0 s one-shot is drawn once, then ends at the next sync.
+    // aurora-local-patch: anim-restart-legacy-inserted-field
+    inserted: Instant,
+}"""
+
+[[patch]]
+id = "anim-restart-legacy-inserted-signal"
+why = "a signalled motion records the sync that put it in"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """id: signal.id,
+                        anim,
+                        activation: start,"""
+replace = """id: signal.id,
+                        inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-signal
+                        anim,
+                        activation: start,"""
+
+[[patch]]
+id = "anim-restart-legacy-inserted-emote"
+why = "the expression an animation names records the sync that put it in"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """id: emote,
+                            anim,"""
+replace = """id: emote,
+                            inserted: now, // aurora-local-patch: anim-restart-legacy-inserted-emote
+                            anim,"""
+
+[[patch]]
+id = "anim-restart-legacy-zero"
+why = "upstream ends a 0 s one-shot once its start has passed; ended instead at the sync after the one that put it in (Motion::zero_duration_ended), so it is drawn once even when its signalled start lies before that sync in synchronized mode"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+fn = "sync"
+find = """if m.stop.is_none() && !m.anim.anim.looping && m.anim.anim.duration <= 0.0 && now > m.activation {"""
+replace = """// aurora-local-patch: anim-restart-legacy-zero
+            // (ended at the sync after the one that put it in, not once its
+            // start has passed: a start signalled before that sync, in
+            // synchronized mode, is still drawn once)
+            if m.stop.is_none() && m.zero_duration_ended(now) {"""
+
+# -------------------------------------------------------------- demo
+
+[[patch]]
+id = "anim-restart-legacy-demo-field"
+why = "AURORA_DEMO_EMOTE's pose flag: the carrier plays as a 0 s one-shot"
+paths = ["crates/aurora-viewer/src/demo_emote.rs"]
+op = "literal"
+find = """pub own: bool,
+}"""
+replace = """pub own: bool,
+    /// The carrier is a 0 s one-shot (a one-frame pose) that ends itself
+    /// once drawn (local patch set, anim-restart-legacy).
+    // aurora-local-patch: anim-restart-legacy-demo-field
+    pub pose: bool,
+}"""
+
+[[patch]]
+id = "anim-restart-legacy-demo-parse"
+why = "AURORA_DEMO_EMOTE reads its pose token"
+paths = ["crates/aurora-viewer/src/demo_emote.rs"]
+op = "literal"
+fn = "parse"
+find = """own: false,
+    };"""
+replace = """own: false,
+        pose: false, // aurora-local-patch: anim-restart-legacy-demo-parse
+    };"""
+
+[[patch]]
+id = "anim-restart-legacy-demo-token"
+why = "AURORA_DEMO_EMOTE=…,pose"
+paths = ["crates/aurora-viewer/src/demo_emote.rs"]
+op = "literal"
+fn = "parse"
+find = """"self" => mode.own = true,"""
+replace = """"self" => mode.own = true,
+            "pose" => mode.pose = true, // aurora-local-patch: anim-restart-legacy-demo-token"""
+
+[[patch]]
+id = "anim-restart-legacy-demo-animation"
+why = "with pose, the carrier is a non-looping 0 s animation without ease-in, drawn once then ended"
+paths = ["crates/aurora-viewer/src/demo_emote.rs"]
+op = "literal"
+fn = "animation"
+find = """duration: 1.0,
+        emote_name,
+        loop_in: 0.0,
+        loop_out: 1.0,
+        looping: true,
+        ends_after: None,
+        ease_in: 0.2,"""
+replace = """duration: if mode.pose { 0.0 } else { 1.0 }, // aurora-local-patch: anim-restart-legacy-demo-animation
+        emote_name,
+        loop_in: 0.0,
+        loop_out: if mode.pose { 0.0 } else { 1.0 },
+        looping: !mode.pose,
+        ends_after: None,
+        ease_in: if mode.pose { 0.0 } else { 0.2 },"""
+
+[[patch]]
+id = "anim-restart-legacy-demo-test"
+why = "the scenario reads its pose token"
+paths = ["crates/aurora-viewer/src/demo_emote.rs"]
+op = "literal"
+fn = "the_scenario_reads_its_expression_and_hand_pose"
+find = """let wink = parse("wink,9,signal,self").expect("wink");"""
+replace = """let wink = parse("wink,9,signal,self").expect("wink");
+        // aurora-local-patch: anim-restart-legacy-demo-test
+        assert!(!wink.pose);
+        let pose = parse("smile,self,pose").expect("pose");
+        assert!(pose.pose && pose.own);
+        let carrier = animation(&pose);
+        assert!(!carrier.looping && carrier.duration == 0.0 && carrier.ease_in == 0.0);"""
+
+[[patch]]
+id = "anim-restart-legacy-demo-doc-table"
+why = "docs/TESTING.md: the pose token in the table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+required = false
+find = "| `AURORA_DEMO_EMOTE=<expression>[,<hand pose>][,signal][,self]` | A facial expression and a hand pose from an animation (system body) |"
+replace = "| `AURORA_DEMO_EMOTE=<expression>[,<hand pose>][,signal][,self][,pose]` | A facial expression and a hand pose from an animation (system body); `pose`: the carrier is a 0 s one-shot (local patch set) <!-- // aurora-local-patch: anim-restart-legacy-demo-doc-table --> |"
+
+[[patch]]
+id = "anim-restart-legacy-demo-doc"
+why = "docs/TESTING.md: what the pose token shows"
+paths = ["docs/TESTING.md"]
+op = "literal"
+required = false
+find = """asks for a pose). The log shows `demo emote: round <n> on <avatar>`."""
+replace = """asks for a pose). The log shows `demo emote: round <n> on <avatar>`.
+  `pose` (local patch set) makes the carrier a 0 s one-shot without
+  ease-in, a one-frame pose as many Bento face expressions are: it is drawn
+  once and ends itself, as in the Legacy Viewer (LLKeyframeMotion::onUpdate),
+  so with `self` the log shows one `own animation timed stop` for it each
+  round. <!-- // aurora-local-patch: anim-restart-legacy-demo-doc -->"""
+
+[[patch]]
+id = "anim-restart-legacy-tests"
+why = "unit tests: kept in place under a newer expression, restarted while blending, stopping or ended, expressions, pause, loops unchanged"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/anim/restart_legacy_tests.rs"]
+source = "files/anim-restart-legacy/restart_legacy_tests.rs"
+
+[[patch]]
+id = "anim-restart-legacy-tests-mod"
+why = "declare the tests as a child of anim, beside its other submodules"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = "mod pointing;"
+replace = """mod pointing;
+#[cfg(test)]
+mod restart_legacy_tests; // aurora-local-patch: anim-restart-legacy-tests-mod"""

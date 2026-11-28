@@ -1,0 +1,20 @@
+{
+ "credits": [
+  {
+   "holder": "Johan Meuris",
+   "work": "Illustrations of the Inuit sky culture (11 drawings), Stellarium skycultures/inuit/illustrations",
+   "licence": "Free Art License (no version given). The version is not stated anywhere at the origin; the images are separate data files under their own licence. Quoted from the culture's description.md: \"Illustrations: Free Art License\"; \"Illustrations are done by Johan Meuris.\"",
+   "url": "https://raw.githubusercontent.com/Stellarium/stellarium/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/inuit/description.md",
+   "imported": "2026-11-25",
+   "note": "Stellarium/stellarium at commit e233fa9b3d21e2cafe9c168e6710b627532a7dd4. The licence line names no version number; accepted as it stands. Changes: converted to line/tone (the dark contour lines kept as ink at full strength; the grey fill and the white outer glow dropped), placed on the sky from the three anchor stars of index.json, reveal channel added."
+  },
+  {
+   "holder": "Karrie Berglund (Digitalis Education Solutions, Inc.), after John MacDonald, The Arctic Sky: Inuit Astronomy, Star Lore and Legend",
+   "work": "Inuit sky culture data (stick lines, names, anchor stars), Stellarium skycultures/inuit/index.json",
+   "licence": "GNU GPL v2.0. Quoted from the culture's description.md: \"Text and data: GNU GPL v2.0\"",
+   "url": "https://raw.githubusercontent.com/Stellarium/stellarium/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/inuit/description.md",
+   "imported": "2026-11-25",
+   "note": "Stellarium/stellarium at commit e233fa9b3d21e2cafe9c168e6710b627532a7dd4. Used here for the figures' stick lines and the placement anchors. Changes: lines ordered and timed as a pen path (t0/t1), end points looked up again from the catalogue's Hipparcos stars (up to 0.003 deg from the culture's own; iu011 carries none); the viewer draws the culture's lines.json."
+  }
+ ]
+}

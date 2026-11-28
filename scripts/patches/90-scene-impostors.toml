@@ -1,0 +1,1583 @@
+# Scene impostors: the far field drawn from a panorama (local addition).
+#
+# Preferences › Graphics › Quality › Distance and detail: "Scene impostors"
+# (off by default) and, behind its cog, "Impostor distance" (120 m, 64 to
+# 1,024 m). With the switch on and the impostor distance short of the draw
+# distance (scene_impostors::active, unit-tested), the objects wholly beyond
+# that distance of a capture point and within the draw distance are drawn
+# once into a cube panorama around it, colour and depth, lit, hazed and
+# fogged as the main pass draws them (fs_reflect with the probes, from the
+# capture point), one face a frame into the slot behind the one shown. Each
+# frame the shown panorama is drawn into the scene pass with its depth,
+# traced from the camera's own place (scene_panorama.wgsl): near terrain,
+# water and objects go in front of or behind the far ones as they should.
+# Its depth also goes into the single-sample depth right after the prepass
+# (a pass of its own, with every anti-aliasing), so the ambient occlusion,
+# the contact shadows, the anti-aliasing history, the depth of field, the
+# hover and the clicks see the far field as before.
+#
+# The objects it stands in for leave the main view in the GPU culling
+# (face_mask in cull.wgsl, gpu_cull::face_bins and
+# scene_panorama::face_panorama kept line for line); their shadows,
+# reflections and probes stay as they are. Terrain, water, avatars and what
+# they wear, rigged and animated objects, HUDs, blended, glowing and
+# texture-animated faces, water exclusion, the selection, the edited faces,
+# the beacons' highlights, the photo's and the give's marks and what the
+# photo's isolation leaves unseen never go into it
+# (object_flags::NO_IMPOSTOR, set by the viewer), nor do particles. The
+# GPU object table carries the frame stamp of each entry's last change
+# (CullObject::stamp; GpuTable::set keeps the old stamp of an entry written
+# again unchanged, scene_panorama::restamp, and an object whose sync only
+# swapped its level of detail keeps its own, scene_panorama::detail_stamp):
+# a capture only takes, and a panorama only stands in for, what did not
+# change since the capture began. What moves, arrives or changes is drawn
+# as usual until a capture takes it, and an object a panorama holds that
+# moves, goes or changes its flags makes a new capture due at once.
+#
+# Refresh: the camera 1 % of the impostor distance from the capture point
+# (a parallax of 0.01 rad at most for an object right at that distance,
+# about 10 px at 1080p with a 60° view, less the farther it is, and the
+# depth tracing takes all but what a moved eye would see behind an edge;
+# 1.2 m at 120 m, about three captures a second at a walk), 4 s, the
+# distances, the region (a crossing moves the render origin), the face size
+# by a quarter, the sun by 2°, a sky or fog colour by 5 %, and the change of
+# an object it holds. Six faces over six frames into the other slot, shown
+# once complete: no hitch, no wait on the GPU. Shown up to a tenth of the
+# impostor distance from its capture point, never in another region's
+# render origin: past that the far field is drawn as usual until the next
+# one is complete. Faces as fine as the view (N / 2 pixels per radian at a
+# face's middle, as H / 2 / tan(fov / 2) at the view's), 256 to 2,048 px.
+#
+# Differences from a plain reading of the spec, for the image: none is
+# shown under water, in a photo, a cut-out photo or a headset view. A frame
+# with a drawn pick (a click, and the hover every 100 ms while anything
+# rigged is in the scene) keeps it shown: bin 30 holds that frame the faces
+# it stands in for under the pick's pixel, drawn by the pick pass with
+# pipelines of their own (one- and two-sided faces share the bin), and no
+# face is captured; a frame with a probe shadow map (bin 30 taken) makes
+# the pick wait one frame. Hiding it on those frames drew the far field
+# live every few frames: the far LODs, textures and lighting popped back
+# and forth with the cursor over the world (2026-11-10). Off, or
+# with nothing far enough, nothing is allocated or drawn and the culling
+# leaves everything in place. What remains on the off path: one more frame uniform buffer and
+# bind group (renderer.rs), the NO_IMPOSTOR bit and a zero stamp in the
+# object table entries (read by nothing), a branch in face_mask.
+#
+# Known limits: a capture draws no sun shadows, and the panorama begins at
+# the impostor distance even with the sun's shadows on
+# (scene_panorama::start; Otoa's choice, 2026-11-09), so the far objects
+# between the impostor distance and the shadow distance (192 m at shadow
+# quality 3, 256 m at 4) lose the sun's shadows on them. The shadows they
+# cast on the live ground stay: the shadow map still draws them, and the
+# contact shadows and the ambient occlusion read the panorama's depth
+# (before 2026-11-09 only with MSAA: with SMAA, FXAA, TAA or none their
+# contact shadows were gone, which past the shadow distance are all the
+# ground shadows they cast). Far lights
+# switched on or off, a texture or a colour changed far away show at the
+# next refresh (4 s at most); the debug overlays ("Show transparency", the
+# pass view) may speckle on far objects; the far field ends at the capture
+# point's draw distance, up to a tenth of the impostor distance off the
+# camera's; the far objects write no normals nor G-buffer: no screen-space
+# reflection on them, and the ambient occlusion sees them by their depth
+# alone (at that distance both reach a pixel or two).
+#
+# Demo: AURORA_DEMO=1 AURORA_DEMO_SCENE_IMPOSTORS=on|off[:walk] (a far field
+# of 24 neighbour regions and about 2,400 boxes out to 1 km); the options
+# window reveals AURORA_DEMO_OPTIONS=graphics:impostors (and
+# graphics:impostors-cogs, the cogs open). At frame 620 on and off show the
+# same ground shadows around the far plaza and boxes: with AURORA_SHADOWS=2
+# (96 m) those are their contact shadows alone, with 3 the shadow map's too.
+#
+# The new code is in files/scene-impostors/. Apply or skip the whole file,
+# not one patch of it.
+
+# ------------------------------------------------------------ render crate
+
+[[patch]]
+id = "scene-impostors-render-module"
+why = "the panorama: schedule, refresh rules, captures, composite pipelines, the table's stamps, and their unit tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/scene_panorama.rs"]
+source = "files/scene-impostors/scene_panorama.rs"
+
+[[patch]]
+id = "scene-impostors-shader"
+why = "the composite: the panorama traced from the camera's place, colour and depth"
+op = "add_file"
+paths = ["crates/aurora-render/src/shaders/scene_panorama.wgsl"]
+source = "files/scene-impostors/scene_panorama.wgsl"
+
+[[patch]]
+id = "scene-impostors-render-mod"
+why = "declare the module beside the other passes"
+paths = ["crates/aurora-render/src/lib.rs"]
+op = "literal"
+find = "pub mod second_view;"
+replace = """pub mod scene_panorama; // aurora-local-patch: scene-impostors-render-mod
+pub mod second_view;"""
+
+[[patch]]
+id = "scene-impostors-frame-params"
+why = "the viewer's parameters of the frame: the rule, the distances, the region, the render origin, the stamp"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = "    pub probes: ProbeFrame,"
+replace = """pub probes: ProbeFrame,
+    // aurora-local-patch: scene-impostors-frame-params
+    /// Scene impostors (scene_panorama.rs); inactive: none, at no cost.
+    pub panorama: crate::scene_panorama::PanoramaParams,"""
+
+# --- GPU culling: the object flag, the stamp, the frame's panorama vectors
+
+[[patch]]
+id = "scene-impostors-object-flag"
+why = "the flag of what never goes into the panorama (set by the viewer); the next free bit after upstream's UNSEEN (the photo's isolation)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """    pub const UNSEEN: u32 = 512;
+}"""
+replace = """pub const UNSEEN: u32 = 512;
+    // aurora-local-patch: scene-impostors-object-flag
+    /// Never drawn from the scene impostors' panorama (the viewer's
+    /// blended, glowing and texture-animated faces, water exclusion, the
+    /// selection and the highlights; scene_panorama.rs).
+    pub const NO_IMPOSTOR: u32 = 1024;
+}"""
+
+[[patch]]
+id = "scene-impostors-object-stamp"
+why = "the padding word of the object entry carries the frame stamp of its last change (same size, same layout)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """    pub binds: u32,
+    pub _pad: u32,
+}"""
+replace = """pub binds: u32,
+    // aurora-local-patch: scene-impostors-object-stamp
+    /// The viewer's frame stamp when the entry last changed (0 while the
+    /// scene impostors are off; scene_panorama.rs).
+    pub stamp: u32,
+}"""
+
+[[patch]]
+id = "scene-impostors-object-none"
+why = "goes with scene-impostors-object-stamp: the empty entry"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """        box_count: 0,
+        binds: 0,
+        _pad: 0,
+    };"""
+replace = """box_count: 0,
+        binds: 0,
+        stamp: 0, // aurora-local-patch: scene-impostors-object-none
+    };"""
+
+[[patch]]
+id = "scene-impostors-cull-frame"
+why = "the frame's panorama vectors after the existing ones (16-byte aligned, the WGSL struct follows)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """pub groups: [u32; 4],
+}"""
+replace = """pub groups: [u32; 4],
+    // aurora-local-patch: scene-impostors-cull-frame
+    /// Scene impostors (`scene_panorama::CullPanorama`): the shown
+    /// panorama's capture point and start (w 0: none), the captured one's,
+    /// then x and y their draw distances; the planes of the face captured;
+    /// their stamps.
+    pub panorama: [[f32; 4]; 3],
+    pub panorama_planes: [[f32; 4]; 6],
+    pub panorama_stamps: [u32; 4],
+}"""
+
+[[patch]]
+id = "scene-impostors-cull-frame-new"
+why = "goes with scene-impostors-cull-frame: no panorama unless the renderer sets one"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """            groups: [0, view.first_person.and_then(|(id, _)| id.checked_add(1)).unwrap_or(0), 0, 0],
+        }"""
+replace = """groups: [0, view.first_person.and_then(|(id, _)| id.checked_add(1)).unwrap_or(0), 0, 0],
+            // aurora-local-patch: scene-impostors-cull-frame-new
+            panorama: [[0.0; 4]; 3],
+            panorama_planes: [[0.0; 4]; 6],
+            panorama_stamps: [0; 4],
+        }"""
+
+[[patch]]
+id = "scene-impostors-face-bins"
+why = "the Rust reference of face_mask: the shown panorama takes the far static objects out of the main view, the face captured gets bin 30"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "face_bins"
+find = """    if d - r > frame.eye[3] && !is_avatar {
+        return (0, false);
+    }
+    let fl = frame.sizes[3];
+    let viewed = o.flags & object_flags::UNSEEN == 0
+        && sphere_in(&frame.planes, c, r)
+        && !(own_first_person && (o.flags & object_flags::FIRST_PERSON_HIDDEN != 0 || f.bits & FACE_FIRST_PERSON_HIDDEN != 0));"""
+replace = """// scene impostors: the shown panorama stands in for it, the face
+    // captured draws it (scene_panorama.rs)
+    // aurora-local-patch: scene-impostors-face-bins
+    let (far_front, pano) = crate::scene_panorama::face_panorama(frame, &o, n, c, r);
+    if d - r > frame.eye[3] && !is_avatar {
+        let solid = (pass::OPAQUE..=pass::MASK_2S).contains(&(f.bits & pass::BITS));
+        return (u32::from(pano && solid) << BIN_PROBE_SHADOW, false);
+    }
+    let fl = frame.sizes[3];
+    let viewed = o.flags & object_flags::UNSEEN == 0
+        && sphere_in(&frame.planes, c, r)
+        && !far_front
+        && !(own_first_person && (o.flags & object_flags::FIRST_PERSON_HIDDEN != 0 || f.bits & FACE_FIRST_PERSON_HIDDEN != 0));"""
+
+[[patch]]
+id = "scene-impostors-face-bins-reach"
+why = "goes with scene-impostors-face-bins: a face only the capture draws goes on"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "face_bins"
+find = "if !viewed && !shadow_reach && !reflect_reach && !captured && !shelters {"
+replace = """// aurora-local-patch: scene-impostors-face-bins-reach
+    if !viewed && !shadow_reach && !reflect_reach && !captured && !shelters && !pano {"""
+
+[[patch]]
+id = "scene-impostors-face-bins-large"
+why = "goes with scene-impostors-face-bins: the capture tests the size itself, from its capture point"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "face_bins"
+find = "if !large && !captured {"
+replace = """// aurora-local-patch: scene-impostors-face-bins-large
+    if !large && !captured && !pano {"""
+
+[[patch]]
+id = "scene-impostors-face-bins-bin"
+why = "goes with scene-impostors-face-bins: the solid faces of the face captured, in bin 30 (free on the frames without a probe shadow map)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "face_bins"
+find = """    if captured && solid {
+        m |= 1 << BIN_PROBE;
+    }"""
+replace = """if captured && solid {
+        m |= 1 << BIN_PROBE;
+    }
+    // aurora-local-patch: scene-impostors-face-bins-bin
+    if pano && solid {
+        m |= 1 << BIN_PROBE_SHADOW;
+    }"""
+
+# --- the object table keeps the stamp of what is written again unchanged
+
+[[patch]]
+id = "scene-impostors-table-hook"
+why = "a table can rewrite what is set into it (the object table's stamps, scene_panorama::restamp)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """    /// The buffer could not grow (video memory full): when to try again.
+    backoff: Backoff,
+}
+
+impl<T: Pod + PartialEq> GpuTable<T> {"""
+replace = """/// The buffer could not grow (video memory full): when to try again.
+    backoff: Backoff,
+    // aurora-local-patch: scene-impostors-table-hook
+    /// What an entry set over another becomes (the object table's stamps,
+    /// `scene_panorama::restamp`); None: as it is given.
+    pub restamp: Option<fn(&T, T) -> T>,
+}
+
+impl<T: Pod + PartialEq> GpuTable<T> {"""
+
+[[patch]]
+id = "scene-impostors-table-hook-none"
+why = "goes with scene-impostors-table-hook: the tables set what they are given"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """            generation: 0,
+            uploaded: 0,
+            backoff: Backoff::default(),
+        }"""
+replace = """generation: 0,
+            uploaded: 0,
+            backoff: Backoff::default(),
+            restamp: None, // aurora-local-patch: scene-impostors-table-hook-none
+        }"""
+
+[[patch]]
+id = "scene-impostors-table-restamp"
+why = "goes with scene-impostors-table-hook: a changed entry goes through the hook; one that only differs by its stamp is left as it was (not uploaded)"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "set"
+find = """        if self.mirror[i] != v {
+            if self.differs.is_some_and(|differs| differs(&self.mirror[i], &v)) {
+                self.touched.mark(i);
+            }
+            self.mirror[i] = v;
+            self.dirty.mark(i);
+        }"""
+replace = """if self.mirror[i] != v {
+            // aurora-local-patch: scene-impostors-table-restamp
+            // (the change the ray tracer follows is the restamped one)
+            let v = self.restamp.map_or(v, |f| f(&self.mirror[i], v));
+            if self.mirror[i] != v {
+                if self.differs.is_some_and(|differs| differs(&self.mirror[i], &v)) {
+                    self.touched.mark(i);
+                }
+                self.mirror[i] = v;
+                self.dirty.mark(i);
+            }
+        }"""
+
+[[patch]]
+id = "scene-impostors-table-objects"
+why = "goes with scene-impostors-table-hook: the object table keeps its stamps"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """objects: GpuTable::new(device, "cull objects", 4096, CullObject::NONE),"""
+replace = """// aurora-local-patch: scene-impostors-table-objects
+            objects: GpuTable {
+                restamp: Some(crate::scene_panorama::restamp),
+                ..GpuTable::new(device, "cull objects", 4096, CullObject::NONE)
+            },"""
+
+# --- the layout tests of gpu_cull.rs
+
+[[patch]]
+id = "scene-impostors-test-object-fields"
+why = "goes with scene-impostors-object-stamp: the WGSL object entry names the word stamp"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """["sphere", "flags", "avatar", "state", "anchor", "boxes", "box_count", "binds", "_p"]"""
+replace = """// aurora-local-patch: scene-impostors-test-object-fields
+            [
+                "sphere",
+                "flags",
+                "avatar",
+                "state",
+                "anchor",
+                "boxes",
+                "box_count",
+                "binds",
+                "stamp"
+            ]"""
+
+[[patch]]
+id = "scene-impostors-test-frame-size"
+why = "goes with scene-impostors-cull-frame: nine more vectors of floats and one of stamps"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = "(5 + SPOT_SHADOWS) * 6 * 16 + 16 + 4 * 64 + 3 * SHADOW_PLANES * 16 + 4 * 16"
+replace = "(5 + SPOT_SHADOWS) * 6 * 16 + 16 + 4 * 64 + 3 * SHADOW_PLANES * 16 + 4 * 16 + 10 * 16 // aurora-local-patch: scene-impostors-test-frame-size"
+
+[[patch]]
+id = "scene-impostors-test-frame-fields"
+why = "goes with scene-impostors-cull-frame: the WGSL frame has the three fields, in that order"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """                "sizes",
+                "groups"
+            ]"""
+replace = """"sizes",
+                "groups",
+                // aurora-local-patch: scene-impostors-test-frame-fields
+                "panorama",
+                "panorama_planes",
+                "panorama_stamps"
+            ]"""
+
+[[patch]]
+id = "scene-impostors-test-constants"
+why = "goes with scene-impostors-object-flag: the WGSL constant has the Rust value"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+find = """            ("F_PROBE", frame_flags::PROBE),
+        ] {"""
+replace = """("F_PROBE", frame_flags::PROBE),
+            // aurora-local-patch: scene-impostors-test-constants
+            ("OBJ_NO_IMPOSTOR", object_flags::NO_IMPOSTOR),
+        ] {"""
+
+[[patch]]
+id = "scene-impostors-test-frame"
+why = "goes with scene-impostors-cull-frame: the tests' frame has no panorama"
+paths = ["crates/aurora-render/src/gpu_cull.rs"]
+op = "literal"
+fn = "frame_for_tests"
+find = """            groups: [0; 4],
+        }"""
+replace = """groups: [0; 4],
+            // aurora-local-patch: scene-impostors-test-frame
+            panorama: [[0.0; 4]; 3],
+            panorama_planes: [[0.0; 4]; 6],
+            panorama_stamps: [0; 4],
+        }"""
+
+# --- cull.wgsl, kept line for line with gpu_cull::face_bins
+
+[[patch]]
+id = "scene-impostors-cull-flag"
+why = "the WGSL side of scene-impostors-object-flag (the constants test parses this line: no comment on it)"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = "const OBJ_UNSEEN: u32 = 512u;"
+replace = """const OBJ_UNSEEN: u32 = 512u;
+// aurora-local-patch: scene-impostors-cull-flag
+// never drawn from the scene impostors' panorama (scene_panorama.rs)
+const OBJ_NO_IMPOSTOR: u32 = 1024u;"""
+
+[[patch]]
+id = "scene-impostors-cull-object"
+why = "the WGSL side of scene-impostors-object-stamp"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = """    binds: u32,
+    _p: u32,
+}"""
+replace = """binds: u32,
+    // aurora-local-patch: scene-impostors-cull-object
+    // the viewer's frame stamp when it last changed (scene_panorama.rs)
+    stamp: u32,
+}"""
+
+[[patch]]
+id = "scene-impostors-cull-frame-wgsl"
+why = "the WGSL side of scene-impostors-cull-frame (comments without braces: the layout test reads the struct up to the first one)"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = """groups: vec4<u32>,
+}"""
+replace = """groups: vec4<u32>,
+    // aurora-local-patch: scene-impostors-cull-frame-wgsl
+    // scene impostors (scene_panorama.rs): the shown panorama's capture
+    // point and start (w 0: none), the captured one's, then x and y their
+    // draw distances; the planes of the face captured; their stamps
+    panorama: array<vec4<f32>, 3>,
+    panorama_planes: array<vec4<f32>, 6>,
+    panorama_stamps: vec4<u32>,
+}"""
+
+[[patch]]
+id = "scene-impostors-cull-in-panorama"
+why = "the shell test of a panorama (scene_panorama::in_panorama, line for line)"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = "var<workgroup> wg_bins: array<atomic<u32>, BINS>;"
+replace = """// aurora-local-patch: scene-impostors-cull-in-panorama
+// Scene impostors (scene_panorama::in_panorama, kept line for line): the
+// sphere lies wholly beyond the impostor distance of a panorama's capture
+// point (p.w; 0: none) and within its draw distance `reach`, its object
+// unchanged since the capture began.
+fn in_panorama(p: vec4<f32>, reach: f32, stamp: u32, object_stamp: u32, c: vec3<f32>, r: f32) -> bool {
+    let near = length(c - p.xyz) - r;
+    return p.w > 0.0 && object_stamp < stamp && near > p.w && near <= reach;
+}
+
+var<workgroup> wg_bins: array<atomic<u32>, BINS>;"""
+
+[[patch]]
+id = "scene-impostors-cull-face-mask"
+why = "face_mask: the shown panorama takes the far static objects out of the main view; bin 30 gets the face captured, or on a frame with a drawn pick what the panorama stands in for under its pixel (scene_panorama::face_panorama, line for line)"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = """    let d = length(c - frame.eye.xyz);
+    if (d - r > frame.eye.w && !is_avatar) {
+        return 0u;
+    }
+    let fl = frame.sizes.w;
+    // LLAgent::needsRenderHead / LLVOAvatarSelf::updateAttachmentVisibility.
+    let viewed = (o.flags & OBJ_UNSEEN) == 0u && sphere_in(frame.planes, c, r) && !(own_first_person"""
+replace = """let d = length(c - frame.eye.xyz);
+    // scene impostors: the shown panorama stands in for it, the face
+    // captured draws it (scene_panorama::face_panorama, line for line)
+    // aurora-local-patch: scene-impostors-cull-face-mask
+    let impostor = (o.flags & (OBJ_AVATAR | OBJ_RIGGED | OBJ_NO_PROBE | OBJ_NO_IMPOSTOR)) == 0u && o.avatar >= n;
+    let far_front = impostor && in_panorama(frame.panorama[0], frame.panorama[2].x, frame.panorama_stamps.x, o.stamp, c, r);
+    let free = (frame.sizes.w & F_PROBE_SHADOW) == 0u;
+    let pano_face = impostor
+        && free
+        && in_panorama(frame.panorama[1], frame.panorama[2].y, frame.panorama_stamps.y, o.stamp, c, r)
+        && sphere_in(frame.panorama_planes, c, r)
+        && r * frame.dist.z / max(length(c - frame.panorama[1].xyz), 0.1) >= 1.5;
+    // a drawn pick (panorama[2].z 1, the planes its narrowed view): what the
+    // panorama stands in for under its pixel, as the main view draws it
+    let picked = far_front
+        && free
+        && frame.panorama[2].z > 0.0
+        && sphere_in(frame.panorama_planes, c, r)
+        && d - r <= frame.eye.w
+        && r * frame.dist.z / max(d, 0.1) >= 1.5;
+    let pano = pano_face || picked;
+    if (d - r > frame.eye.w && !is_avatar) {
+        let far_pass = f.bits & PASS_BITS;
+        return select(0u, 1u << BIN_PROBE_SHADOW, pano && far_pass >= PASS_OPAQUE && far_pass <= PASS_MASK_2S);
+    }
+    let fl = frame.sizes.w;
+    // LLAgent::needsRenderHead / LLVOAvatarSelf::updateAttachmentVisibility.
+    let viewed = (o.flags & OBJ_UNSEEN) == 0u && sphere_in(frame.planes, c, r) && !far_front && !(own_first_person"""
+
+[[patch]]
+id = "scene-impostors-cull-reach"
+why = "goes with scene-impostors-cull-face-mask: a face only the capture draws goes on"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = "if (!viewed && !shadow_reach && !reflect_reach && !captured && !shelters) {"
+replace = """// aurora-local-patch: scene-impostors-cull-reach
+    if (!viewed && !shadow_reach && !reflect_reach && !captured && !shelters && !pano) {"""
+
+[[patch]]
+id = "scene-impostors-cull-large"
+why = "goes with scene-impostors-cull-face-mask: the capture tests the size itself, from its capture point"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = "if (!large && !captured) {"
+replace = """// aurora-local-patch: scene-impostors-cull-large
+    if (!large && !captured && !pano) {"""
+
+[[patch]]
+id = "scene-impostors-cull-bin"
+why = "goes with scene-impostors-cull-face-mask: the solid faces of the face captured, in bin 30"
+paths = ["crates/aurora-render/src/shaders/cull.wgsl"]
+op = "literal"
+find = """    if (captured && solid) {
+        m |= 1u << BIN_PROBE;
+    }"""
+replace = """if (captured && solid) {
+        m |= 1u << BIN_PROBE;
+    }
+    // aurora-local-patch: scene-impostors-cull-bin
+    if (pano && solid) {
+        m |= 1u << BIN_PROBE_SHADOW;
+    }"""
+
+# --- renderer.rs: the panorama in the frame
+
+[[patch]]
+id = "scene-impostors-backend-field"
+why = "the render thread's backend owns the panorama"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    drawn_pick: crate::drawn_pick::DrawnPick,"
+replace = """drawn_pick: crate::drawn_pick::DrawnPick,
+    // aurora-local-patch: scene-impostors-backend-field
+    /// Scene impostors: the far field's panorama (scene_panorama.rs).
+    panorama: crate::scene_panorama::ScenePanorama,"""
+
+[[patch]]
+id = "scene-impostors-backend-new"
+why = "goes with scene-impostors-backend-field: nothing allocated until the switch is on"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """            label_depth,
+            impostors,"""
+replace = """panorama: Default::default(), // aurora-local-patch: scene-impostors-backend-new
+            label_depth,
+            impostors,"""
+
+[[patch]]
+id = "scene-impostors-refl-groups"
+why = "a tenth frame bind group: the uniforms of the panorama face captured"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """    /// [8] probe irradiance capture.
+    refl: [wgpu::BindGroup; 9],"""
+replace = """/// [8] probe irradiance capture, [9] scene panorama face (local patch
+    /// set).
+    // aurora-local-patch: scene-impostors-refl-groups
+    refl: [wgpu::BindGroup; 10],"""
+
+[[patch]]
+id = "scene-impostors-refl-buffers"
+why = "goes with scene-impostors-refl-groups: its uniform buffer"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    refl_buffers: [wgpu::Buffer; 9],"
+replace = "refl_buffers: [wgpu::Buffer; 10], // aurora-local-patch: scene-impostors-refl-buffers"
+
+[[patch]]
+id = "scene-impostors-refl-buffers-param"
+why = "goes with scene-impostors-refl-groups: make_frame_groups takes the ten"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        refl_buffers: &[wgpu::Buffer; 9],"
+replace = "refl_buffers: &[wgpu::Buffer; 10], // aurora-local-patch: scene-impostors-refl-buffers-param"
+
+[[patch]]
+id = "scene-impostors-refl-buffer"
+why = "goes with scene-impostors-refl-groups: the buffer itself (one frame uniform block)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """            mk_frame_buffer("probe irradiance capture uniforms"),
+        ];"""
+replace = """mk_frame_buffer("probe irradiance capture uniforms"),
+            mk_frame_buffer("scene panorama uniforms"), // aurora-local-patch: scene-impostors-refl-buffer
+        ];"""
+
+[[patch]]
+id = "scene-impostors-refl-group"
+why = "goes with scene-impostors-refl-groups: bound as the other reflection passes (the main shadow atlas, no screen-space inputs)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """                mk(
+                    "frame probe irradiance capture",
+                    &refl_buffers[8],
+                    &dummies.white,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.depth,
+                    &dummies.depth,
+                    &dummies.black,
+                    &dummies.white,
+                    &dummies.black,
+                    points,
+                    false,
+                    false,
+                    None,
+                ),
+            ],"""
+replace = """mk(
+                    "frame probe irradiance capture",
+                    &refl_buffers[8],
+                    &dummies.white,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.depth,
+                    &dummies.depth,
+                    &dummies.black,
+                    &dummies.white,
+                    &dummies.black,
+                    points,
+                    false,
+                    false,
+                    None,
+                ),
+                // aurora-local-patch: scene-impostors-refl-group
+                // (as the impostors': no traced glass, the place open)
+                mk(
+                    "frame scene panorama",
+                    &refl_buffers[9],
+                    &dummies.white,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.black,
+                    &dummies.depth,
+                    &dummies.depth,
+                    &dummies.black,
+                    &dummies.white,
+                    &dummies.black,
+                    &dummies.white,
+                    false,
+                    false,
+                    None,
+                ),
+            ],"""
+
+[[patch]]
+id = "scene-impostors-plan"
+why = "the panorama's part of the frame: what it may do, the face it captures and that face's uniforms"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        let gpu = lists.gpu.filter(|_| self.gpu_cull);"
+replace = """let gpu = lists.gpu.filter(|_| self.gpu_cull);
+        // ---- scene impostors (scene_panorama.rs): the panorama's part of
+        // this frame, and the uniforms of the face it captures
+        // aurora-local-patch: scene-impostors-plan
+        let scene_pano = {
+            let state = crate::scene_panorama::FrameState {
+                params: f.panorama,
+                // GPU lists, the window's own frame, above the water (the
+                // captures see the water's fog as an eye above it does)
+                usable: gpu.is_some() && snapshot.is_none() && !f.cutout && f.camera_pos.z >= camera_water_level,
+                // (a drawn pick: bin 30 holds the panorama's faces under it)
+                pick: pick_vp,
+                // (bin 30 holds the probe shadow map's casters this frame)
+                capture: probe_shadow_now.is_none(),
+                eye: f.camera_pos,
+                look: crate::scene_panorama::Look::of(
+                    f,
+                    crate::scene_panorama::face_size(world_size.1, f.fov_y, self.device.limits().max_texture_dimension_2d),
+                ),
+                now: Instant::now(),
+                view_proj: eye_view_proj(fu.proj, fu.view, fu.camera_pos, true),
+                scene_size: world_size,
+                samples: self.targets.depth_msaa_tex.as_ref().map_or(1, |t| t.sample_count()),
+                formats: crate::scene_panorama::Formats {
+                    colour: HDR_FORMAT,
+                    depth: DEPTH_FORMAT,
+                    // the G-buffer's format follows Reflection precision: the target's own
+                    gbuf: self.targets.gbuf.as_ref().map(|view| view.texture().format()),
+                },
+            };
+            self.panorama.plan(&self.device, &self.queue, &state)
+        };
+        if let Some(c) = &scene_pano.capture {
+            let mut pf = f.clone();
+            pf.shadows = false;
+            pf.proj = crate::scene_panorama::face_proj();
+            let mut u = self.frame_uniforms(&pf, crate::probes::face_view(c.centre, c.face), None, &cascades, &splits);
+            // 2: a cube face's view is mirrored (probes::face_view); lit by
+            // the probes as the main view is, with its tangent frame and its
+            // specular anti-aliasing; no clip plane
+            u.misc = [0.0, 0.0, 0.0, 2.0];
+            u.clip_plane = [0.0; 4];
+            let shading = main.light_sets.mode[2] & crate::scene_panorama::MAIN_SHADING_BITS;
+            u.light_sets.mode[2] |= crate::probes::capture_lighting::LIT | shading;
+            let n = c.size as f32;
+            u.screen = [n, n, 1.0 / n, 1.0 / n];
+            self.queue.write_buffer(&self.refl_buffers[9], 0, bytemuck::bytes_of(&u));
+        }"""
+
+[[patch]]
+id = "scene-impostors-cull-vectors"
+why = "goes with scene-impostors-plan: the culling's panorama vectors of the frame"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """            if let Some(c) = &capture {
+                frame.probe_eye = c.origin.extend(c.reach).to_array();
+            }"""
+replace = """if let Some(c) = &capture {
+                frame.probe_eye = c.origin.extend(c.reach).to_array();
+            }
+            (frame.panorama, frame.panorama_planes, frame.panorama_stamps) = scene_pano.cull; // aurora-local-patch: scene-impostors-cull-vectors"""
+
+[[patch]]
+id = "scene-impostors-depth"
+why = "the panorama's depth into the single-sample depth right after the prepass, with every anti-aliasing: the occlusion depth, the ambient occlusion and the contact shadows read it before the scene pass (with MSAA also the hover, the clicks, TAA and the depth of field)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """        if gpu_on {
+            cull.copy_counts(&mut encoder);
+        }
+
+        prof.mark("prepass");"""
+replace = """if gpu_on {
+            cull.copy_counts(&mut encoder);
+        }
+        // the scene impostors' panorama into the single-sample depth, before
+        // the occlusion depth, the ambient occlusion and the contact shadows
+        // read it (with MSAA the scene pass has a depth of its own; without,
+        // it starts from this one: scene_panorama::encode_depth)
+        // aurora-local-patch: scene-impostors-depth
+        self.panorama.encode_depth(&mut encoder, &self.targets.depth_ss);
+
+        prof.mark("prepass");"""
+
+[[patch]]
+id = "scene-impostors-capture"
+why = "the face of the panorama captured this frame: bin 30 drawn with fs_reflect from the capture point"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """        prof.mark("reflections");
+        mark(&mut encoder, MARK_REFL_END);"""
+replace = """// ---- scene impostors: the face of the panorama captured this frame
+        // (scene_panorama.rs), colour and depth, kept for the composite
+        // aurora-local-patch: scene-impostors-capture
+        if let Some(c) = &scene_pano.capture
+            && let Some((colour, depth)) = self.panorama.capture_views(c)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene panorama capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: colour,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            bind_mesh(&mut pass, &self.groups.refl[9]);
+            draw_bin(&mut pass, Some(&self.pipelines.refl_obj), BIN_PROBE_SHADOW, BIN_PROBE_SHADOW);
+        }
+
+        prof.mark("reflections");
+        mark(&mut encoder, MARK_REFL_END);"""
+
+[[patch]]
+id = "scene-impostors-composite"
+why = "the shown panorama drawn into scene pass A after everything opaque, before anything blended"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """                pass.draw(0..6, 0..n_sprites as u32);
+            }
+        }
+
+        prof.mark("scene_a");"""
+replace = """pass.draw(0..6, 0..n_sprites as u32);
+            }
+            // the scene impostors' panorama, last: it binds its own group 0
+            // aurora-local-patch: scene-impostors-composite
+            self.panorama.draw_composite(&mut pass);
+        }
+
+        prof.mark("scene_a");"""
+
+[[patch]]
+id = "scene-impostors-pick-defer-out"
+why = "the drawn pick begins after the probes' capture is known (scene-impostors-pick-defer-in): a frame with a probe shadow map has bin 30, which the pick needs while a panorama is shown"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """        // a pixel whose drawn faces are asked: the same camera, narrowed to it
+        let main_vp = Mat4::from_cols_array_2d(&main.view_proj);
+        // (asked in window pixels: a photo frame answers none of them)
+        let drawn_px = if snapshot.is_none() {
+            self.drawn_pick.begin(
+                (self.config.width, self.config.height),
+                main_vp.inverse(),
+                unjittered_vp.inverse(),
+                Curvature::new(f.camera_pos, f.curvature),
+            )
+        } else {
+            None
+        };
+        if let Some((x, y, mode)) = drawn_px {
+            let narrow = crate::drawn_pick::narrow(x, y, self.config.width, self.config.height);
+            let mut u = main;
+            // (its group binds no soft shadow mask)
+            u.soft[0] = 0.0;
+            u.soft[3] = u8::from(mode.through_ignored()) as f32;
+            u.view_proj = (narrow * main_vp).to_cols_array_2d();
+            u.eye_view_proj = (narrow * Mat4::from_cols_array_2d(&main.eye_view_proj)).to_cols_array_2d();
+            self.queue.write_buffer(&self.refl_buffers[6], 0, bytemuck::bytes_of(&u));
+        }"""
+replace = """// (the drawn pick begins after the probes' capture: scene impostors)
+        // aurora-local-patch: scene-impostors-pick-defer-out"""
+
+[[patch]]
+id = "scene-impostors-pick-defer-in"
+why = "goes with scene-impostors-pick-defer-out: the same pick, after the probes' capture, waiting one frame when a probe shadow map takes bin 30 while a panorama may be shown; its narrowed view goes to the panorama's plan"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "        // impostor pictures: lit like the scene, seen from the camera"
+replace = """// a pixel whose drawn faces are asked: the same camera, narrowed to it
+        // (here, once the probes' capture is known: a probe shadow map takes
+        // bin 30, which holds the faces the scene impostors' panorama stands
+        // in for under the pixel; the pick then waits one frame,
+        // scene_panorama::ScenePanorama::pick_waits)
+        // aurora-local-patch: scene-impostors-pick-defer-in
+        let main_vp = Mat4::from_cols_array_2d(&main.view_proj);
+        // (asked in window pixels: a photo frame answers none of them)
+        let drawn_px = if snapshot.is_none() && !self.panorama.pick_waits(probe_shadow_now.is_some()) {
+            self.drawn_pick.begin(
+                (self.config.width, self.config.height),
+                main_vp.inverse(),
+                unjittered_vp.inverse(),
+                Curvature::new(f.camera_pos, f.curvature),
+            )
+        } else {
+            None
+        };
+        if let Some((x, y, mode)) = drawn_px {
+            let narrow = crate::drawn_pick::narrow(x, y, self.config.width, self.config.height);
+            let mut u = main;
+            // (its group binds no soft shadow mask)
+            u.soft[0] = 0.0;
+            u.soft[3] = u8::from(mode.through_ignored()) as f32;
+            u.view_proj = (narrow * main_vp).to_cols_array_2d();
+            u.eye_view_proj = (narrow * Mat4::from_cols_array_2d(&main.eye_view_proj)).to_cols_array_2d();
+            self.queue.write_buffer(&self.refl_buffers[6], 0, bytemuck::bytes_of(&u));
+        }
+        let pick_vp = drawn_px.map(|(x, y, _)| crate::drawn_pick::narrow(x, y, self.config.width, self.config.height) * main_vp);
+        // impostor pictures: lit like the scene, seen from the camera"""
+
+[[patch]]
+id = "scene-impostors-pick-pipeline-fields"
+why = "the drawn pick's pipelines for bin 30 (the panorama's faces under the pixel): no culling, the back of a one-sided face left out by the shader (PICK_HELD)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "    pick_mask_2s: wgpu::RenderPipeline,"
+replace = """pick_mask_2s: wgpu::RenderPipeline,
+    // aurora-local-patch: scene-impostors-pick-pipeline-fields
+    /// Scene impostors: bin 30 of a drawn pick, the faces the panorama
+    /// stands in for under the pixel, one- and two-sided together
+    /// (scene_panorama.rs): `pick` / `pick_left` / `pick_mask` with the
+    /// sides tested by the shader.
+    pick_held: wgpu::RenderPipeline,
+    pick_held_left: wgpu::RenderPipeline,
+    pick_held_mask: wgpu::RenderPipeline,"""
+
+[[patch]]
+id = "scene-impostors-pick-pipelines"
+why = "goes with scene-impostors-pick-pipeline-fields: made beside the other pick pipelines"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """        let pick_mask_2s = pipe(PipeDesc {
+            fs: Some("fs_pick_mask"),
+            ..pick_desc("mask interaction pick 2s", None)
+        });"""
+replace = """let pick_mask_2s = pipe(PipeDesc {
+            fs: Some("fs_pick_mask"),
+            ..pick_desc("mask interaction pick 2s", None)
+        });
+        // aurora-local-patch: scene-impostors-pick-pipelines
+        let pick_held = pipe(PipeDesc {
+            constants: &[("PICK_HELD", 1.0)],
+            ..pick_desc("panorama faces pick", None)
+        });
+        let pick_held_left = pipe(PipeDesc {
+            constants: &[("WORLD_LEFT_PICK", 1.0), ("PICK_HELD", 1.0)],
+            ..pick_desc("panorama faces left world pick", None)
+        });
+        let pick_held_mask = pipe(PipeDesc {
+            fs: Some("fs_pick_mask"),
+            constants: &[("PICK_HELD", 1.0)],
+            ..pick_desc("panorama faces mask interaction pick", None)
+        });"""
+
+[[patch]]
+id = "scene-impostors-pick-pipelines-init"
+why = "goes with scene-impostors-pick-pipeline-fields"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """            pick_mask: pick_mask.resolve(&mut done),
+            pick_mask_2s: pick_mask_2s.resolve(&mut done),"""
+replace = """pick_mask: pick_mask.resolve(&mut done),
+            pick_mask_2s: pick_mask_2s.resolve(&mut done),
+            // aurora-local-patch: scene-impostors-pick-pipelines-init
+            pick_held: pick_held.resolve(&mut done),
+            pick_held_left: pick_held_left.resolve(&mut done),
+            pick_held_mask: pick_held_mask.resolve(&mut done),"""
+
+[[patch]]
+id = "scene-impostors-pick-bin"
+why = "the drawn pick finds the faces the shown panorama stands in for: bin 30 after the main bins, in the opaque layer"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """                    (solid_pick, rg.mask, Some(2)),
+                    (solid_pick_2s, rg.mask_2s, Some(3)),
+                ],"""
+replace = """(solid_pick, rg.mask, Some(2)),
+                    (solid_pick_2s, rg.mask_2s, Some(3)),
+                    // the scene impostors' faces under the pixel (bin 30,
+                    // scene_panorama::face_panorama), drawn as the main bins
+                    // would have them
+                    // aurora-local-patch: scene-impostors-pick-bin
+                    (
+                        if left {
+                            &self.pipelines.pick_held_left
+                        } else {
+                            &self.pipelines.pick_held
+                        },
+                        (0, 0),
+                        scene_pano.pick.then_some(BIN_PROBE_SHADOW),
+                    ),
+                ],"""
+
+[[patch]]
+id = "scene-impostors-pick-bin-mask"
+why = "goes with scene-impostors-pick-bin: the masked ones of those faces in the mask interaction layer, as the mask bins"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = """                    (
+                        &self.pipelines.pick_mask_2s,
+                        if mask_interaction { rg.mask_2s } else { (0, 0) },
+                        mask_interaction.then_some(3),
+                    ),"""
+replace = """(
+                        &self.pipelines.pick_mask_2s,
+                        if mask_interaction { rg.mask_2s } else { (0, 0) },
+                        mask_interaction.then_some(3),
+                    ),
+                    // aurora-local-patch: scene-impostors-pick-bin-mask
+                    (
+                        &self.pipelines.pick_held_mask,
+                        (0, 0),
+                        (mask_interaction && scene_pano.pick).then_some(BIN_PROBE_SHADOW),
+                    ),"""
+
+[[patch]]
+id = "scene-impostors-pick-held-override"
+why = "the pick shaders of bin 30 (scene-impostors-pick-pipelines): the sides tested in the shader"
+paths = ["crates/aurora-render/src/shaders/object.wgsl"]
+op = "literal"
+find = "override WORLD_LEFT_PICK: bool = false;"
+replace = """override WORLD_LEFT_PICK: bool = false;
+// aurora-local-patch: scene-impostors-pick-held-override
+// Scene impostors (scene_panorama.rs): the drawn pick of bin 30, where one-
+// and two-sided faces are together and nothing is culled. The back of a
+// one-sided face is left out here, as the main view's culling does, and the
+// mask interaction layer takes the masked faces alone, as the mask bins.
+override PICK_HELD: bool = false;"""
+
+[[patch]]
+id = "scene-impostors-pick-held-facing"
+why = "goes with scene-impostors-pick-held-override: fs_pick"
+paths = ["crates/aurora-render/src/shaders/object.wgsl"]
+op = "literal"
+find = """fn fs_pick(in: PickOut) -> @location(0) vec4<u32> {
+    let rec = records[in.record];"""
+replace = """fn fs_pick(in: PickOut, @builtin(front_facing) front: bool) -> @location(0) vec4<u32> {
+    let rec = records[in.record];
+    // aurora-local-patch: scene-impostors-pick-held-facing
+    if (PICK_HELD && !front && (rec.flags.x & FLAG_DOUBLE_SIDED) == 0u) {
+        discard;
+    }"""
+
+[[patch]]
+id = "scene-impostors-pick-mask-facing"
+why = "goes with scene-impostors-pick-held-override: fs_pick_mask"
+paths = ["crates/aurora-render/src/shaders/object.wgsl"]
+op = "literal"
+find = """fn fs_pick_mask(in: PickOut) -> @location(0) vec4<u32> {
+    let rec = records[in.record];"""
+replace = """fn fs_pick_mask(in: PickOut, @builtin(front_facing) front: bool) -> @location(0) vec4<u32> {
+    let rec = records[in.record];
+    // aurora-local-patch: scene-impostors-pick-mask-facing
+    if (PICK_HELD && !front && (rec.flags.x & FLAG_DOUBLE_SIDED) == 0u) {
+        discard;
+    }
+    if (PICK_HELD && (rec.flags.x & FLAG_ALPHA_MASK) == 0u) {
+        discard;
+    }"""
+
+[[patch]]
+id = "scene-impostors-test-pick-fragments"
+why = "goes with scene-impostors-pick-held-facing: the pick threshold test lifts fs_pick out of object.wgsl as a plain function, which takes no builtin attribute"
+paths = ["crates/aurora-render/src/blend_tests.rs"]
+op = "literal"
+find = """fragments.push_str(&object[start..end].replace("@location(0) ", ""));"""
+replace = """// aurora-local-patch: scene-impostors-test-pick-fragments
+        fragments.push_str(
+            &object[start..end]
+                .replace("@location(0) ", "")
+                .replace("@builtin(front_facing) ", ""),
+        );"""
+
+[[patch]]
+id = "scene-impostors-test-pick-defs"
+why = "goes with scene-impostors-pick-held-facing: what the lifted fs_pick now reads (the main view's picks: PICK_HELD off)"
+paths = ["crates/aurora-render/src/blend_tests.rs"]
+op = "literal"
+find = "override WORLD_LEFT_PICK:bool=false;"
+replace = """override WORLD_LEFT_PICK:bool=false;
+override PICK_HELD:bool=false;
+const FLAG_DOUBLE_SIDED:u32={double}u; // aurora-local-patch: scene-impostors-test-pick-defs"""
+
+[[patch]]
+id = "scene-impostors-test-pick-call"
+why = "goes with scene-impostors-pick-held-facing: fs_pick takes the side"
+paths = ["crates/aurora-render/src/blend_tests.rs"]
+op = "literal"
+find = "@fragment fn interaction(v:PickOut)->@location(0) vec4<u32> {{frame.soft.w=select(0.0,1.0,WORLD_LEFT_PICK);return fs_pick(v);}}"
+replace = """@fragment fn interaction(v:PickOut)->@location(0) vec4<u32> {{frame.soft.w=select(0.0,1.0,WORLD_LEFT_PICK);return fs_pick(v, true);}} // aurora-local-patch: scene-impostors-test-pick-call"""
+
+[[patch]]
+id = "scene-impostors-test-pick-flag"
+why = "goes with scene-impostors-test-pick-defs: the flag's value"
+paths = ["crates/aurora-render/src/blend_tests.rs"]
+op = "literal"
+find = """        ignore_object = flags::IGNORE_OBJECT_PICK,
+    );"""
+replace = """ignore_object = flags::IGNORE_OBJECT_PICK,
+        double = flags::DOUBLE_SIDED, // aurora-local-patch: scene-impostors-test-pick-flag
+    );"""
+
+[[patch]]
+id = "scene-impostors-xr"
+why = "a headset's eyes draw everything as usual (each its own backend and history)"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "            p.params.photo_context = crate::types::PhotoContext::None;"
+replace = """p.params.photo_context = crate::types::PhotoContext::None;
+            p.params.panorama.active = false; // aurora-local-patch: scene-impostors-xr"""
+
+# ------------------------------------------------------------ viewer crate
+
+[[patch]]
+id = "scene-impostors-viewer-module"
+why = "the rule, the stamps and the frame's parameters, with their unit tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene_impostors.rs"]
+source = "files/scene-impostors/scene_impostors.rs"
+
+[[patch]]
+id = "scene-impostors-viewer-mod"
+why = "declare the module"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = "mod scene;"
+replace = """mod scene;
+mod scene_impostors; // aurora-local-patch: scene-impostors-viewer-mod"""
+
+[[patch]]
+id = "scene-impostors-frame"
+why = "the frame's parameters: the switch, the distances, the agent's region, the render origin, the world screen"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """            mirror,
+            probes,
+            wireframe:"""
+replace = """mirror,
+            probes,
+            // aurora-local-patch: scene-impostors-frame
+            panorama: crate::scene_impostors::frame(
+                self.settings.scene_impostors,
+                self.settings.impostor_distance,
+                self.settings.draw_distance,
+                self.world.main_region,
+                self.world.main_origin(),
+                matches!(self.screen, Screen::World),
+            ),
+            wireframe:"""
+
+# --- settings and Preferences
+
+[[patch]]
+id = "scene-impostors-settings"
+why = "the switch and the distance in settings.json; Settings is serde(default), older files read them as off and 120 m"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "    pub draw_stepping: Option<draw_stepping::Stepping>,"
+replace = """pub draw_stepping: Option<draw_stepping::Stepping>,
+    // aurora-local-patch: scene-impostors-settings
+    /// Scene impostors (Preferences › Graphics › Quality; local patch set):
+    /// the objects wholly beyond `impostor_distance` are drawn from a
+    /// panorama redrawn as the camera moves (scene_impostors.rs). Off.
+    pub scene_impostors: bool,
+    /// Where the scene impostors begin: 120 m, 64 to 1,024 m; used only
+    /// when shorter than the draw distance.
+    pub impostor_distance: f32,"""
+
+[[patch]]
+id = "scene-impostors-defaults"
+why = "goes with scene-impostors-settings: off, 120 m"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = """            draw_distance_stepping_interval: 20,
+            draw_stepping: None,"""
+replace = """draw_distance_stepping_interval: 20,
+            draw_stepping: None,
+            scene_impostors: false, // aurora-local-patch: scene-impostors-defaults
+            impostor_distance: 120.0,"""
+
+[[patch]]
+id = "scene-impostors-sanitize"
+why = "goes with scene-impostors-settings: the distance read back within its range"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "        self.draw_distance_stepping_interval = self.draw_distance_stepping_interval.clamp(5, 30);"
+replace = """self.draw_distance_stepping_interval = self.draw_distance_stepping_interval.clamp(5, 30);
+        // aurora-local-patch: scene-impostors-sanitize
+        self.impostor_distance = if self.impostor_distance.is_finite() {
+            self.impostor_distance.clamp(64.0, 1024.0)
+        } else {
+            120.0
+        };"""
+
+[[patch]]
+id = "scene-impostors-page"
+why = "the switch after the draw distance and its stepping, the distance behind its cog (greyed while it is off)"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = """            tr!("ui-options-draw-distance-stepping"),
+            tr!("ui-options-draw-distance-stepping-hint"),
+            &field!(draw_distance_stepping),
+        );"""
+replace = """tr!("ui-options-draw-distance-stepping"),
+            tr!("ui-options-draw-distance-stepping-hint"),
+            &field!(draw_distance_stepping),
+        );
+        // aurora-local-patch: scene-impostors-page
+        // local addition: the far field from a panorama (scene_impostors.rs)
+        cx.keywords("impostor panorama far").toggle(
+            tr!("ui-options-scene-impostors"),
+            tr!("ui-options-scene-impostors-help"),
+            &field!(scene_impostors),
+        );
+        let off = !cx.s.scene_impostors;
+        cx.subs(off, |cx| {
+            cx.slider(
+                tr!("ui-options-impostor-distance"),
+                tr!("ui-options-impostor-distance-help"),
+                &field!(impostor_distance),
+                64.0..=1024.0,
+                " m",
+            );
+        });"""
+
+[[patch]]
+id = "scene-impostors-options-demo"
+why = "AURORA_DEMO_OPTIONS=graphics:impostors reveals the switch (impostors-cogs: with the cogs open)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = """        "proxy" => row(Page::Network, 0, tr!("ui-options-proxy-direct-voice")),
+        _ => None,"""
+replace = """"proxy" => row(Page::Network, 0, tr!("ui-options-proxy-direct-voice")),
+        "impostors" | "impostors-cogs" => row(Page::Graphics, 0, tr!("ui-options-scene-impostors")), // aurora-local-patch: scene-impostors-options-demo
+        _ => None,"""
+
+[[patch]]
+id = "scene-impostors-options-demo-cogs"
+why = "goes with scene-impostors-options-demo: impostors-cogs opens the cogs"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = """    if what == "auto-accept" || what == "proxy" {
+        st.demo_open_cogs = true;
+    }"""
+replace = """if what == "auto-accept" || what == "proxy" || what == "impostors-cogs" {
+        // aurora-local-patch: scene-impostors-options-demo-cogs
+        st.demo_open_cogs = true;
+    }"""
+
+[[patch]]
+id = "scene-impostors-options-test"
+why = "the distance is behind the switch's cog, after the draw distance and its stepping"
+paths = ["crates/aurora-viewer/src/ui/options/tests.rs"]
+op = "literal"
+find = """#[test]
+fn the_frame_rate_limits_show_under_their_switches() {"""
+replace = """// aurora-local-patch: scene-impostors-options-test
+#[test]
+fn the_impostor_distance_is_behind_the_scene_impostors_cog() {
+    let mut frames = Frames::new();
+    let (mut s, mut st, mut r) = (Settings::default(), OptionsUi::default(), OptionsResult::default());
+    let distance = aurora_i18n::tr!("ui-options-impostor-distance");
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 0, Vec::new());
+    }
+    assert!(!s.scene_impostors && s.impostor_distance == 120.0, "off, 120 m");
+    assert!(!texts.iter().any(|t| t.source == distance), "behind its cog at first");
+    let stepping = texts
+        .iter()
+        .find(|t| t.source == aurora_i18n::tr!("ui-options-draw-distance-stepping"))
+        .expect("the stepping row")
+        .rect;
+    let row = texts
+        .iter()
+        .find(|t| t.source == aurora_i18n::tr!("ui-options-scene-impostors"))
+        .expect("the switch")
+        .rect;
+    assert!(row.top() > stepping.bottom(), "after the draw distance and its stepping");
+    let cog = texts
+        .iter()
+        .find(|t| t.source == "1" && (t.rect.center().y - row.center().y).abs() < 6.0 && t.rect.left() > row.right())
+        .expect("its cog")
+        .rect;
+    for events in click(cog.center() - egui::vec2(6.0, 0.0)) {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 0, events);
+    }
+    for _ in 0..2 {
+        texts = page_frame(&mut frames, &mut s, &mut st, &mut r, Page::Graphics, 0, Vec::new());
+    }
+    assert!(texts.iter().any(|t| t.source == distance), "shown once the cog is open");
+}
+
+#[test]
+fn the_frame_rate_limits_show_under_their_switches() {"""
+
+# --- the scene: what never goes into the panorama
+
+[[patch]]
+id = "scene-impostors-objgpu"
+why = "an object kept near (selection, edited faces, highlights, marks) and one whose faces a panorama would freeze or must not hold"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = """    /// Has blended or glowing faces: still listed by the CPU when the GPU
+    /// culls the other draws (gpu_cull.rs).
+    pub special: bool,"""
+replace = """/// Has blended or glowing faces: still listed by the CPU when the GPU
+    /// culls the other draws (gpu_cull.rs).
+    pub special: bool,
+    // aurora-local-patch: scene-impostors-objgpu
+    /// Scene impostors: selected, edited, highlighted or marked, drawn as
+    /// usual and never from the panorama (`Scene::sync_keep_near`).
+    pub keep_near: bool,
+    /// Scene impostors: a texture animation (the vertex shaders play it)
+    /// or a water exclusion face, never in the panorama.
+    pub live_faces: bool,
+    /// Scene impostors: its last sync swapped its level of detail and
+    /// nothing else (`scene_impostors::other_detail`): its entry keeps the
+    /// stamp a panorama holds it by (`scene_panorama::detail_stamp`).
+    pub lod_swap: bool,"""
+
+[[patch]]
+id = "scene-impostors-flag"
+why = "goes with scene-impostors-objgpu: the object table's NO_IMPOSTOR flag (blended and glowing faces too)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "cull_object"
+find = "(self.hidden, object_flags::HIDDEN),"
+replace = """(self.hidden, object_flags::HIDDEN),
+            // aurora-local-patch: scene-impostors-flag
+            // (and what the photo's isolation leaves unseen: upstream's
+            // UNSEEN keeps it out of the main view, the panorama too)
+            (
+                self.special || self.keep_near || self.live_faces || self.unseen,
+                object_flags::NO_IMPOSTOR,
+            ),"""
+
+[[patch]]
+id = "scene-impostors-stamp"
+why = "goes with scene-impostors-object-stamp: each entry written carries the frame's stamp (0 while off)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "cull_object"
+find = """            binds: posed.map_or(0, |p| p.binds),
+            _pad: 0,"""
+replace = """binds: posed.map_or(0, |p| p.binds),
+            stamp: crate::scene_impostors::stamp(), // aurora-local-patch: scene-impostors-stamp"""
+
+[[patch]]
+id = "scene-impostors-live-faces"
+why = "goes with scene-impostors-objgpu: found from the faces each time they are built"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "finish_faces"
+find = "g.special = is_special(&g.faces);"
+replace = """g.special = is_special(&g.faces);
+        // aurora-local-patch: scene-impostors-live-faces
+        // (the scene impostors' panorama would freeze a texture animation)
+        g.live_faces = g
+            .faces
+            .iter()
+            .any(|f| f.water_exclusion() || renderer.records.get(f.record).is_some_and(|r| r.flags[0] & flags::TEX_ANIM != 0));"""
+
+[[patch]]
+id = "scene-impostors-lod-swap"
+why = "goes with scene-impostors-objgpu: a sync that binds another level of detail of the same shape, and nothing else"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "sync_object"
+find = "if let Some(k) = bind_new {"
+replace = """// aurora-local-patch: scene-impostors-lod-swap
+        self.gpu[idx].lod_swap = !shape_dirty && crate::scene_impostors::other_detail(previous_geom, bind_new);
+        if let Some(k) = bind_new {"""
+
+[[patch]]
+id = "scene-impostors-lod-swap-stamp"
+why = "goes with scene-impostors-lod-swap: the walk swaps levels of detail far away all the time; they would each make a capture due at once"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = """        for idx in synced {
+            if let Some(g) = self.gpu.get(idx) {
+                renderer.cull.objects.set(idx, g.cull_object(idx));
+                self.pick.set(idx, hover::PickEntry::of(g));
+                self.list_index.set(idx, g);
+            }
+        }"""
+replace = """for idx in synced {
+            if let Some(g) = self.gpu.get_mut(idx) {
+                let mut entry = g.cull_object(idx);
+                // aurora-local-patch: scene-impostors-lod-swap-stamp
+                // (another level of detail keeps the stamp a scene
+                // impostors' panorama holds it by; off, every stamp is 0)
+                if std::mem::take(&mut g.lod_swap)
+                    && entry.stamp != 0
+                    && let Some(old) = renderer.cull.objects.get(idx)
+                {
+                    entry.stamp = aurora_render::scene_panorama::detail_stamp(old, &entry);
+                }
+                renderer.cull.objects.set(idx, entry);
+                self.pick.set(idx, hover::PickEntry::of(g));
+                self.list_index.set(idx, g);
+            }
+        }"""
+
+[[patch]]
+id = "scene-impostors-keep-near-sets"
+why = "goes with scene-impostors-objgpu: the objects kept near, and the next set (its memory reused)"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    give_marks: (Option<usize>, std::collections::HashSet<usize>),"
+replace = """give_marks: (Option<usize>, std::collections::HashSet<usize>),
+    // aurora-local-patch: scene-impostors-keep-near-sets
+    /// Scene impostors: the objects kept near (`sync_keep_near`).
+    keep_near: std::collections::HashSet<usize>,
+    keep_near_next: std::collections::HashSet<usize>,"""
+
+[[patch]]
+id = "scene-impostors-keep-near-init"
+why = "goes with scene-impostors-keep-near-sets"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "            give_marks: Default::default(),"
+replace = """give_marks: Default::default(),
+            keep_near: Default::default(), // aurora-local-patch: scene-impostors-keep-near-init
+            keep_near_next: Default::default(),"""
+
+[[patch]]
+id = "scene-impostors-keep-near"
+why = "goes with scene-impostors-objgpu: the selection, the edited faces, the beacons' highlights and the photo's and the give's marks are kept near; nothing at all while off"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "    /// The photo's isolation (`snapshot::isolate`) and the hidden rendering"
+replace = """// aurora-local-patch: scene-impostors-keep-near
+    /// Scene impostors (scene_impostors.rs): the selection, the edited
+    /// faces, the beacons' highlights and the photo's and the give's marks
+    /// are drawn as usual, never from the panorama (`ObjGpu::keep_near`,
+    /// their outlines and overlays are drawn over their own depth). While
+    /// off, nothing is kept and nothing is done.
+    fn sync_keep_near(&mut self, renderer: &mut Renderer) {
+        let on = crate::scene_impostors::stamp() != 0;
+        if !on && self.keep_near.is_empty() {
+            return;
+        }
+        let mut wanted = std::mem::take(&mut self.keep_near_next);
+        wanted.clear();
+        if on {
+            wanted.extend(self.selection_wire.keys().copied());
+            wanted.extend(self.selection_faces.keys().copied());
+            wanted.extend(self.beacon_highlights.iter().copied());
+            wanted.extend(self.photo_marks.iter().copied());
+            wanted.extend(self.give_marks.1.iter().copied());
+        }
+        if wanted != self.keep_near {
+            for &idx in wanted.symmetric_difference(&self.keep_near) {
+                if let Some(g) = self.gpu.get_mut(idx) {
+                    g.keep_near = wanted.contains(&idx);
+                    renderer.cull.objects.set(idx, g.cull_object(idx));
+                }
+            }
+            std::mem::swap(&mut self.keep_near, &mut wanted);
+        }
+        self.keep_near_next = wanted;
+    }
+
+    /// The photo's isolation (`snapshot::isolate`) and the hidden rendering"""
+
+[[patch]]
+id = "scene-impostors-keep-near-call"
+why = "goes with scene-impostors-keep-near: before the table entries of what was synced are written"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "        self.sync_photo_isolation(renderer, world, &synced);"
+replace = """self.sync_photo_isolation(renderer, world, &synced);
+        self.sync_keep_near(renderer); // aurora-local-patch: scene-impostors-keep-near-call"""
+
+# --- demo
+
+[[patch]]
+id = "scene-impostors-demo-module"
+why = "AURORA_DEMO_SCENE_IMPOSTORS: a far field out to 1 km, the same view with the impostors on or off"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/demo_scene_impostors.rs"]
+source = "files/scene-impostors/demo_scene_impostors.rs"
+
+[[patch]]
+id = "scene-impostors-demo-mod"
+why = "goes with scene-impostors-demo-module: declared beside the water demo"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = """#[path = "demo_water.rs"]
+pub mod water;"""
+replace = """#[path = "demo_water.rs"]
+pub mod water;
+// aurora-local-patch: scene-impostors-demo-mod
+#[path = "demo_scene_impostors.rs"]
+pub mod scene_impostors;"""
+
+[[patch]]
+id = "scene-impostors-demo-step"
+why = "goes with scene-impostors-demo-module: run each frame of the demo, as the water demo"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "        if let Some(mode) = crate::demo::aa_switch::due(&mut self.aa_switch_demo, self.frame_count) {"
+replace = """// aurora-local-patch: scene-impostors-demo-step
+        if self.demo
+            && matches!(self.screen, Screen::World)
+            && crate::demo::scene_impostors::update(
+                &mut self.camera,
+                &mut self.settings,
+                &mut self.world,
+                &mut self.panels,
+                self.frame_count,
+            )
+        {
+            gfx.renderer.apply_settings(self.settings.render_settings());
+        }
+        if let Some(mode) = crate::demo::aa_switch::due(&mut self.aa_switch_demo, self.frame_count) {"""
+
+# --- text
+
+[[patch]]
+id = "scene-impostors-text-en"
+why = "the labels and help of the switch and the distance (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-draw-distance-stepping-hint = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: scene-impostors-text-en
+ui-options-scene-impostors = Scene impostors
+ui-options-scene-impostors-help = Objects beyond the impostor distance are drawn once into a panorama around the camera, redrawn as you move, instead of at every frame: faster with a long draw distance. Avatars, what they wear and selected objects are drawn as usual.
+ui-options-impostor-distance = Impostor distance
+ui-options-impostor-distance-help = Objects wholly beyond this distance go into the panorama (120 m by default), where they get no sun shadows. Used only when it is shorter than the draw distance.'''
+
+[[patch]]
+id = "scene-impostors-text-fr"
+why = "goes with scene-impostors-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-draw-distance-stepping-hint = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: scene-impostors-text-fr
+ui-options-scene-impostors = Imposteurs de la scène
+ui-options-scene-impostors-help = Les objets au-delà de la distance des imposteurs sont dessinés une fois dans un panorama autour de la caméra, redessiné quand vous vous déplacez, au lieu de l'être à chaque image : plus rapide avec une longue distance d'affichage. Les avatars, ce qu'ils portent et les objets sélectionnés sont dessinés comme d'habitude.
+ui-options-impostor-distance = Distance des imposteurs
+ui-options-impostor-distance-help = Les objets entièrement au-delà de cette distance vont dans le panorama (120 m par défaut), où ils ne reçoivent pas les ombres du soleil. Utilisée seulement si elle est plus courte que la distance d'affichage.'''
+
+[[patch]]
+id = "scene-impostors-text-ja"
+why = "goes with scene-impostors-text-en (Japanese: full-width digits and units, です／ます in the help)"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-draw-distance-stepping-hint = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: scene-impostors-text-ja
+ui-options-scene-impostors = シーンのインポスター
+ui-options-scene-impostors-help = インポスター距離より遠いオブジェクトを、毎フレームではなくカメラの周りのパノラマに一度だけ描き、移動に合わせて描き直します。描画距離が長いときに速くなります。アバター、装着物、選択中のオブジェクトはいつもどおり描画されます。
+ui-options-impostor-distance = インポスター距離
+ui-options-impostor-distance-help = この距離より完全に遠いオブジェクトをパノラマに描きます（デフォルトは１２０ｍ）。パノラマでは太陽の影がつきません。描画距離より短いときだけ使われます。'''
+
+# --- docs
+
+[[patch]]
+id = "scene-impostors-testing-table"
+why = "docs/TESTING.md: the demo variable, in the load table beside AURORA_DEMO_OVERDRAW"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_DEMO_OVERDRAW=<n>` \|[^\n]*$'
+replace = '''| `AURORA_DEMO_SCENE_IMPOSTORS=on\|off[:walk]` | A far field out to about 1 km for the scene impostors (local patch set); `off`: the same view drawn as usual <!-- // aurora-local-patch: scene-impostors-testing-table --> |
+\g<0>'''
+
+[[patch]]
+id = "scene-impostors-testing-details"
+why = "docs/TESTING.md: what the demo variable shows and how to compare"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^- \*\*`AURORA_DEMO_OVERDRAW=<n>`\*\*'
+replace = '''- **`AURORA_DEMO_SCENE_IMPOSTORS=on|off[:walk]`** (local patch set): a
+  far field for the scene impostors (Preferences › Graphics › Quality ›
+  Distance and detail). Twenty-four neighbour regions of rolling land and
+  hills around the demo region, about 2,400 boxes and towers from 60 m out
+  to about 1 km, the draw distance at 1,024 m with its stepping off, the
+  camera held from the south-west corner toward the north-east until frame
+  700. `on` turns the impostors on from 120 m 120 frames into the world
+  screen, once the far field is in (the first panorama holds it); `off`
+  draws the same scene as usual. Captures of the two at frame 620 must look
+  the same: the far boxes on their hills, the near hill in front of the far
+  boxes, the fog and the sky alike; the log says `the far field beyond …
+  is drawn from a … px panorama` once it is shown, and `AURORA_PROFILE=1`
+  gives the time each takes. `walk`: from frame 700 the camera goes 5 cm a
+  frame toward the far field (a new panorama every 1.2 m).
+  <!-- // aurora-local-patch: scene-impostors-testing-details -->
+\g<0>'''

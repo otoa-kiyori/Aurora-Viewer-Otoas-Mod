@@ -1,0 +1,1021 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "And": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Anser": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Ant": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Antinous": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Aps": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Aql": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Aqr": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ara": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Ari": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "AtelierTypographique": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Aur": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "BallonAerostatique": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Boo": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CMa": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CMi": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CVn": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cae": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Cam": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cap": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Car": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Cas": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cen": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cep": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cerberus": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Cet": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cha": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Cir": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Cnc": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Col": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Com": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CrA": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CrB": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Crt": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cru": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Crv": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "CustosMessium": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Cyg": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Del": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Dor": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Dra": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Equ": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Eri": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Felis": {
+   "label": "made",
+   "name_box": "made"
+  },
+  "For": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Gem": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "GloriaFrederici": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Gru": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Her": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Hor": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Hya": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Hyi": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Ind": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "LMi": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lac": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Leo": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lep": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lib": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lup": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Lyn": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Lyr": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "MachinaElectrica": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Men": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Mic": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Mon": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Mus": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "MuscaBorealis": {
+   "label": "made",
+   "name_box": "made"
+  },
+  "Noctua": {
+   "label": "made",
+   "name_box": "made"
+  },
+  "Nor": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Oct": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Oph": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ori": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Pav": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Peg": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Per": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Phe": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Pic": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "PsA": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "PsalteriumGeorgii": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Psc": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Pup": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Pyx": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "QuadransMuralis": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Ret": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Scl": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Sco": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Sct": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Ser": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Sex": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Sge": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Sgr": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Tarandus": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Tau": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "TaurusPoniatowski": {
+   "drawing": "adapted",
+   "label": "made",
+   "name_box": "made",
+   "reveal": "made"
+  },
+  "Tel": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "TelescopiumHerschelii": {
+   "label": "made",
+   "name_box": "made"
+  },
+  "TrA": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Tri": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Tuc": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "UMa": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "UMi": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Vel": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Vir": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Vol": {
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "timing": "made"
+  },
+  "Vul": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {
+  "*": {
+   "Anser": "unknown",
+   "Antinous": "unknown",
+   "AtelierTypographique": "unknown",
+   "BallonAerostatique": "unknown",
+   "Cerberus": "unknown",
+   "CustosMessium": "unknown",
+   "Felis": "unknown",
+   "GloriaFrederici": "unknown",
+   "MachinaElectrica": "unknown",
+   "MuscaBorealis": "unknown",
+   "Noctua": "unknown",
+   "PsalteriumGeorgii": "unknown",
+   "QuadransMuralis": "unknown",
+   "Tarandus": "unknown",
+   "TaurusPoniatowski": "unknown",
+   "TelescopiumHerschelii": "unknown"
+  }
+ },
+ "notes": {
+  "And": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Anser": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Ant": {
+   "drawing": "lines only: the drawing was held back (Only two bright stars anchor it and its fainter engraved stars do not follow the catalogue: out-of-sample landing error )"
+  },
+  "Antinous": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Aql": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Aqr": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Ari": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "AtelierTypographique": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Aur": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; hollow star marks and their letters cleared on the texture"
+  },
+  "BallonAerostatique": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Boo": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "CMa": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "CMi": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "CVn": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; stray pieces cleared on the texture"
+  },
+  "Cae": {
+   "drawing": "lines only: the drawing was held back (tool fragments over the top third of its stars only; does not read as the chisels)"
+  },
+  "Cam": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cap": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; hollow star marks and their letters cleared on the texture"
+  },
+  "Cas": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cen": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cep": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cerberus": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cet": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cnc": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Col": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Com": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; wiped star marks inside the body filled from the body tone"
+  },
+  "CrA": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; stray pieces cleared on the texture"
+  },
+  "CrB": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Crt": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Crv": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; stray pieces cleared on the texture"
+  },
+  "CustosMessium": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Cyg": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Del": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Dra": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Equ": {
+   "drawing": "lines only: the drawing was held back (fragments that do not read as a horse's head)"
+  },
+  "Felis": {
+   "drawing": "lines only: the drawing was held back (No bright star anchors it, and after a local fit and new seeds the cat is still blotchy (its colour wash kept as ink) an)"
+  },
+  "For": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Gem": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "GloriaFrederici": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Her": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Hya": {
+   "drawing": "lines only: the drawing was held back (Fitted in three local segments and joined, the snake follows its stick line by eye, but the warp does not reach the stan)"
+  },
+  "LMi": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Lac": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; wiped star marks inside the body filled from the body tone"
+  },
+  "Leo": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Lep": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; hollow star marks and their letters cleared on the texture"
+  },
+  "Lib": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Lup": {
+   "drawing": "lines only: the drawing was held back (Only the wolf's forepaw is engraved, at the plate's left edge; the fragment does not read as a wolf. No local fit was at)"
+  },
+  "Lyn": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Lyr": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "MachinaElectrica": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Mic": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Mon": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "MuscaBorealis": {
+   "drawing": "lines only: the drawing was held back (Only one bright star anchors it, and on the raw-card overlay the catalogue stars do not visibly coincide with the fly's )"
+  },
+  "Noctua": {
+   "drawing": "lines only: the drawing was held back (Its placement does not reach the standard with either fit: out-of-sample landing error 0.61 degrees rms with the card-wi)"
+  },
+  "Oph": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Ori": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Peg": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Per": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "PsA": {
+   "drawing": "lines only: the drawing was held back (a few strokes at the plate edge, not a fish)"
+  },
+  "PsalteriumGeorgii": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Psc": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Pup": {
+   "drawing": "lines only: the drawing was held back (Only part of Argo's stern is engraved (the ship is cut by the plate edge). On the raw-card overlay under the card-wide w)"
+  },
+  "Pyx": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "QuadransMuralis": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Scl": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Sco": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Sct": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Ser": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Sex": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; stray pieces cleared on the texture"
+  },
+  "Sge": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Sgr": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Tarandus": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Tau": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "TaurusPoniatowski": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Tel": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; stray pieces cleared on the texture"
+  },
+  "TelescopiumHerschelii": {
+   "drawing": "lines only: the drawing was held back (On the raw-card overlay its engraved star marks lie about 0.5 to 1 degree from the nearest catalogue stars, and only one)"
+  },
+  "Tri": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "UMa": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted; hollow star marks and their letters cleared on the texture"
+  },
+  "UMi": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Vel": {
+   "drawing": "lines only: the drawing was held back (Only Argo's sail and rigging are engraved (the ship is cut by the plate edge) and Vela's stick figure lies south of the )"
+  },
+  "Vir": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  },
+  "Vul": {
+   "drawing": "cut from the CC0 vector traces of the 1824 cards: washes, paper, star marks, lettering and neighbours' ink removed, refitted"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set urania-1824"
+}

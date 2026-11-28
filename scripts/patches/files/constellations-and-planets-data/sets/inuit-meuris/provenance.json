@@ -1,0 +1,150 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "iu001": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu002": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu003": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu004": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu005": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu006": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu007": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu008": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu009": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu010": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "iu011": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "adapted",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {},
+ "notes": {
+  "iu001": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu002": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu003": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu004": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu005": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu006": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu007": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu008": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu009": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu010": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "iu011": {
+   "drawing": "grey fill and white outer glow dropped, resampled",
+   "lines": "this file has no line where the culture's figure has one; the viewer draws the culture's lines.json"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set inuit-meuris"
+}

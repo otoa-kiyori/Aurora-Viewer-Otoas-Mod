@@ -1,0 +1,102 @@
+# The displayed version counts upstream's commits after the release tag.
+#
+# `git describe` counts every commit after the tag, so this private build,
+# which carries one local commit on top of upstream, showed a number one
+# higher than upstream's own build of the same commit (`+10` for `+9`). The
+# build script now takes the local commits (those that
+# `refs/remotes/origin/main` does not have) off that count. The commit
+# hash stays the checked-out commit's, so the build stays identifiable.
+#
+# - Without that remote-tracking branch (a source archive, no remote) or
+#   when the Git call fails, the local count is 0 and nothing changes.
+# - A build with an explicit release tag (AURORA_VERSION_TAG) is not
+#   reduced: it must still describe exactly the tagged commit.
+# - When the local commit sits directly on a tag the count becomes 0, which
+#   the version resolver prints as the bare release number. The display then
+#   keeps `+0.g<commit>`, so this build never passes for the official one.
+# - The login version sent to the grid (`major.minor.patch.<count>`) comes
+#   from the same count and follows it. Its count matches the upstream
+#   build's of the same commit, and it still grows with upstream's commits.
+# - The build script also watches the loose file of the remote-tracking
+#   branch, so a fetch that moves it refreshes the number (that file is
+#   not in the existing watch list).
+#
+# All logic is in `crates/aurora-version/upstream_count.rs` (pure helpers)
+# with its tests in `crates/aurora-version/tests/upstream_count.rs`; the
+# build script gets four thin hooks. `build_support::resolve` is unchanged.
+#
+# Needs no other patch. Apply or skip the whole file.
+
+[[patch]]
+id = "version-upstream-count-module"
+why = "the pure helpers: reduce the describe count by the local commits, mark an on-tag local build, locate the upstream ref"
+paths = ["crates/aurora-version/upstream_count.rs"]
+op = "add_file"
+source = "files/version-upstream-count/upstream_count.rs"
+
+[[patch]]
+id = "version-upstream-count-tests"
+why = "red-first tests of the helpers: plain tag, dashed tag, count 0, local count above the count, unparsable text"
+paths = ["crates/aurora-version/tests/upstream_count.rs"]
+op = "add_file"
+source = "files/version-upstream-count/upstream_count_tests.rs"
+
+[[patch]]
+id = "version-upstream-count-mod"
+why = "the build script includes the helper module and reruns when it changes"
+paths = ["crates/aurora-version/build.rs"]
+op = "regex"
+pattern = '^mod git_watch;\n'
+replace = '''mod git_watch;
+mod upstream_count; // aurora-local-patch: version-upstream-count-mod
+'''
+
+[[patch]]
+id = "version-upstream-count-rerun"
+why = "rerun when the helper changes or when a fetch moves the upstream branch"
+paths = ["crates/aurora-version/build.rs"]
+op = "literal"
+find = '''println!("cargo:rerun-if-changed=git_watch.rs");'''
+replace = '''println!("cargo:rerun-if-changed=git_watch.rs");
+    println!("cargo:rerun-if-changed=upstream_count.rs"); // aurora-local-patch: version-upstream-count-rerun'''
+
+[[patch]]
+id = "version-upstream-count-watch"
+why = "declare the loose file of the upstream branch, which the watch list leaves out"
+paths = ["crates/aurora-version/build.rs"]
+op = "literal"
+find = '''let tag = std::env::var("AURORA_VERSION_TAG").ok();'''
+replace = '''let git_common = git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]); // aurora-local-patch: version-upstream-count-watch
+    if let Some(path) = upstream_count::upstream_ref_path(git_common.as_deref()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let tag = std::env::var("AURORA_VERSION_TAG").ok();'''
+
+[[patch]]
+id = "version-upstream-count-reduce"
+why = "take the local commits off the describe count before the version is resolved"
+paths = ["crates/aurora-version/build.rs"]
+op = "literal"
+find = '''let commit = git(&root, &["rev-parse", "--short=9", "HEAD"]);'''
+replace = '''let commit = git(&root, &["rev-parse", "--short=9", "HEAD"]);
+    // aurora-local-patch: version-upstream-count-reduce
+    let range = format!("{}..HEAD", upstream_count::UPSTREAM_REF);
+    let local = if tag.is_some() {
+        0
+    } else {
+        upstream_count::local_commits(git(&root, &["rev-list", "--count", &range]).as_deref())
+    };
+    let description = description.map(|text| upstream_count::without_local_commits(&text, local));'''
+
+[[patch]]
+id = "version-upstream-count-mark"
+why = "a local commit directly on a tag keeps its +0.g<commit> instead of the bare release number"
+paths = ["crates/aurora-version/build.rs"]
+op = "literal"
+find = '''.unwrap_or_else(|error| panic!("Cannot determine Aurora's version: {error}"));'''
+replace = '''.unwrap_or_else(|error| panic!("Cannot determine Aurora's version: {error}"));
+    // aurora-local-patch: version-upstream-count-mark
+    let version = build_support::BuildVersion {
+        display: upstream_count::mark_local_build(version.display, description.as_deref(), local, commit.as_deref()),
+        login: version.login,
+    };'''

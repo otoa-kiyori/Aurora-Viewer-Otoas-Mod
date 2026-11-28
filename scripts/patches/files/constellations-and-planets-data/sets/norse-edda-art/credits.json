@@ -1,0 +1,28 @@
+{
+ "credits": [
+  {
+   "holder": "Jakob Eyermann, with Susanne M. Hoffmann (painter not named)",
+   "work": "Illustrations of the Stellarium sky culture 'Norse (Edda)' (skycultures/norse_edda/illustrations)",
+   "licence": "CC BY 4.0",
+   "url": "https://github.com/Stellarium/stellarium/tree/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/norse_edda/illustrations",
+   "imported": "2026-11-25",
+   "note": "Licence line of the culture's description: 'CC BY 4.0'; credit as written there: contributed to Stellarium by Jakob Eyermann consulting with Susanne M. Hoffmann. Stellarium main repository commit e233fa9b3d21e2cafe9c168e6710b627532a7dd4. Changes: background removed, converted to line/tone (ink coverage and a drawing-order channel, no colour), resampled onto the sky with the culture's own three-star anchors. Figures: edAsr, edBif, edFrS, edFrV, edHeim, edHra, edMim, edOxH, edRat, edSer, edThV, edThi, edThor, edToe, edUrd, edVan. edVan holds the whole wolf-and-river painting, including the wolf's jaw of edUlf."
+  },
+  {
+   "holder": "Jonas R. Persson",
+   "work": "Stick lines of the Stellarium sky culture 'Norse', carried in the figure files edThV, edFrV, edAsr, edToe",
+   "licence": "CC BY-SA 4.0",
+   "url": "https://github.com/Stellarium/stellarium/tree/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/norse",
+   "imported": "2026-11-25",
+   "note": "Licence line of the 'norse' culture: 'CC BY-SA 4.0'. The Edda description says: 'Several constellations were taken from the Rimtol gloss and thus from Jonas Persson's sky culture Norse'. The 'norse' culture has no drawings; share-alike applies to these figure files because they carry its lines. Changes: pen order; end points looked up again (within 0.003 deg; the viewer draws the culture's lines)."
+  },
+  {
+   "holder": "Olaf Frohn (d3-celestial)",
+   "work": "Star positions stars.6.json and stars.8.json, used to place the anchors",
+   "licence": "BSD-3-Clause",
+   "url": "https://github.com/ofrohn/d3-celestial/blob/master/LICENSE",
+   "imported": "2026-11-25",
+   "note": "Used for registration only; no star data is shipped in this set. stars.8.json fetched 2026-11-25 from the master branch (not pinned), sha1 85939599e609c0884a7caf611cdc43cb55c426eb."
+  }
+ ]
+}

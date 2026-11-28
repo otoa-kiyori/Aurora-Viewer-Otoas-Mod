@@ -1,0 +1,92 @@
+{
+ "credits": [
+  {
+   "holder": "The Cleveland Museum of Art",
+   "work": "Album of Daoist and Buddhist Themes, leaf 26 (China, Southern Song, 1200s, ink on paper), 2004.1.26: Wenchang's star officials and Santai; the official 上將",
+   "licence": "CC0, stated by the museum: openaccess-api.clevelandart.org/api/artworks/2004.1.26 gives \"share_license_status\": \"CC0\"",
+   "url": "https://clevelandart.org/art/2004.1.26",
+   "imported": "2026-11-26",
+   "note": "Cut out for zh265: paper removed, ink kept, line evened to the set's weight, placed on the stars. File used: openaccess-cdn.clevelandart.org/2004.1.26/2004.1.26_print.jpg (3400 px)."
+  },
+  {
+   "holder": "The Cleveland Museum of Art",
+   "work": "Album of Daoist and Buddhist Themes, leaf 12 (China, Southern Song, 1200s, ink on paper), 2004.1.12: Daoist marshals; the marshal Guan with his glaive",
+   "licence": "CC0, stated by the museum: openaccess-api.clevelandart.org/api/artworks/2004.1.12 gives \"share_license_status\": \"CC0\"",
+   "url": "https://clevelandart.org/art/2004.1.12",
+   "imported": "2026-11-26",
+   "note": "Cut out for zh215: paper removed, ink kept, line evened to the set's weight, placed on the stars. File used: openaccess-cdn.clevelandart.org/2004.1.12/2004.1.12_print.jpg (3400 px)."
+  },
+  {
+   "holder": "The Cleveland Museum of Art",
+   "work": "Album of Daoist and Buddhist Themes, leaf 7 (China, Southern Song, 1200s, ink on paper), 2004.1.7: a deity's procession; the lady attendant at the left",
+   "licence": "CC0, stated by the museum: openaccess-api.clevelandart.org/api/artworks/2004.1.7 gives \"share_license_status\": \"CC0\"",
+   "url": "https://clevelandart.org/art/2004.1.7",
+   "imported": "2026-11-26",
+   "note": "Cut out for zh304: paper removed, ink kept, line evened to the set's weight, placed on the stars. File used: openaccess-cdn.clevelandart.org/2004.1.7/2004.1.7_print.jpg (3400 px)."
+  },
+  {
+   "holder": "National Diet Library, Japan (credit: 国立国会図書館)",
+   "work": "Sancai Tuhui 三才圖會 (Wang Qi, Wang Siyi, 1609), woodblock, NDL copy [14], Qiyong (implements) 5-6: black carriage, bow and arrow, 下澤車 marsh cart",
+   "licence": "Public Domain Mark, stated by the library: dl.ndl.go.jp/api/iiif/2574379/manifest.json gives \"Access Restrictions\": \"PDM\", attribution \"国立国会図書館 National Diet Library, JAPAN\"",
+   "url": "https://dl.ndl.go.jp/pid/2574379",
+   "imported": "2026-11-26",
+   "note": "Cut out (IIIF regions at full resolution; paper and show-through removed, ink kept, placed over the stars): zh031 fr. 55, zh097 fr. 101, zh266 fr. 68. Frame n is https://dl.ndl.go.jp/pid/2574379/1/n."
+  },
+  {
+   "holder": "National Diet Library, Japan (credit: 国立国会図書館)",
+   "work": "Sancai Tuhui 三才圖會 (Wang Qi, Wang Siyi, 1609), woodblock, NDL copy [16], Qiyong (implements) 12, household utensils: 熨斗 iron pan, 圓椅 armchair",
+   "licence": "Public Domain Mark, stated by the library: dl.ndl.go.jp/api/iiif/2574381/manifest.json gives \"Access Restrictions\": \"PDM\", attribution \"国立国会図書館 National Diet Library, JAPAN\"",
+   "url": "https://dl.ndl.go.jp/pid/2574381",
+   "imported": "2026-11-26",
+   "note": "Cut out (IIIF regions at full resolution; paper and show-through removed, ink kept, placed over the stars): zh039 fr. 39, zh065 fr. 17. Frame n is https://dl.ndl.go.jp/pid/2574381/1/n."
+  },
+  {
+   "holder": "National Diet Library, Japan (credit: 国立国会図書館)",
+   "work": "Sancai Tuhui 三才圖會 (Wang Qi, Wang Siyi, 1609), woodblock, NDL copy [26], Niaoshou 1-4: 虎 tiger, 雉 pheasant, 鹿 deer, 牛 ox, 犬 dog, 豕 pig, 羊 sheep, 麕 river deer, 狐 fox, 水馬 water horse",
+   "licence": "Public Domain Mark, stated by the library: dl.ndl.go.jp/api/iiif/2574391/manifest.json gives \"Access Restrictions\": \"PDM\", attribution \"国立国会図書館 National Diet Library, JAPAN\"",
+   "url": "https://dl.ndl.go.jp/pid/2574391",
+   "imported": "2026-11-26",
+   "note": "Cut out (IIIF regions at full resolution; paper and show-through removed, ink kept, placed over the stars): zh003 fr. 105, zh025 fr. 41, zh030 fr. 107, zh016 fr. 108, zh014 fr. 110, zh018 fr. 114, zh007 fr. 116, zh013 fr. 118, zh026 fr. 125, zh027 fr. 131. Frame n is https://dl.ndl.go.jp/pid/2574391/1/n."
+  },
+  {
+   "holder": "National Diet Library, Japan (credit: 国立国会図書館)",
+   "work": "Sancai Tuhui 三才圖會 (Wang Qi, Wang Siyi, 1609), woodblock, NDL copy [27], Niaoshou 5-6 (scaled, shelled creatures): 鼈 softshell turtle, 騰蛇 flying serpent",
+   "licence": "Public Domain Mark, stated by the library: dl.ndl.go.jp/api/iiif/2574392/manifest.json gives \"Access Restrictions\": \"PDM\", attribution \"国立国会図書館 National Diet Library, JAPAN\"",
+   "url": "https://dl.ndl.go.jp/pid/2574392",
+   "imported": "2026-11-26",
+   "note": "Cut out (IIIF regions at full resolution; paper and show-through removed, ink kept, placed over the stars): zh043 fr. 15, zh029 fr. 25. Frame n is https://dl.ndl.go.jp/pid/2574392/1/n."
+  },
+  {
+   "holder": "Karrie Berglund (Digitalis Education Solutions, Inc.)",
+   "work": "Stick lines of the Stellarium sky culture 'Chinese', carried in the figure files of this set",
+   "licence": "CC BY-SA 4.0",
+   "url": "https://github.com/Stellarium/stellarium/tree/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/chinese",
+   "imported": "2026-11-26",
+   "note": "As credited in cultures/chinese/credits.json. Share-alike applies to the figure JSON files because they carry these lines; copied unchanged from cultures/chinese/lines.json."
+  },
+  {
+   "holder": "Sun Shuwei",
+   "work": "Stick lines of the Stellarium sky culture 'Chinese' (after Yi Shitong, 1981), carried in the figure files of this set",
+   "licence": "CC BY-SA 4.0",
+   "url": "https://github.com/Stellarium/stellarium/tree/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/chinese",
+   "imported": "2026-11-26",
+   "note": "As credited in cultures/chinese/credits.json; lines unchanged."
+  },
+  {
+   "holder": "Olaf Frohn (d3-celestial)",
+   "work": "Star positions behind the culture's stick-line positions",
+   "licence": "BSD-3-Clause",
+   "url": "https://github.com/ofrohn/d3-celestial",
+   "imported": "2026-11-26",
+   "note": "As credited in cultures/chinese/credits.json. No star data is shipped in this set beyond the line end points."
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Changes to the cut-outs of this set",
+   "licence": "Own work",
+   "url": "",
+   "imported": "2026-11-26",
+   "note": "All 20: paper and show-through removed, line weight evened, isolated marks removed, placed and scaled over the stars; drawing order added. zh039 mirrored; zh097 joined from two plates of one page opening; zh031 without its team of horses and attendant; a small part of zh266 left out. zh027, zh029, zh065, zh215 and zh304 are stand-ins chosen for their star groups."
+  }
+ ]
+}

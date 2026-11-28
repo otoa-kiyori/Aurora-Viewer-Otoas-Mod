@@ -1,0 +1,117 @@
+# The media plugins' output in the viewer's own log, repeats folded.
+#
+# Upstream starts each plugin process (SLPlugin, one per media instance,
+# and the engine's processes below it) with the viewer's stdout and stderr.
+# A per-frame engine error can then flood whatever reads them (a terminal,
+# the system log) with several lines per video frame, hundreds of MB a day.
+# The error itself is the engine's and cannot be stopped from the viewer;
+# this is the safeguard on our side (files/plugin-output-log/
+# plugin_output.rs, with its tests):
+#
+# - each plugin process gets one pipe for stdout and stderr, drained by a
+#   thread of its own ("media plugin output") into the viewer's log, target
+#   `aurora_media::plugin`, at info level; all plugins share one table and
+#   one rate limit;
+# - the first occurrence of a line is logged in full; repeats are counted
+#   (Chromium's varying `[pid:tid:time:` start ignored, its level, file and
+#   line kept) and reported once a minute, on eviction and when the pipe
+#   closes ("repeated N times in the last M s"); 64 lines remembered, 512
+#   bytes a line, invalid UTF-8 and control characters replaced, at most 2
+#   lines a second after a burst of 120, with a "N lines dropped" line;
+# - the thread is started before the plugin (no thread: the plugin keeps
+#   the viewer's output, as upstream), reads to the end of the pipe, is
+#   never joined (the engine's helpers may hold the pipe after SLPlugin
+#   ends) and does not hold the viewer at exit;
+# - the crash report and the bug report skip these lines (their excerpt
+#   and the crash summary's log reads), so page addresses and console text
+#   printed by a plugin never reach a report; at info level they stay out
+#   of the Dev Toolbox's warning lists too;
+# - AURORA_PLUGIN_OUTPUT=inherit: upstream's behaviour, no pipe and no
+#   thread. Unix only: elsewhere the plugins keep the viewer's output.
+#
+# A local addition: the Legacy Viewer has nothing like it. Stands alone on
+# upstream. One step is glue for 77-trust-engine, which adds
+# PluginProcess::launch_host (its own plugin programs): it gives them the
+# same pipe (glue_for 77's trust-engine-ipc-stream), and reports
+# OPTIONAL-MISSING when 77 is not applied, DRIFT when 77 is there and the
+# step no longer finds its anchor. Must
+# apply after 77 (file order) for that step to find its anchor.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# --------------------------------------------------------------- the module
+
+[[patch]]
+id = "plugin-output-module"
+why = "the pipe, its reader thread, the repeat table and the rate limit, the switch, and the report filter, with tests"
+op = "add_file"
+paths = ["crates/aurora-media/src/plugin_output.rs"]
+source = "files/plugin-output-log/plugin_output.rs"
+
+[[patch]]
+id = "plugin-output-mod"
+why = "declare it; public for the report filter of aurora-viewer"
+paths = ["crates/aurora-media/src/lib.rs"]
+op = "literal"
+find = "pub mod process;"
+replace = """pub mod plugin_output; // aurora-local-patch: plugin-output-mod
+pub mod process;"""
+
+# ----------------------------------------------------------- the launches
+
+[[patch]]
+id = "plugin-output-launch"
+why = "SLPlugin's stdout and stderr go to the pipe before it is started"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+fn = "launch"
+find = "cmd.arg(port.to_string()).current_dir(plugin_dir);"
+replace = """cmd.arg(port.to_string()).current_dir(plugin_dir);
+        crate::plugin_output::attach(&mut cmd, plugin_file); // aurora-local-patch: plugin-output-launch"""
+
+[[patch]]
+id = "plugin-output-launch-host"
+why = "glue for 77-trust-engine: its plugin programs (launch_host) get the same pipe; absent without 77"
+paths = ["crates/aurora-media/src/process.rs"]
+op = "literal"
+glue_for = "trust-engine-ipc-stream"
+find = "cmd.args(args).envs(env.iter().map(|(name, value)| (name, value)));"
+replace = """cmd.args(args).envs(env.iter().map(|(name, value)| (name, value)));
+        crate::plugin_output::attach(&mut cmd, program); // aurora-local-patch: plugin-output-launch-host"""
+
+# ------------------------------------------------------------- the reports
+
+[[patch]]
+id = "plugin-output-excerpt"
+why = "the public excerpt of the crash and bug reports leaves the plugins' lines out"
+paths = ["crates/aurora-viewer/src/crash/privacy.rs"]
+op = "literal"
+fn = "excerpt"
+find = "for line in log.lines() {"
+replace = """for line in log.lines() {
+        // aurora-local-patch: plugin-output-excerpt
+        // the media plugins' own output (aurora_media::plugin_output) is
+        // free text: it never enters a report
+        if aurora_media::plugin_output::is_plugin_line(line) {
+            continue;
+        }"""
+
+[[patch]]
+id = "plugin-output-summary"
+why = "the crash summary reads the session log without the plugins' lines, so none of its rows (GPU, notices…) can quote one"
+paths = ["crates/aurora-viewer/src/crash/summary.rs"]
+op = "literal"
+find = "Ok(String::from_utf8_lossy(&bytes).into_owned())"
+replace = """// aurora-local-patch: plugin-output-summary
+        Ok(aurora_media::plugin_output::without_plugin_lines(&String::from_utf8_lossy(&bytes)))"""
+
+# -------------------------------------------------------------- the docs
+
+[[patch]]
+id = "plugin-output-doc"
+why = "the switch in the variables' table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "| `AURORA_MEDIA_DEBUG=1` | Media diagnostics |"
+replace = """| `AURORA_MEDIA_DEBUG=1` | Media diagnostics |
+| `AURORA_PLUGIN_OUTPUT=inherit` | The media plugins print to the viewer's own output, not to its log with repeats folded <!-- // aurora-local-patch: plugin-output-doc --> |"""

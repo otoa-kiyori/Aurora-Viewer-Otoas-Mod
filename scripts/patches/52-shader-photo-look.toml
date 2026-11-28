@@ -1,0 +1,524 @@
+# "Otoa's Shader" as a photo look: aurora-shader's whole effect chain becomes
+# one look of the photo's look stack, the last of the Creative section of
+# Aurora's looks, so it can be ticked, given a strength and moved among the
+# other looks like any of them.
+#
+# Needs 50-aurora-shader (the host, user_post.rs: Place, prepare_for,
+# encode_layer, ChainAa::for_layer; and the renderer slot it patches, A4 and
+# A5, which these patches change: hence 52, which applies after 50 and 51,
+# the manifests going by file name) and 51-aurora-shader-prefs (the page its
+# settings area opens, aurora_shader::request_open and ICON). Skip all of 52
+# together: the look, its operation and the renderer's use of it go with one
+# another. Without it the frame is exactly 50's.
+#
+# Design (the look renderer is upstream's, unchanged but for two hooks):
+# - The layer is one operation, LookOp::UserChain (looks.rs); the viewer's
+#   resolve gives it only while aurora-shader is installed (the rule of the
+#   Preferences page and toolbar button: the folder has a config.toml), so
+#   without it the lists are upstream's and a saved layer is an unknown look
+#   (named "No filter", not drawn). Master switch off: listed, draws nothing
+#   (as a table whose file is missing), its settings area says so.
+# - Where: Looks::encode becomes encode_chained(.., chain), `encode` its
+#   wrapper. At the chain layer's one pass the caller's closure runs the whole
+#   chain (UserPost::encode_layer: every enabled effect of config.toml in its
+#   order, with their parameters) from the image the layers before left (the
+#   looks' 8-bit gamma-encoded Rgba8Unorm, which is what the chain already
+#   reads under SMAA and between its effects) into the chain's own image of
+#   its usual format; the pass, an identity, lays that over its input at the
+#   layer's strength (0: unchanged, 1: full) and hands it to the later layers.
+#   The comparison line and the photo's coverage come, as for every look,
+#   from the scene before the first layer. A chain asked first gets a plain
+#   layer in front (looks/user_chain.rs `padded`): it never reads the frame's
+#   own input, which can be sRGB.
+# - Never twice: with the layer in the stack and ticked (and the look's
+#   images there), user_post::place() says Layer: the post pass and SMAA
+#   keep their targets, the chain does not run at its slot, and it runs at
+#   the layer's place on the live view of the photo mode and on the photo,
+#   whatever `[host] photos` says (it was asked for as a look). Without the
+#   layer, or ticked off, the frame is 50's (photos follow `photos`); outside
+#   the photo mode nothing changes. One chain a frame: a second "Otoa's
+#   Shader" layer leaves the image as it is (one history, one set of frame
+#   uniforms).
+# - Depth and normals: the same FrameInputs as at the slot, built in the same
+#   place (post_depth at the chain's size, FSR's display depth when it
+#   upscales; GTAO's mesh normals; the water surface; the photo's tile and
+#   pixel scale; the jitter), so ink lines see the same scene, on tiled and
+#   high-resolution photos too. The looks and the chain both work at
+#   post_size.
+# - AA (ChainAa::for_layer): the image there is already anti-aliased by the
+#   frame's own AA and may carry earlier looks (grain, blur), so it is never
+#   smoothed again as a whole: SMAA, FXAA and MSAA give the masked FXAA
+#   (only the chain's own sharp changes). Under TAA and FSR the effects
+#   still read the jittered depth, so on the live view the chain's change is
+#   resolved over the frames as at its slot (ChainAa::Temporal, its history
+#   keyed to the place too); a photo is one frame: the masked FXAA. AA off,
+#   or an MSAA the GPU lacks: none.
+# - The Photo window's, the viewfinder's and the Director's Filters tab's
+#   looks editor (all use ui/looks_editor.rs, both interface styles): the
+#   Director's films can take the look too. The entry and the strength, then a note
+#   and "Open Otoa's Shader" (Preferences on the page, as the toolbar button
+#   does); the chain's content and parameters stay there. The editor edits a
+#   `Stack` (upstream's), so the World filters window (`ui/world_look.rs`,
+#   the world's own stack, off by default) lists the look too: there the
+#   chain draws at its layer's place on the live 3D view instead of at its
+#   slot, still once a frame.
+# - Demo: AURORA_DEMO_PHOTO_LOOK takes `aurora:otoa-shader` and a new `off`
+#   token (the last layer ticked off), docs/TESTING.md.
+
+# --- the look renderer (aurora-render)
+
+[[patch]]
+id = "shader-look-render-module"
+why = "the chain's layer in the look stack: its closure type, its rules (padded, draws) and its GPU tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/looks/user_chain.rs"]
+source = "files/shader-photo-look/user_chain.rs"
+
+[[patch]]
+id = "shader-look-render-mod"
+why = "declare the submodule (it reads the looks' private images in its tests)"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+find = "mod parse;"
+replace = """mod parse;
+mod user_chain; // aurora-local-patch: shader-look-render-mod"""
+
+[[patch]]
+id = "shader-look-render-use"
+why = "the renderer asks whether a frame's looks hold the chain"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "regex"
+pattern = '^pub use parse::\{[^\n]*\};\n'
+replace = '''\g<0>pub(crate) use user_chain::{UserChain, has_user_chain}; // aurora-local-patch: shader-look-render-use
+'''
+
+[[patch]]
+id = "shader-look-op"
+why = "the layer's one operation: aurora-shader's whole chain at its place"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+find = """    /// The look's 3D look-up table (`PhotoLook::lut`).
+    Lut,
+}"""
+replace = """/// The look's 3D look-up table (`PhotoLook::lut`).
+    Lut,
+    /// aurora-shader's whole effect chain at this layer's place, the only
+    /// operation of its layer ("Otoa's Shader", local patch set,
+    /// `user_chain.rs`): drawn by the caller of `Looks::encode_chained`.
+    UserChain, // aurora-local-patch: shader-look-op
+}"""
+
+[[patch]]
+id = "shader-look-op-slots"
+why = "it has no settings of its own (they are on the Preferences page)"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+fn = "slots"
+find = "LookOp::Sepia | LookOp::GrayScale | LookOp::Lut => Vec::new(),"
+replace = "LookOp::Sepia | LookOp::GrayScale | LookOp::Lut | LookOp::UserChain => Vec::new(), // aurora-local-patch: shader-look-op-slots"
+
+[[patch]]
+id = "shader-look-op-pointwise-test"
+why = "upstream's 360° snapshot test classifies every operation with no wildcard; the chain holds blurs, vignettes and depth effects, so it is not pointwise (is_pointwise already says false for it)"
+paths = ["crates/aurora-render/src/looks/tests.rs"]
+op = "literal"
+find = "| LookOp::Subject { .. } => false,"
+replace = """| LookOp::Subject { .. }
+            | LookOp::UserChain => false, // aurora-local-patch: shader-look-op-pointwise-test"""
+
+[[patch]]
+id = "shader-look-encode"
+why = "encode keeps its signature and calls encode_chained, which takes the closure that draws the chain"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+find = """pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        look: &PhotoLook,
+        target: &wgpu::TextureView,
+        depth: Option<LookDepth>,
+    ) -> u32 {"""
+replace = """// (the frame calls `encode_chained`; the catalogue's tile pictures and
+    // the tests this, without the chain: its layer is then an identity)
+    pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        look: &PhotoLook,
+        target: &wgpu::TextureView,
+        depth: Option<LookDepth>,
+    ) -> u32 {
+        // aurora-local-patch: shader-look-encode
+        self.encode_chained(device, queue, encoder, look, target, depth, None)
+    }
+
+    /// [`Self::encode`], with aurora-shader's chain drawn by `chain` at the
+    /// place of its layer (`LookOp::UserChain`, `user_chain.rs`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_chained(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        look: &PhotoLook,
+        target: &wgpu::TextureView,
+        depth: Option<LookDepth>,
+        mut chain: Option<&mut UserChain<'_>>,
+    ) -> u32 {"""
+
+[[patch]]
+id = "shader-look-pad"
+why = "the chain first: a plain layer before it, so that it reads the looks' 8-bit image, never the frame's input"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+fn = "encode_chained"
+find = "let layers = &look.layers[..look.layers.len().min(MAX_LAYERS)];"
+replace = """let layers = &look.layers[..look.layers.len().min(MAX_LAYERS)];
+        // aurora-local-patch: shader-look-pad
+        // "Otoa's Shader" first: a plain layer before it (user_chain.rs)
+        let padded = user_chain::padded(layers);
+        let layers = padded.as_deref().unwrap_or(layers);
+        // one chain a frame
+        let mut chain_drawn = false;"""
+
+[[patch]]
+id = "shader-look-draw"
+why = "the chain's layer: its pass reads the chain's result, drawn from the image the layers before left"
+paths = ["crates/aurora-render/src/looks.rs"]
+op = "literal"
+fn = "encode_chained"
+find = "let src = if at.local == 0 { layer_input } else { &t.inter[(at.local - 1) % 2] };"
+replace = """let src = if at.local == 0 { layer_input } else { &t.inter[(at.local - 1) % 2] };
+            // aurora-local-patch: shader-look-draw
+            // "Otoa's Shader": the chain from the image the layers before
+            // left (never the first layer: `user_chain::padded`)
+            let chained = match chain.as_deref_mut() {
+                Some(draw) if l > 0 && at.local == 0 && !chain_drawn && user_chain::draws(&layers[l]) => {
+                    chain_drawn = true;
+                    draw(&mut *encoder, layer_input)
+                }
+                _ => None,
+            };
+            let src = chained.as_ref().unwrap_or(src);"""
+
+# --- the renderer: where the chain runs (on 50's A4 and A5)
+
+[[patch]]
+id = "shader-look-context"
+why = "the look in the frame's stack: the chain's place is the layer's, with the AA finish of that place"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+fn = "render_view"
+find = """let user_context = crate::user_post::Context {
+            photo: snapshot.is_some(),
+            vr_eye: self.external,
+            aa: crate::user_post::ChainAa::for_setting(self.settings.aa, self.msaa_samples, snapshot.is_some()),
+        };"""
+replace = """// aurora-local-patch: shader-look-context
+        // "Otoa's Shader" in the photo's looks (52-shader-photo-look): the
+        // chain draws at that layer's place, after the anti-aliasing, and
+        // not here (as long as the looks have their images this frame)
+        let user_layer = looks.is_some() && look.is_some_and(crate::looks::has_user_chain);
+        let user_context = crate::user_post::Context {
+            photo: snapshot.is_some(),
+            vr_eye: self.external,
+            aa: if user_layer {
+                crate::user_post::ChainAa::for_layer(self.settings.aa, self.msaa_samples, snapshot.is_some())
+            } else {
+                crate::user_post::ChainAa::for_setting(self.settings.aa, self.msaa_samples, snapshot.is_some())
+            },
+        };"""
+
+[[patch]]
+id = "shader-look-prepare"
+why = "prepared for the layer's place: the post pass and SMAA then keep their targets"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+fn = "render_view"
+find = "let user_on = self.user_post.prepare(&self.device, user_format, post_size, user_context);"
+replace = """// aurora-local-patch: shader-look-prepare
+        let user_ready = self
+            .user_post
+            .prepare_for(&self.device, user_format, post_size, user_context, user_layer);
+        // (at the look's place the post pass, its FXAA and SMAA are as without the chain)
+        let user_on = user_ready && !user_layer;"""
+
+[[patch]]
+id = "shader-look-frame"
+why = "the chain's frame inputs built for both places: the slot, or the look's (below)"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "regex"
+fn = "render_view"
+dotall = true
+pattern = '''^([ \t]*)if user_on \{\n([ \t]*)let frame = crate::user_post::FrameInputs \{\n(.*?)\n([ \t]*)\};\n([ \t]*)// under SMAA the chain writes SMAA's input, which SMAA reads below\n([ \t]*)let chain_out = ([^\n]*);\n([ \t]*)let passes = self\.user_post\.encode\(&self\.device, &self\.queue, &mut encoder, &frame, chain_out\);\n'''
+replace = '''\1// aurora-local-patch: shader-look-frame
+\1// (also for the chain at its photo look's place, below)
+\1let user_frame = {
+\2let frame = crate::user_post::FrameInputs {
+\3
+\4};
+\4user_ready.then_some(frame)
+\1};
+\1if user_on && let Some(frame) = &user_frame {
+\5// under SMAA the chain writes SMAA's input, which SMAA reads below
+\6let chain_out = \7;
+\8let passes = self.user_post.encode(&self.device, &self.queue, &mut encoder, frame, chain_out);
+'''
+
+[[patch]]
+id = "shader-look-encode-call"
+why = "the looks draw the chain at its layer's place, with the frame's inputs"
+paths = ["crates/aurora-render/src/**/*.rs"]
+op = "literal"
+fn = "render_view"
+find = "let passes = looks.encode(&self.device, &self.queue, &mut encoder, look, scene_target, Some(depth));"
+replace = """// aurora-local-patch: shader-look-encode-call
+                // "Otoa's Shader": aurora-shader's chain at its layer's place
+                // (52-shader-photo-look), with the inputs built for its slot
+                let user_post = &mut self.user_post;
+                let (device, queue) = (&self.device, &self.queue);
+                let mut chain = |encoder: &mut wgpu::CommandEncoder, input: &wgpu::TextureView| {
+                    let frame = user_frame.as_ref().filter(|_| user_layer)?;
+                    let (view, passes) = user_post.encode_layer(device, queue, encoder, frame, input)?;
+                    calls.set(calls.get() + passes);
+                    Some(view)
+                };
+                let passes = looks.encode_chained(device, queue, &mut encoder, look, scene_target, Some(depth), Some(&mut chain));"""
+
+# --- the viewer: the look, its list entry, its settings area
+
+[[patch]]
+id = "shader-look-viewer-module"
+why = "the look's id, list entry, resolve, settings area and tests"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/snapshot/shader_look.rs"]
+source = "files/shader-photo-look/shader_look.rs"
+
+[[patch]]
+id = "shader-look-viewer-mod"
+why = "declare the module beside the looks"
+paths = ["crates/aurora-viewer/src/snapshot/mod.rs"]
+op = "literal"
+find = "pub mod save;"
+replace = """pub mod save;
+pub mod shader_look; // aurora-local-patch: shader-look-viewer-mod"""
+
+[[patch]]
+id = "shader-look-name"
+why = "its name and description among Aurora's looks, while aurora-shader is installed"
+paths = ["crates/aurora-viewer/src/snapshot/looks.rs"]
+op = "literal"
+fn = "aurora_text"
+find = "_ => return None,"
+replace = """// aurora-local-patch: shader-look-name
+        super::shader_look::NAME if super::shader_look::listed() => super::shader_look::text(),
+        _ => return None,"""
+
+[[patch]]
+id = "shader-look-list"
+why = "listed last in the Creative section, while aurora-shader is installed"
+paths = ["crates/aurora-viewer/src/snapshot/looks.rs"]
+op = "regex"
+fn = "aurora_list"
+pattern = '^([ \t]*)sections\n'
+replace = '''\1super::shader_look::add_entry(&mut sections, super::shader_look::listed()); // aurora-local-patch: shader-look-list
+\1sections
+'''
+
+[[patch]]
+id = "shader-look-resolve"
+why = "what it draws: the chain's operation (None without aurora-shader: an unknown look)"
+paths = ["crates/aurora-viewer/src/snapshot/looks.rs"]
+op = "literal"
+fn = "resolve"
+find = "let look = aurora_look(aurora)?;"
+replace = """// aurora-local-patch: shader-look-resolve
+        if aurora == super::shader_look::NAME {
+            return super::shader_look::resolve(super::shader_look::listed());
+        }
+        let look = aurora_look(aurora)?;"""
+
+[[patch]]
+id = "shader-look-settings"
+why = "in its card's settings, under its strength: where its settings are, and the button that opens them"
+paths = ["crates/aurora-viewer/src/ui/looks_editor.rs"]
+op = "literal"
+fn = "card"
+find = "ui.add_enabled_ui(drawn, |ui| settings(ui, p, s, i));"
+replace = """ui.add_enabled_ui(drawn, |ui| {
+                    settings(ui, p, s, i);
+                    // aurora-local-patch: shader-look-settings
+                    crate::snapshot::shader_look::settings(ui, p, s.looks.get(i).map(|l| l.id.as_str()), out);
+                });"""
+
+[[patch]]
+id = "shader-look-settings-card"
+why = "a card's settings area sends the button's request with the editor's other actions"
+paths = ["crates/aurora-viewer/src/ui/looks_editor.rs"]
+op = "literal"
+find = """        edits: &mut Vec<Edit>,
+    ) -> f32 {"""
+replace = """edits: &mut Vec<Edit>,
+        // aurora-local-patch: shader-look-settings-card
+        out: &mut Vec<Action>,
+    ) -> f32 {"""
+
+[[patch]]
+id = "shader-look-settings-card-call"
+why = "both places a card is drawn (lifted while carried, or in its row) pass the editor's actions on"
+paths = ["crates/aurora-viewer/src/ui/looks_editor.rs"]
+op = "regex"
+fn = "cards"
+expect = 2
+pattern = '^( *)((?:h = )?self\.card\((?:card|ui), p, s, i, rect, &rows\[i\], number, (?:true|false), layout\.busy\(\), &mut edits)\)'
+replace = '''\g<1>// aurora-local-patch: shader-look-settings-card-call
+\g<1>\g<2>, out)'''
+
+[[patch]]
+id = "shader-look-settings-cards"
+why = "the cards take the editor's actions, for the card's settings area"
+paths = ["crates/aurora-viewer/src/ui/looks_editor.rs"]
+op = "literal"
+find = "fn cards(&mut self, ui: &mut egui::Ui, p: &Palette, s: &mut Stack<'_>, room: Option<f32>) {"
+replace = """// aurora-local-patch: shader-look-settings-cards
+    fn cards(&mut self, ui: &mut egui::Ui, p: &Palette, s: &mut Stack<'_>, room: Option<f32>, out: &mut Vec<Action>) {"""
+
+[[patch]]
+id = "shader-look-settings-cards-call"
+why = "the editor hands its actions to the cards"
+paths = ["crates/aurora-viewer/src/ui/looks_editor.rs"]
+op = "literal"
+fn = "show"
+find = "self.cards(ui, p, s, room);"
+replace = """// aurora-local-patch: shader-look-settings-cards-call
+        self.cards(ui, p, s, room, out);"""
+
+[[patch]]
+id = "shader-look-action"
+why = "the photo window's request: Preferences on the Otoa's Shader page"
+paths = ["crates/aurora-viewer/src/ui/snapshot.rs"]
+op = "literal"
+find = """    /// Show the folder of the tables.
+    OpenLutFolder,"""
+replace = """/// Show the folder of the tables.
+    OpenLutFolder,
+    /// Open Preferences on the Otoa's Shader page (the look "Otoa's Shader").
+    OtoaShaderPage, // aurora-local-patch: shader-look-action"""
+
+[[patch]]
+id = "shader-look-action-route"
+why = "the photo window sends it with the LUTs' actions, which the Director's Filters tab shares"
+paths = ["crates/aurora-viewer/src/app/snapshot.rs"]
+op = "literal"
+fn = "photo_action"
+find = "Action::ImportLut | Action::RemoveLut(_) | Action::OpenLutFolder => self.photo_lut_action(action, false),"
+replace = """// aurora-local-patch: shader-look-action-route
+            Action::ImportLut | Action::RemoveLut(_) | Action::OpenLutFolder | Action::OtoaShaderPage => {
+                self.photo_lut_action(action, false)
+            }"""
+
+[[patch]]
+id = "shader-look-action-run"
+why = "as the toolbar's Otoa's Shader button does (51)"
+paths = ["crates/aurora-viewer/src/app/snapshot.rs"]
+op = "literal"
+fn = "photo_lut_action"
+find = "Action::OpenLutFolder => {"
+replace = """// aurora-local-patch: shader-look-action-run
+            Action::OtoaShaderPage => {
+                crate::ui::widgets::open_floater(&self.egui_ctx, crate::ui::options::WINDOW, &mut self.panels.settings);
+                crate::ui::options::aurora_shader::request_open();
+            }
+            Action::OpenLutFolder => {"""
+
+[[patch]]
+id = "shader-look-demo-off"
+why = "AURORA_DEMO_PHOTO_LOOK: `off` ticks the last layer off (kept in its place, not drawn)"
+paths = ["crates/aurora-viewer/src/app/snapshot.rs"]
+op = "literal"
+fn = "photo_look_demo"
+find = '"compare" => ui.compare = Some(0.5),'
+replace = '''"compare" => ui.compare = Some(0.5),
+                    // aurora-local-patch: shader-look-demo-off
+                    "off" => {
+                        if let Some(layer) = s.looks.last_mut() {
+                            layer.on = false;
+                        }
+                    }'''
+
+# --- texts
+
+[[patch]]
+id = "shader-look-text-en"
+why = "the look's name, description, note and button (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^photo-looks-legacy-note = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: shader-look-text-en
+photo-look-a-otoa-shader = Otoa's Shader
+photo-look-a-otoa-shader-tip = aurora-shader's whole chain of effects as one look: its effects and settings are those of Preferences
+photo-look-otoa-shader-note = The effects of this look, their order and their settings are on the Otoa's Shader page of Preferences.
+photo-look-otoa-shader-off = Otoa's Shader is off in Preferences (or has no effect): this look leaves the photo as it is.
+photo-look-otoa-shader-open = Open Otoa's Shader'''
+
+[[patch]]
+id = "shader-look-text-fr"
+why = "goes with shader-look-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^photo-looks-legacy-note = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: shader-look-text-fr
+photo-look-a-otoa-shader = Otoa's Shader
+photo-look-a-otoa-shader-tip = Toute la chaîne d'effets d'aurora-shader en un seul filtre : ses effets et réglages sont ceux des Préférences
+photo-look-otoa-shader-note = Les effets de ce filtre, leur ordre et leurs réglages sont sur la page Otoa's Shader des Préférences.
+photo-look-otoa-shader-off = Otoa's Shader est désactivé dans les Préférences (ou n'a aucun effet) : ce filtre laisse la photo telle quelle.
+photo-look-otoa-shader-open = Ouvrir Otoa's Shader'''
+
+[[patch]]
+id = "shader-look-text-ja"
+why = "goes with shader-look-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^photo-looks-legacy-note = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: shader-look-text-ja
+photo-look-a-otoa-shader = Otoa's Shader
+photo-look-a-otoa-shader-tip = aurora-shader のエフェクトのチェーン全体を１つのルックとして（エフェクトと設定は初期設定のもの）
+photo-look-otoa-shader-note = このルックのエフェクト、順番、設定は、初期設定の「Otoa's Shader」ページにあります。
+photo-look-otoa-shader-off = 初期設定で Otoa's Shader がオフになっているか、エフェクトがありません。このルックは写真を変更しません。
+photo-look-otoa-shader-open = Otoa's Shader を開く'''
+
+# --- docs
+
+[[patch]]
+id = "shader-look-testing-table"
+why = "docs/TESTING.md: the `off` token of AURORA_DEMO_PHOTO_LOOK"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^(\| `AURORA_DEMO_PHOTO_LOOK=<look>\[\+<look>…\]\[:<percent>\])(\[:compare\][^\n]*)$'
+replace = '''\1[:off]\2 <!-- // aurora-local-patch: shader-look-testing-table -->'''
+
+[[patch]]
+id = "shader-look-testing-details"
+why = "docs/TESTING.md: the look Otoa's Shader and the `off` token in the scenario's details"
+paths = ["docs/TESTING.md"]
+op = "literal"
+required = false
+find = "tiles share the histogram curves, no seam along their borders). Capture from frame 700."
+replace = """tiles share the histogram curves, no seam along their borders). Capture
+from frame 700. `off` ticks the last layer off (kept in its place, not
+drawn). With aurora-shader installed (local patch set,
+52-shader-photo-look; `AURORA_SHADER_DIR` at a folder with a
+`config.toml`), `aurora:otoa-shader` is its whole chain as one look, the
+last of the Creative section: it draws at its place in the stack
+(`aurora:oil-paint+aurora:otoa-shader` paints first and inks the paint,
+`aurora:otoa-shader+aurora:oil-paint` paints over the ink), at its
+strength, and only there (not also before the looks), on the view and on
+the photo whatever `[host] photos` says.
+<!-- // aurora-local-patch: shader-look-testing-details -->"""

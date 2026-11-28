@@ -1,0 +1,22 @@
+{
+ "id": "inuit-meuris",
+ "culture": "inuit",
+ "name": "Inuit, drawings by Johan Meuris",
+ "names": {
+  "fr": "Inuit, dessins de Johan Meuris",
+  "ja": "イヌイット（Johan Meuris の絵）",
+  "de": "Inuit, Zeichnungen von Johan Meuris",
+  "es": "Inuit, dibujos de Johan Meuris",
+  "it": "Inuit, disegni di Johan Meuris",
+  "nb": "Inuittisk, tegninger av Johan Meuris",
+  "pl": "Inuicka, rysunki: Johan Meuris",
+  "pt": "Inuíte, desenhos de Johan Meuris",
+  "pt-BR": "Inuíte, desenhos de Johan Meuris",
+  "ru": "Инуитская, рисунки: Johan Meuris",
+  "tr": "İnuit, çizimler: Johan Meuris",
+  "uk": "Інуїтська, малюнки: Johan Meuris",
+  "zh-Hans": "因纽特（Johan Meuris 绘）",
+  "zh-Hant": "因紐特（Johan Meuris 繪）"
+ },
+ "order": 5
+}

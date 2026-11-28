@@ -1,0 +1,127 @@
+# The AO's sit wins over its cover, as in the Legacy Viewer.
+#
+# With a sit override, the AO plays ANIM_AGENT_SIT_GENERIC under its own sit,
+# as a base pose that covers the sit's cycle points. AOEngine::override
+# (indra/newview/aoengine.cpp:1080-1084) starts that cover before it returns
+# the override, and LLVOAvatar::startMotion (indra/newview/llvoavatar.cpp:
+# 7254-7266) then starts the AO's sit. The AO does not preload, so the sit usually comes back
+# and loads last: it is the newest motion, and LLJointStateBlender::
+# addJointState (indra/llcharacter/llpose.cpp) keeps the newest first among
+# joint states of a priority. The AO sit wins those joints.
+#
+# Aurora put the cover after the AO's sit in the AO's list, so after it in the
+# local pose and the AgentAnimation starts. Controller::sync then put the cover
+# in as the newer motion. It was not preloaded either, and loaded at the sit,
+# after the AO's sit, which the AO prefetches with its set. Where the cover's
+# priority equals the AO sit's, the cover won: the default sit pose showed
+# while the AO's sit played (Animation explorer: the stock sit, the cover and
+# the AO's sit, all from the user's own avatar).
+#
+# Now the cover goes first in the AO's list (drawn, then sent, before the
+# sit), and a set with Sitting animations prefetches it, first of its queue,
+# so it is in place before any sit. The AO's sit is then the newest motion of
+# the two. What the simulator plays is unchanged: the stock sit stays (as in
+# the Legacy Viewer), and the cover and the AO's sit are started in one
+# AgentAnimation, cover first, the order the Legacy Viewer sends them in.
+#
+# Not here: the Legacy Viewer's 1 s Smart sit window (AOSitCancelTimer), and
+# the Sitting `allowed` rule (patch 93's).
+#
+# Tests: the existing sit test's start order is updated; new tests in
+# files/ao-sit-cover-order/ (the AO's order and starts, the prefetch, and the
+# blender's tie rule the order relies on). Retire this whole file once
+# upstream orders the cover the same way: its patches then report DRIFT or
+# ALREADY. Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "ao-sit-cover-order"
+why = "the sit's cover (ANIM_AGENT_SIT_GENERIC) goes before the AO's sit in the AO's list, so the AO sit is the newest motion and wins ties"
+paths = ["crates/aurora-viewer/src/ao/**/*.rs"]
+op = "literal"
+fn = "update_with_easing"
+find = """if base == State::Sitting {
+    desired.push(SIT_GENERIC);
+}"""
+replace = """if base == State::Sitting {
+                            // aurora-local-patch: ao-sit-cover-order
+                            // The cover goes first, as AOEngine::override
+                            // (indra/newview/aoengine.cpp) starts it as a base
+                            // pose before LLVOAvatar::startMotion
+                            // (indra/newview/llvoavatar.cpp) starts the sit:
+                            // drawn and sent before it, the AO's sit is the
+                            // newest motion and wins the joints of its priority
+                            // (newest first among equals), as it normally does
+                            // in the Legacy Viewer.
+                            desired.insert(start, SIT_GENERIC);
+                        }"""
+
+[[patch]]
+id = "ao-sit-cover-order-prefetch"
+why = "a set with Sitting animations prefetches the sit's cover first, so it loads before any sit and stays the older motion"
+paths = ["crates/aurora-viewer/src/ao/**/*.rs"]
+op = "literal"
+fn = "prefetch"
+find = """.filter(|id| !id.is_nil() && seen.insert(*id)),
+                        );
+                    }
+                }"""
+replace = """.filter(|id| !id.is_nil() && seen.insert(*id)),
+                        );
+                    }
+                }
+                // aurora-local-patch: ao-sit-cover-order-prefetch
+                // The sit's cover is loaded with the set, before a sit: loaded
+                // at the sit, after the AO's sit, it was the newer motion.
+                if set
+                    .animation_config(State::Sitting)
+                    .is_some_and(|c| !c.steps.is_empty() || !c.tracks.is_empty())
+                    && seen.insert(SIT_GENERIC)
+                {
+                    self.preload.push_front(SIT_GENERIC);
+                }"""
+
+[[patch]]
+id = "ao-sit-cover-order-existing-test"
+why = "the existing sit test expects the cover's start before the AO sit's"
+paths = ["crates/aurora-viewer/src/ao/tests.rs"]
+op = "literal"
+fn = "the_stock_sit_stays_to_the_simulator_and_its_stop_ends_the_ao_sit"
+find = """assert_eq!(cmd, vec![(sit_override, true), (SIT_GENERIC, true)], "the stock sit is not stopped");"""
+replace = """// aurora-local-patch: ao-sit-cover-order-existing-test
+        assert_eq!(cmd, vec![(SIT_GENERIC, true), (sit_override, true)], "the stock sit is not stopped");"""
+
+[[patch]]
+id = "ao-sit-cover-order-tests-mod"
+why = "declare the AO's sit cover tests beside its other test modules"
+paths = ["crates/aurora-viewer/src/ao/mod.rs"]
+op = "literal"
+find = """#[cfg(test)]
+mod swimming_tests;"""
+replace = """#[cfg(test)]
+mod sit_cover_tests; // aurora-local-patch: ao-sit-cover-order-tests-mod
+#[cfg(test)]
+mod swimming_tests;"""
+
+[[patch]]
+id = "ao-sit-cover-order-tests"
+why = "the AO's sit cover order and prefetch tests"
+paths = ["crates/aurora-viewer/src/ao/sit_cover_tests.rs"]
+op = "add_file"
+source = "files/ao-sit-cover-order/sit_cover_tests.rs"
+
+[[patch]]
+id = "ao-sit-cover-order-blend-tests-mod"
+why = "declare the blender tie test as a child of anim, first of its sorted submodules"
+paths = ["crates/aurora-viewer/src/scene/anim.rs"]
+op = "literal"
+find = "pub(super) mod grounding;"
+replace = """#[cfg(test)]
+mod ao_sit_cover_tests; // aurora-local-patch: ao-sit-cover-order-blend-tests-mod
+pub(super) mod grounding;"""
+
+[[patch]]
+id = "ao-sit-cover-order-blend-tests"
+why = "Controller::sync and the blender: of two motions of a priority, the one listed last wins"
+paths = ["crates/aurora-viewer/src/scene/anim/ao_sit_cover_tests.rs"]
+op = "add_file"
+source = "files/ao-sit-cover-order/ao_sit_cover_tests.rs"

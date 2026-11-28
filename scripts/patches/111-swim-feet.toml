@@ -1,0 +1,150 @@
+# Aurora foot placement rests while our own avatar swims.
+#
+# "Use Aurora foot placement" (Preferences, Avatars: `ground_avatar_feet`,
+# Scene::grounding_frame) bends the legs so the feet meet the ground. While
+# Aurora's swimming holds the avatar in the water there is no ground to meet,
+# and the correction only pulls the legs toward the bed or a shore.
+#
+# This build: while our own avatar is actually swimming (at the surface or
+# below; a free camera keeps the swim it pauses), Scene::grounding_frame gives
+# no frame for it, the same way it does in flight, so the correction fades out
+# and the legs follow the swim animation. It comes back by itself once the
+# swim ends: on land, while climbing out, or walking on the water. The saved
+# setting is never written, other avatars keep their placement, and the
+# Legacy native placement (used only when the Aurora one is off) is not
+# touched. Only swimming rests it: walking on the water keeps the placement.
+#
+# Tests: movement/tests.rs (which movement states count as swimming),
+# scene/grounding.rs (no own frame while swimming, back after it, the setting
+# unchanged).
+# Apply or skip the whole file, not one patch of it.
+
+[[patch]]
+id = "swim-feet-state"
+why = "whether our own avatar is swimming right now, a swim paused by a free camera included"
+paths = ["crates/aurora-viewer/src/movement.rs"]
+op = "literal"
+find = "pub fn cancel_water_gesture(&mut self) {"
+replace = '''// aurora-local-patch: swim-feet-state
+    /// Our own avatar swims right now, at the surface or below (local patch
+    /// set, 111-swim-feet), a swim kept by a free camera included. Water
+    /// walking and climbing out do not count.
+    pub fn swimming_now(&self) -> bool {
+        self.swim_inspection.unwrap_or(self.state).swimming()
+    }
+
+    pub fn cancel_water_gesture(&mut self) {'''
+
+[[patch]]
+id = "swim-feet-field"
+why = "the scene knows when our own avatar swims"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "pub(crate) ground_feet_own_moving: bool,"
+replace = '''pub(crate) ground_feet_own_moving: bool,
+    // aurora-local-patch: swim-feet-field
+    /// Our own avatar swims (local patch set, 111-swim-feet): its Aurora
+    /// foot placement rests until the swim ends.
+    pub(crate) ground_feet_own_swimming: bool,'''
+
+[[patch]]
+id = "swim-feet-init"
+why = "not swimming at first"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "ground_feet_own_moving: false,"
+replace = '''ground_feet_own_moving: false,
+            ground_feet_own_swimming: false, // aurora-local-patch: swim-feet-init'''
+
+[[patch]]
+id = "swim-feet-app"
+why = "each frame, after the movement update: whether our own avatar swims"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.scene.ground_feet_while_moving = self.settings.ground_feet_while_moving;"
+replace = '''self.scene.ground_feet_while_moving = self.settings.ground_feet_while_moving;
+            self.scene.ground_feet_own_swimming = self.movement_runtime.swimming_now(); // aurora-local-patch: swim-feet-app'''
+
+[[patch]]
+id = "swim-feet-frame"
+why = "no Aurora foot placement for our own avatar while it swims, as in flight"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+fn = "grounding_frame"
+find = "|| (!own && self.grounding_sole_height(world, object.full_id).is_none())"
+replace = '''|| (own && self.ground_feet_own_swimming) // aurora-local-patch: swim-feet-frame
+            || (!own && self.grounding_sole_height(world, object.full_id).is_none())'''
+
+[[patch]]
+id = "swim-feet-state-tests"
+why = "which movement states rest the foot placement"
+paths = ["crates/aurora-viewer/src/movement/tests.rs"]
+op = "literal"
+find = '''"an underwater return must not count as the first surface tap"
+    );
+}'''
+replace = '''"an underwater return must not count as the first surface tap"
+    );
+}
+
+// aurora-local-patch: swim-feet-state-tests
+#[test]
+fn foot_placement_rests_only_while_actually_swimming() {
+    for (state, swimming) in [
+        (State::Surface, true),
+        (State::Submerged, true),
+        (State::Ground, false),
+        (State::Flight, false),
+        (State::Leaving, false),
+        (State::WaterWalking, false),
+    ] {
+        let runtime = Runtime {
+            state,
+            ..Default::default()
+        };
+        assert_eq!(runtime.swimming_now(), swimming, "{state:?}");
+    }
+    // a free camera pauses the swim and keeps it
+    let inspecting = Runtime {
+        swim_inspection: Some(State::Submerged),
+        ..Default::default()
+    };
+    assert!(inspecting.swimming_now());
+}'''
+
+[[patch]]
+id = "swim-feet-tests"
+why = "our own foot placement rests while swimming and comes back after, the setting unchanged"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+find = '''world.animation_preview_clock = Some((Uuid::nil(), now, now));
+        assert!(scene.grounding_frame(&world, idx, now).is_none());
+        assert!(scene.legacy_grounding_frame(&world, idx, now).is_none());
+    }'''
+replace = '''world.animation_preview_clock = Some((Uuid::nil(), now, now));
+        assert!(scene.grounding_frame(&world, idx, now).is_none());
+        assert!(scene.legacy_grounding_frame(&world, idx, now).is_none());
+    }
+
+    // aurora-local-patch: swim-feet-tests
+    #[test]
+    fn own_foot_placement_rests_while_swimming_and_comes_back_after() {
+        let (mut world, mut scene, _, _) = super::super::picking::tests::scene_with_two_objects();
+        let idx = world.objects.index_of_uuid(&world.agent_id).expect("own avatar");
+        let now = Instant::now();
+        world.agent.flying = false;
+        scene.ground_avatar_feet = true;
+        assert!(scene.grounding_frame(&world, idx, now).is_some());
+        scene.ground_feet_own_swimming = true;
+        assert!(
+            scene.grounding_frame(&world, idx, now).is_none(),
+            "swimming: no Aurora foot placement"
+        );
+        assert!(scene.ground_avatar_feet, "the setting stays as it is");
+        assert!(
+            scene.legacy_grounding_frame(&world, idx, now).is_some(),
+            "the native context is not touched"
+        );
+        scene.ground_feet_own_swimming = false;
+        assert!(scene.grounding_frame(&world, idx, now).is_some(), "back once the swim ends");
+    }'''

@@ -1,0 +1,204 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "edAsr": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edBif": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edFrS": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edFrV": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edHeim": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edHra": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edMim": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edOxH": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edRat": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edSer": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edThV": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edThi": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edThor": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edToe": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edUrd": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "edVan": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {},
+ "notes": {
+  "edAsr": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edBif": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edFrS": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edFrV": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edHeim": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edHra": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edMim": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled"
+  },
+  "edOxH": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edRat": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edSer": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edThV": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edThi": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edThor": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edToe": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edUrd": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  },
+  "edVan": {
+   "drawing": "background removed, colour dropped, converted to line and tone, resampled",
+   "lines": "the culture's segments, end points looked up again (up to 0.003 deg apart); the viewer draws the culture's lines.json"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set norse-edda-art"
+}

@@ -1,0 +1,138 @@
+# Demo: a change between two given skies through the environment selector,
+# to capture how a change between kinds of sky looks on the GPU.
+#
+# What: AURORA_DEMO_SKY_CHANGE=<sky A>;<sky B>[;<seconds>[;<frame>]]. Sky A
+# is picked as the local sky at frame 30, at once; sky B at the given frame
+# (600 by default) over the given seconds (5 by default, up to 60). Each sky
+# is `key=value` pairs: probe (the reflection probe ambiance: no key is a
+# classic sky, 0 a linear one, above 0 a modern one), gamma, sun and moon
+# (elevation[:azimuth] in degrees; the moon 30 degrees below the horizon,
+# opposite the sun, unless given), sunlight and ambient (r:g:b or a grey),
+# haze (horizon:density), density and distance (the haze multipliers),
+# cloudshadow and moonlight (the moon's brightness).
+# Swapping A and B gives the other direction.
+#
+# How (files/demo-sky-change/demo_sky_change.rs, unit-tested): the two
+# skies are settings assets known locally, like the selector demo's
+# library, and are picked with EnvSelector::request_local, the call a sky
+# picked in World > Environment makes: the change blends as a manual change
+# does in world, with every patch that acts on it. Only the manual
+# transition time (a setting) is replaced, for that launch, by the
+# variable's, after the app has set it from the settings each frame; no
+# setting is written.
+#
+# Without the variable nothing changes: no asset is added, nothing is
+# picked, the transition time stays the setting's. Nothing is sent.
+#
+# Apply or skip the whole file, not one patch of it. It does not depend on
+# the sky kind (123), light handover (999-light-handover) or eased change
+# (999-eased-environment-change) patches, so a baseline build without them
+# still has it.
+
+[[patch]]
+id = "demo-sky-change-module"
+why = "AURORA_DEMO_SKY_CHANGE: the two skies, their parse and the frames"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/demo_sky_change.rs"]
+source = "files/demo-sky-change/demo_sky_change.rs"
+
+[[patch]]
+id = "demo-sky-change-mod"
+why = "a child module of the demo"
+paths = ["crates/aurora-viewer/src/demo.rs"]
+op = "literal"
+find = """#[path = "demo_sky.rs"]
+pub mod sky;"""
+replace = """#[path = "demo_sky.rs"]
+pub mod sky;
+// aurora-local-patch: demo-sky-change-mod
+/// A change between two given skies (AURORA_DEMO_SKY_CHANGE).
+#[path = "demo_sky_change.rs"]
+pub mod sky_change;"""
+
+[[patch]]
+id = "demo-sky-change-assets"
+why = "the two skies known locally, as the selector demo's library"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """if crate::demo::env::enabled() {
+                for (id, settings, map) in crate::demo::env::settings_assets() {
+                    self.scene.settings.insert_local(id, settings, Some(map));
+                }
+            }"""
+replace = """if crate::demo::env::enabled() {
+                for (id, settings, map) in crate::demo::env::settings_assets() {
+                    self.scene.settings.insert_local(id, settings, Some(map));
+                }
+            }
+            // aurora-local-patch: demo-sky-change-assets
+            // AURORA_DEMO_SKY_CHANGE: its two skies, known locally
+            for (id, settings, map) in crate::demo::sky_change::settings_assets() {
+                self.scene.settings.insert_local(id, settings, Some(map));
+            }"""
+
+[[patch]]
+id = "demo-sky-change-pick"
+why = "sky A, then sky B, picked as the selector picks a sky"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = """if let Some(step) = crate::demo::env::step(self.frame_count) {
+                self.demo_env_step(step);
+            }"""
+replace = """if let Some(step) = crate::demo::env::step(self.frame_count) {
+                self.demo_env_step(step);
+            }
+            // aurora-local-patch: demo-sky-change-pick
+            if let Some(asset) = crate::demo::sky_change::pick(self.frame_count) {
+                self.world.eep.request_local(asset, crate::world::env_select::SettingsKind::Sky);
+            }"""
+
+[[patch]]
+id = "demo-sky-change-transition"
+why = "the variable's duration for the change, instead of the setting's, for that launch only"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "let (sky_frame, water_frame) = self.world.environment_frames(&mut self.panels.time_of_day);"
+replace = """// aurora-local-patch: demo-sky-change-transition
+        // (AURORA_DEMO_SKY_CHANGE: its own duration, nothing written)
+        if let Some(seconds) = crate::demo::sky_change::transition(self.demo, self.frame_count) {
+            self.world.eep.set_manual_transition(seconds);
+        }
+        let (sky_frame, water_frame) = self.world.environment_frames(&mut self.panels.time_of_day);"""
+
+[[patch]]
+id = "demo-sky-change-doc"
+why = "the test variable in the demo table"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "| `AURORA_DEMO_SKY_OPTICS=rainbow\\|halo\\|clear` | Rainbow or 22° halo in the sky |"
+replace = '''| `AURORA_DEMO_SKY_OPTICS=rainbow\|halo\|clear` | Rainbow or 22° halo in the sky |
+| `AURORA_DEMO_SKY_CHANGE=<sky A>;<sky B>[;<seconds>[;<frame>]]` | A change from one given sky to another through the environment selector <!-- // aurora-local-patch: demo-sky-change-doc --> |'''
+
+[[patch]]
+id = "demo-sky-change-details"
+why = "the test variable in the details"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = "- **`AURORA_DEMO_SKY_OPTICS=rainbow|halo|clear`**: the region's sky carries a"
+replace = '''- **`AURORA_DEMO_SKY_CHANGE=<sky A>;<sky B>[;<seconds>[;<frame>]]`**: sky A
+  becomes the local sky at frame 30, at once, then sky B at the given frame
+  (600 by default) over the given seconds (5 by default, up to 60), picked
+  as a sky picked in World › Environment is (`demo_sky_change.rs`): the
+  change blends as a manual change does in world, only its duration comes
+  from the variable. Swap A and B for the other direction. A sky is
+  `key=value` pairs separated by commas, all optional: `probe` (reflection
+  probe ambiance: without it a classic sky, `0` a linear one, above 0 a
+  modern one), `gamma` (1), `sun` and `moon` as `elevation[:azimuth]` in
+  degrees (sun 45:135; the moon 30° below the horizon, opposite the sun,
+  unless given), `sunlight` (2.2:2.34:2.7) and `ambient` (the default sky's)
+  as `r:g:b` or a grey level, `haze=<horizon>:<density>`, `density` and
+  `distance` (the legacy haze's multipliers: the "haze a / b, density x,
+  distance x" of the `sky frame:` log line), `cloudshadow` and `moonlight`
+  (the moon's brightness); a key not given keeps the default sky's value. A
+  classic night under a high moon to a modern day over 29 s:
+  `sun=-90,moon=90,sunlight=0.349:0.356:0.660,ambient=0.204:0.242:0.330,haze=0:4,density=0.0003,distance=0;probe=1,sun=61.5,sunlight=1.741:1.741:1.929,ambient=0,haze=0.25:0.78,density=0.0001126,distance=6.54,cloudshadow=0.54;29`.
+  Capture across the change with `AURORA_CAPTURE_FRAMES` from frame 600; the
+  `demo sky change:` log lines give the skies and the frames.
+  <!-- // aurora-local-patch: demo-sky-change-details -->
+- **`AURORA_DEMO_SKY_OPTICS=rainbow|halo|clear`**: the region's sky carries a'''

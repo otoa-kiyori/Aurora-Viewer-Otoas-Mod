@@ -1,0 +1,382 @@
+# The login screen keeps its night sky whatever the interface colours.
+#
+# Why: Preferences › Appearance › Skin lets the user choose the accent, the
+# background and the text, and `interface_colors` derives the whole palette
+# from them, the sky's `navy` included. With a light background the night of
+# the login screen (ui/aurora_bg.rs) turned near white: the additive aurora
+# vanished on it and the hills went pale grey, a white mask over the sky.
+#
+# What: the backdrop (sky, stars, aurora, hills) and what is written straight
+# on it use the palette built without the interface colours: the normal
+# build (Theme::palette_for) with only that step left out, so high contrast,
+# Disable glass and the colour blindness adaptation stay as they are. With
+# no interface colour chosen, or in high contrast, both palettes are the same
+# and nothing changes. The cards, fields, buttons and dialogs keep the chosen
+# colours.
+# - Where: the sky of `aurora_bg::paint` (login, accounts, loading and
+#   teleport screens without a last view); the title and tagline of both
+#   login layouts and the logo's halo; the footer's community line and
+#   version; the banner of the loading and teleport screens (veils, texts,
+#   chips, progress line), and the veil over the last view behind it.
+# - Not the glass cards: their frosted copy of the sky (`frosted_pane`) and
+#   their lights stay the chosen palette's, as upstream. A light tint at
+#   56 % over the dark sky leaves the cards' text at 1.2 to 2.5:1 (4 to 4.6:1
+#   even for a chosen near-black text); over the chosen palette's light sky
+#   it reads as upstream designed it. With Disable glass the cards are
+#   opaque and show no sky at all.
+# - The login dialogs (accounts manager, grids, sign-up, news) blur the
+#   real screen behind them, which is now the dark sky: while the backdrop
+#   differs, their chosen panel is opaque instead of a 56 % (or 78 %) tint.
+# - Cost: the second palette is built with the first (only when an
+#   interface colour is chosen) and kept beside it, for the last 8 palettes
+#   built; `Palette::backdrop` is a lock and a comparison per call, and
+#   returns the palette itself at once when nothing is kept.
+#
+# A local addition: the Legacy Viewer has neither interface colours nor this
+# sky, so there is no counterpart to follow. No setting, no interface text.
+#
+# Stands alone on upstream. Other manifests touch the same files elsewhere:
+# 80-window-shadow (theme.rs, in Theme::apply), 28-credentials (ui/login.rs,
+# LoginForm's fields; ui/login/carousel.rs, the connect click) and
+# 102-year-first-dates (ui/login/driver_notice.rs, not patched here). None of
+# their anchors overlaps these, so no order between them is needed.
+#
+# Tests: aurora_bg::night_sky_tests (the rule, the cache, contrast of the
+# bare text on the sky, high contrast). Apply or skip the whole file; only
+# login-night-sky-banner and login-night-sky-last-view (the loading and
+# teleport screens) may be disabled alone, they need nothing but
+# `Palette::backdrop`.
+
+[[patch]]
+id = "login-night-sky-eq"
+why = "the backdrop's cache finds a palette by comparing it"
+paths = ["crates/aurora-viewer/src/theme.rs"]
+op = "literal"
+find = """#[derive(Debug, Clone, Copy)]
+pub struct Palette {"""
+replace = """// aurora-local-patch: login-night-sky-eq
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {"""
+
+[[patch]]
+id = "login-night-sky-palettes"
+why = "the two builds, the cache that keeps the second beside the first, and Palette::backdrop"
+paths = ["crates/aurora-viewer/src/theme.rs"]
+op = "literal"
+find = """impl Theme {
+    /// The colors, those of the high contrast palette instead of the skin's"""
+replace = """// aurora-local-patch: login-night-sky-palettes
+/// The palettes `Theme::palette_for` built with interface colours chosen,
+/// each with its twin for the login backdrop, newest last: the user's skin,
+/// and the default one of the previews that build their own.
+static BACKDROPS: std::sync::Mutex<Vec<(Palette, Palette)>> = std::sync::Mutex::new(Vec::new());
+
+impl Palette {
+    /// The palette of the login backdrop: the night sky of `ui/aurora_bg.rs`
+    /// and what is written straight on it (title, footer, the loading
+    /// banner). It is this palette built without the interface colours of
+    /// the preferences, so that a light interface keeps a dark sky and its
+    /// aurora while the cards, fields and buttons keep the chosen colours.
+    /// Itself when no interface colour is chosen, in high contrast, and for
+    /// a palette `Theme::palette_for` did not build.
+    pub fn backdrop(&self) -> Palette {
+        let Ok(built) = BACKDROPS.lock() else { return *self };
+        let found = built.iter().rev().find(|(palette, _)| palette == self);
+        found.map_or(*self, |(_, backdrop)| *backdrop)
+    }
+}
+
+/// Keeps `backdrop` as the twin of `palette`, for `Palette::backdrop`.
+pub(crate) fn remember_backdrop(palette: Palette, backdrop: Palette) {
+    // a few skins at most: a skin reload or a new choice adds one
+    const KEPT: usize = 8;
+    let Ok(mut built) = BACKDROPS.lock() else { return };
+    if built.last() == Some(&(palette, backdrop)) {
+        return;
+    }
+    built.retain(|(known, _)| *known != palette);
+    if built.len() >= KEPT {
+        built.remove(0);
+    }
+    built.push((palette, backdrop));
+}
+
+impl Theme {
+    /// What `palette_for` builds for these settings, and the login
+    /// backdrop's palette when it differs: the same build with only the
+    /// interface colours left out, so that high contrast, Disable glass and
+    /// the colour blindness adaptation stay as they are. `interface` applies
+    /// the colours (`interface_colors::apply`; the tests give it `derive`,
+    /// which leaves the process-wide state alone).
+    pub(crate) fn palettes(
+        &self,
+        vision: crate::colorblind::Vision,
+        high_contrast: bool,
+        glass_off: bool,
+        colors: &crate::interface_colors::InterfaceColors,
+        interface: fn(Palette, &crate::interface_colors::InterfaceColors) -> Palette,
+    ) -> (Palette, Option<Palette>) {
+        let build = |chosen: Option<&crate::interface_colors::InterfaceColors>| {
+            let mut base = if high_contrast {
+                crate::high_contrast::palette()
+            } else if let Some(chosen) = chosen {
+                interface(self.skin_palette(), chosen)
+            } else {
+                self.skin_palette()
+            };
+            // Disable glass (Preferences › Accessibility): keep the skin's
+            // colours, drop the frosted pass, the world never shows through.
+            if glass_off {
+                base.panel_alpha = 255;
+            }
+            crate::colorblind::palette(base, vision)
+        };
+        let palette = build(Some(colors));
+        let backdrop = (!high_contrast && !colors.is_default()).then(|| build(None));
+        (palette, backdrop)
+    }
+}
+
+impl Theme {
+    /// The colors, those of the high contrast palette instead of the skin's"""
+
+[[patch]]
+id = "login-night-sky-build"
+why = "goes with login-night-sky-palettes: the palette as upstream builds it, its backdrop twin kept beside it"
+paths = ["crates/aurora-viewer/src/theme.rs"]
+op = "replace_fn_body"
+fn = "palette_for"
+impl = "Theme"
+expect_sig = 'pub fn palette_for\(&self, vision: crate::colorblind::Vision\) -> Palette'
+body = '''
+let (palette, backdrop) = self.palettes(
+    vision,
+    crate::high_contrast::current(),
+    crate::disable_glass::current(),
+    &crate::interface_colors::current(),
+    crate::interface_colors::apply,
+);
+if let Some(backdrop) = backdrop {
+    remember_backdrop(palette, backdrop);
+}
+palette
+'''
+
+[[patch]]
+id = "login-night-sky-paint"
+why = "the sky keeps the skin's night; the glass cards' frosted copy keeps the chosen palette"
+paths = ["crates/aurora-viewer/src/ui/aurora_bg.rs"]
+op = "literal"
+fn = "paint"
+find = "painter.extend(shapes(p, rect, rect, t, alpha, false, snow));"
+replace = """// aurora-local-patch: login-night-sky-paint
+    // the sky keeps the skin's night whatever the interface colours
+    // (`Palette::backdrop`); the cards' frosted copy (`frosted`) does not:
+    // their tint is the chosen panel, which needs the chosen sky to read
+    painter.extend(shapes(&p.backdrop(), rect, rect, t, alpha, false, snow));"""
+
+[[patch]]
+id = "login-night-sky-test"
+why = "goes with login-night-sky-palettes: the rule, the cache, the bare text's contrast, high contrast (at the end of the file: clippy's items_after_test_module)"
+paths = ["crates/aurora-viewer/src/ui/aurora_bg.rs"]
+op = "regex"
+pattern = '\n\Z'
+replace = '''
+
+
+// aurora-local-patch: login-night-sky-test
+#[cfg(test)]
+mod night_sky_tests {
+    use super::mix;
+    use crate::colorblind::{Deficiency, Vision};
+    use crate::interface_colors::{InterfaceColors, contrast, derive};
+    use crate::theme::{Palette, Theme};
+    use egui::Color32;
+
+    /// The interface step without its process-wide state (`apply` keeps it).
+    fn interface(skin: Palette, colors: &InterfaceColors) -> Palette {
+        derive(skin, colors).0
+    }
+
+    /// A light background chosen in Preferences › Appearance › Skin.
+    fn light() -> InterfaceColors {
+        InterfaceColors {
+            surface: Some([244, 244, 247, 255]),
+            ..Default::default()
+        }
+    }
+
+    /// The skin's own colours: one palette, the one upstream builds.
+    #[test]
+    fn the_skin_colours_give_the_backdrop_the_interface_palette() {
+        let theme = Theme::default();
+        for glass_off in [false, true] {
+            let (palette, backdrop) = theme.palettes(Vision::OFF, false, glass_off, &InterfaceColors::default(), interface);
+            assert!(backdrop.is_none());
+            let mut upstream = theme.skin_palette();
+            if glass_off {
+                upstream.panel_alpha = 255;
+            }
+            assert_eq!(palette, upstream);
+            assert_eq!(palette.backdrop(), palette);
+        }
+    }
+
+    /// A light background: the cards take it, the sky keeps the skin's
+    /// night (upstream turned it near white), and a colour blindness
+    /// adaptation still applies to the sky.
+    #[test]
+    fn a_light_background_keeps_the_skins_night_sky() {
+        let theme = Theme::default();
+        let skin = theme.skin_palette();
+        let (palette, backdrop) = theme.palettes(Vision::OFF, false, false, &light(), interface);
+        let backdrop = backdrop.expect("a chosen colour gives the backdrop its own palette");
+        assert_eq!(palette.panel, Color32::from_rgb(244, 244, 247));
+        assert_ne!(palette.navy, skin.navy);
+        assert_eq!(backdrop, skin);
+        crate::theme::remember_backdrop(palette, backdrop);
+        assert_eq!(palette.backdrop(), backdrop);
+        let tritan = Vision::new(Deficiency::Tritan, 1.0);
+        let (_, adapted) = theme.palettes(tritan, false, false, &light(), interface);
+        assert_eq!(adapted, Some(crate::colorblind::palette(skin, tritan)));
+    }
+
+    /// What is written straight on the sky (title, tagline, footer, the
+    /// loading banner) reads on every colour of it with a light interface:
+    /// 4.5:1 for text, 3:1 for the dim version line (the palette's own
+    /// minimum for dim text).
+    #[test]
+    fn text_on_the_sky_reads_with_a_light_interface() {
+        let (_, backdrop) = Theme::default().palettes(Vision::OFF, false, false, &light(), interface);
+        let p = backdrop.expect("a backdrop palette");
+        // the sky's stops and the two ridges, as `shapes` paints them
+        let deep = mix(p.navy, Color32::BLACK, 0.45);
+        let horizon = mix(p.navy, p.indigo, 0.22);
+        let far = mix(p.navy, p.indigo, 0.16);
+        let near = mix(p.navy, Color32::BLACK, 0.35);
+        for ground in [deep, p.navy, horizon, far, near] {
+            for (name, text) in [
+                ("ink", p.ink),
+                ("violet_pale", p.violet_pale),
+                ("violet_light", p.violet_light),
+                ("muted", p.muted),
+            ] {
+                let ratio = contrast(text, ground);
+                assert!(ratio >= 4.5, "{name} on {ground:?}: {ratio}");
+            }
+            let dim = contrast(p.muted_dim, ground);
+            assert!(dim >= 3.0, "muted_dim on {ground:?}: {dim}");
+        }
+    }
+
+    /// High contrast ignores the interface colours: one palette, its own.
+    #[test]
+    fn high_contrast_keeps_one_palette() {
+        let theme = Theme::default();
+        for colors in [InterfaceColors::default(), light()] {
+            let (palette, backdrop) = theme.palettes(Vision::OFF, true, false, &colors, interface);
+            assert!(backdrop.is_none());
+            assert_eq!(palette, crate::high_contrast::palette());
+        }
+    }
+}
+'''
+
+[[patch]]
+id = "login-night-sky-title"
+why = "the classic login screen's logo halo, title and tagline stand on the sky"
+paths = ["crates/aurora-viewer/src/ui/login.rs"]
+op = "literal"
+find = """ui.vertical_centered(|ui| {
+                if let Some(l) = logo {"""
+replace = """ui.vertical_centered(|ui| {
+                // aurora-local-patch: login-night-sky-title
+                // the logo's halo, the title and the tagline stand on the sky:
+                // the backdrop's colours (`Palette::backdrop`); the login card
+                // is outside this block
+                let p = &p.backdrop();
+                if let Some(l) = logo {"""
+
+[[patch]]
+id = "login-night-sky-accounts-title"
+why = "the accounts screen's title, tagline and first-account heading stand on the sky"
+paths = ["crates/aurora-viewer/src/ui/login/carousel.rs"]
+op = "literal"
+find = """ui.vertical_centered(|ui| {
+                        if let Some(logo) = logo {"""
+replace = """ui.vertical_centered(|ui| {
+                        // aurora-local-patch: login-night-sky-accounts-title
+                        // the title, the tagline and the first account's
+                        // heading stand on the sky: the backdrop's colours
+                        // (`Palette::backdrop`); the cards are outside this block
+                        let p = &p.backdrop();
+                        if let Some(logo) = logo {"""
+
+[[patch]]
+id = "login-night-sky-version"
+why = "the footer's version line stands on the sky"
+paths = ["crates/aurora-viewer/src/ui/login/chrome.rs"]
+op = "literal"
+fn = "version"
+find = "ui.label(RichText::new(label).size(11.5).color(p.muted_dim));"
+replace = """// aurora-local-patch: login-night-sky-version
+    // on the sky: the backdrop's colours (`Palette::backdrop`)
+    ui.label(RichText::new(label).size(11.5).color(p.backdrop().muted_dim));"""
+
+[[patch]]
+id = "login-night-sky-community"
+why = "the footer's community line stands on the sky (its link buttons keep the chosen colours)"
+paths = ["crates/aurora-viewer/src/ui/login/chrome.rs"]
+op = "literal"
+fn = "footer"
+find = """ui.label(
+                RichText::new(aurora_i18n::tr!("ui-login-join-the-community"))
+                    .size(11.5)
+                    .color(p.muted),
+            );"""
+replace = """// aurora-local-patch: login-night-sky-community
+            // on the sky: the backdrop's colours (`Palette::backdrop`)
+            ui.label(
+                RichText::new(aurora_i18n::tr!("ui-login-join-the-community"))
+                    .size(11.5)
+                    .color(p.backdrop().muted),
+            );"""
+
+[[patch]]
+id = "login-night-sky-banner"
+why = "the loading and teleport banner is painted by hand on the sky (or the last view): veils, texts, chips and progress line in the backdrop's colours; its Cancel button keeps the chosen ones"
+paths = ["crates/aurora-viewer/src/ui/loading.rs"]
+op = "insert_fn_start"
+fn = "banner"
+expect_sig = 'fn banner\(.*p: &Palette,'
+body = '''
+// painted on the sky or the last view: the backdrop's colours
+// (`Palette::backdrop`), like the sky itself
+let p = &p.backdrop();
+'''
+
+[[patch]]
+id = "login-night-sky-last-view"
+why = "goes with login-night-sky-banner: the veil over the last view behind the banner is the night's, not a light panel's"
+paths = ["crates/aurora-viewer/src/ui/backdrop.rs"]
+op = "literal"
+fn = "paint"
+find = "let n = p.navy;"
+replace = "let n = p.backdrop().navy; // aurora-local-patch: login-night-sky-last-view"
+
+[[patch]]
+id = "login-night-sky-dialogs"
+why = "the login dialogs blur the real screen behind them, now the dark sky: a chosen panel covers it instead of tinting it"
+paths = ["crates/aurora-viewer/src/ui/widgets/workspace.rs"]
+op = "literal"
+find = "frame.fill = Color32::from_rgba_unmultiplied(p.panel.r(), p.panel.g(), p.panel.b(), (f32::from(p.panel_alpha) * tint) as u8);"
+replace = """// aurora-local-patch: login-night-sky-dialogs
+            // over the backdrop's night (`Palette::backdrop`) a chosen panel
+            // covers the sky: tinting it, a light one left its text at 1.2
+            // to 3.2:1
+            let alpha = if p.backdrop() == p {
+                (f32::from(p.panel_alpha) * tint) as u8
+            } else {
+                u8::MAX
+            };
+            frame.fill = Color32::from_rgba_unmultiplied(p.panel.r(), p.panel.g(), p.panel.b(), alpha);"""

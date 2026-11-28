@@ -1,0 +1,22 @@
+{
+ "id": "chinese-old-plates",
+ "culture": "chinese",
+ "name": "Chinese, old woodblocks and paintings",
+ "names": {
+  "fr": "Chinoise, gravures et peintures anciennes",
+  "ja": "中国（古い版画と絵画から）",
+  "de": "Chinesisch, alte Holzschnitte und Malereien",
+  "es": "China, grabados y pinturas antiguos",
+  "it": "Cinese, antiche xilografie e pitture",
+  "nb": "Kinesisk, gamle tresnitt og malerier",
+  "pl": "Chińska, dawne drzeworyty i malarstwo",
+  "pt": "Chinês, gravuras e pinturas antigas",
+  "pt-BR": "Chinesa, gravuras e pinturas antigas",
+  "ru": "Китайская, старинные гравюры и живопись",
+  "tr": "Çin, eski baskılar ve resimler",
+  "uk": "Китайська, старовинні гравюри та живопис",
+  "zh-Hans": "中国（古版画与古画）",
+  "zh-Hant": "中國（古版畫與古畫）"
+ },
+ "order": 5
+}

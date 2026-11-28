@@ -1,0 +1,20 @@
+{
+ "credits": [
+  {
+   "holder": "ETH-Bibliothek Zürich (e-rara)",
+   "work": "J. E. Bode, Uranographia sive astrorum descriptio (Berlin, 1801), Rar 10278: figures cut from the plate scans and placed on the stars",
+   "licence": "Public Domain Mark 1.0",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-24",
+   "note": "Citation asked by the library: Ioannis Elerti Bode uranographia sive astrorum descriptio ... Berlin : Bode, 1801. ETH-Bibliothek Zürich, Rar 10278, https://doi.org/10.3931/e-rara-11148 / Public Domain Mark"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Changes to the plate cut-outs of this set",
+   "licence": "Own work",
+   "url": "",
+   "imported": "2026-11-24",
+   "note": "All 25: star marks, grid lines and lettering removed and the gaps filled with texture copied from beside them; ink of neighbouring figures removed; figures fitted to the stars; drawing order added. Carina with Puppis and Vela, Hydra and Centaurus are each joined from two or three plates."
+  }
+ ]
+}

@@ -1,0 +1,28 @@
+{
+ "credits": [
+  {
+   "holder": "Lepsius (ed.), Denkmaeler aus Aegypten und Aethiopien, 1849-59; scan by The New York Public Library",
+   "work": "Abth. III Bl. 137, Seti I ceiling (Grab XVII, Saal M): figures cut out, star marks and loose discs taken off",
+   "licence": "Public domain. Commons page, verbatim: \"This file is in the public domain because it is a mere mechanical scan or photocopy of a public domain original\" (PD-scan)",
+   "url": "https://commons.wikimedia.org/wiki/File:Neues_Reich._Dynastie_XIX._Theben_(Thebes)._Bab_el_Meluk_(B%C3%AEb%C3%A2n_el-Mul%C3%BBk)._Grab_17._Deckenbild_im_Sarkophagsaale_M_(NYPL_b14291191-38310).jpg",
+   "imported": "2026-11-26",
+   "note": "Commons page, verbatim: \"The author died in 1849, so this work is in the public domain...\" (template PD-old-auto-1923, deathyear=1849, the plate's date; Lepsius's own death year not verified here; the NYPL item page could not be read). Engraved lines kept, except on eg003 (lion): the lines its 17 star marks lay across were re-joined by drawing. Discs removed on eg001, eg003, eg012, eg017."
+  },
+  {
+   "holder": "Karrie Berglund (Digitalis Education Solutions, Inc.), after Juan Antonio Belmonte",
+   "work": "Stick lines of the Egyptian sky culture (Stellarium 'Egyptian', after Belmonte's 'A Map of the Ancient Egyptian Firmament'), copied into each figure file",
+   "licence": "GNU GPL v2.0",
+   "url": "https://github.com/Stellarium/stellarium/tree/e233fa9b3d21e2cafe9c168e6710b627532a7dd4/skycultures/egyptian",
+   "imported": "2026-11-26",
+   "note": "The same lines as cultures/egyptian/lines.json (order and timing made for this viewer); the drawings were placed on them."
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Placement of the ceiling figures",
+   "licence": "Own work",
+   "url": "",
+   "imported": "2026-11-26",
+   "note": "Each figure fitted to its star group by scale, turn and shift on named plate points; eg011 and eg014 are matched to their star groups by our reading of the plate. Drawing order added."
+  }
+ ]
+}

@@ -1,0 +1,1926 @@
+# Performance: the same viewer, faster. Nothing it draws, plays, sends or
+# saves changes; only where and how often the work is done.
+#
+# Applied last, after every other manifest (its anchors are the tree with
+# all of them applied), so it can also speed up their code. Each step keeps
+# the results of the code it replaces; where that could not be shown, the
+# change was left out. The parts:
+#
+# - Foot support traces (grounding.rs, hover.rs): the 16 to 32 traces of a
+#   grounded avatar's feet a frame each went over the whole pick index for
+#   their candidates. Now one pass a frame takes those that can reach a box
+#   around the avatar (PickIndex::column_candidates, the bounds widened as
+#   the ray search widens them), and each trace picks its own among them
+#   with the same test (ray_candidates_among): the same objects in the same
+#   order, the exact hit test unchanged, so the same support; a trace
+#   outside the box takes the full pass as before. A metre of room around
+#   the box covers what moves between the index's sync and the trace.
+#   Feet height (100) lowers the traces inside the same box.
+# - Water walking tops (117, picking.rs water_walk_top): the five traces
+#   share one such pass; and the probe is skipped in the frames where
+#   water_walk::Runtime::update lets the walk go before it reads its answer
+#   (bridge not ready, suspended, locked while not walking, no water over
+#   the ground).
+# - Texture uploads (textures.rs): the uploads a decode job already staged
+#   only record a GPU copy; they get room of their own beside the 24 MB a
+#   frame of the main thread's writes, up to 48 MB a frame in all (about
+#   2 ms of GPU), within the same 3 ms time budget, so their staging chunks
+#   (2 of 32 MB on a card without resizable BAR) free sooner for the decode
+#   jobs that wait for them. The textures are the same; they arrive sooner.
+#   A 4-channel image is moved, not copied, into its levels when no sculpt
+#   map keeps it.
+# - Projector shadow maps: AURORA_PROFILE gives the maps drawn a frame and
+#   their casters (`spot_maps`, `sd_spot`, docs/TESTING.md).
+# - Calm water and open-sea swell (109), water shape (120): their maps are
+#   built on the background jobs' pool (Jobs::run, as the decodes) instead
+#   of the frame's, and their per-second scans of the objects and of the
+#   terrain run as the frame's own parallel loops (frame_par), which the
+#   main thread takes part in, in the same order.
+# - Complexity rules (app.rs, complexity.rs): the saved exceptions, the
+#   blocked residents' silhouettes and the friends set are kept between
+#   frames and made again only when one of them changed (each compared as
+#   it is).
+# - Poses (scene/mod.rs update_poses): the posed and held avatars looked up
+#   in sets, not lists, when the poses and skeletons of the others go.
+# - Per-frame small work (app.rs): the media plugins' folder text, the sky
+#   log's key (the source hashed, not formatted), the cache folder (fixed
+#   once the run's folder is chosen, before the first frame), and the
+#   poser demo's environment variable read outside the demo.
+# - Background work on the frame's pool: the terrain paint map's bake and
+#   its wait for staging room, and the physics shapes' preparation, go to
+#   the jobs' pool.
+# - A paint map staged again at a scene's recreation (terrain_paint.rs
+#   PaintMap::prepare) waits for staging room on the jobs' pool too.
+# - Occlusion streaming (121, object_occlusion.rs): a verdict's tested
+#   objects come from their set bits only, lowest first, the same pairs in
+#   the same order as the test of each of the 32 bits of every word.
+# - Sky rays (114, env.wgsl): the cascades' projections of a ray are made
+#   once at its start; a sample's is start + t * direction (one
+#   multiply-add instead of a matrix product), equal to the float rounding.
+# - Log: the follow-simulator list's lines that only reorder (96) at debug
+#   level; the 20-second media list counts the faces neither wanted nor
+#   loaded in one line; "projector shadow maps active" at most one line
+#   every 2 s, with the range it went through meanwhile.
+#
+# Tests: hover::tests::a_column_gives_each_search_inside_it_what_the_full_pass_gives,
+# grounding::tests::a_support_column_gives_the_supports_of_the_full_pass,
+# complexity::tests::the_kept_inputs_follow_every_change_of_what_they_come_from,
+# lights::tests::the_projector_maps_line_is_written_on_a_change_at_most_every_two_seconds,
+# textures::tests::staged_uploads_have_room_of_their_own,
+# object_occlusion::tests::the_tested_objects_are_those_of_every_bit_in_order, and the existing
+# tests of the code each step touches (grounding, picking, water walking,
+# ocean, textures).
+#
+# Optional links (glue_for the partner step: OPTIONAL-MISSING without the
+# other patch, which applies earlier; DRIFT when it is there and the
+# step's anchor is not): the steps that tune another patch's code
+# go with it: perf-water-walk-* (117); perf-calm-*, perf-field-*,
+# perf-ocean-jobs (109); perf-shape-* (120); perf-occl-tested-bits(-test)
+# (121); perf-sky-rays-* (114); perf-log-follow-sim (96, which needs 92).
+# Everything else tunes upstream code and applies alone.
+
+# ---------------------------------------------------------- foot support
+
+[[patch]]
+id = "perf-pick-column"
+why = "one pass over the pick index for several ray searches in the same place, each then getting the full pass's candidates"
+paths = ["crates/aurora-viewer/src/scene/hover.rs"]
+op = "literal"
+find = '''
+                .map(|(i, _)| i),
+        );
+    }
+    /// The objects of a radius of at least `min_radius` whose bounds come within
+'''
+replace = '''.map(|(i, _)| i),
+        );
+    }
+
+    // aurora-local-patch: perf-pick-column
+    /// The objects a ray search whose searched part lies in the box
+    /// `min`..`max` can test, from one pass over the index: those whose
+    /// bounds, widened as `ray_candidates` widens them (5 % + 15 cm),
+    /// reach the box, and those tested whatever the ray. Several searches
+    /// in the same place (the traces of a pair of feet) then pick their own
+    /// with [`Self::ray_candidates_among`] instead of a pass each.
+    pub fn column_candidates(&self, min: Vec3, max: Vec3, out: &mut Vec<usize>) {
+        out.clear();
+        out.extend(
+            self.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    let r = e.radius * 1.05 + 0.15;
+                    e.pickable() && (e.always || e.center.clamp(min, max).distance_squared(e.center) <= r * r)
+                })
+                .map(|(i, _)| i),
+        );
+    }
+
+    /// What `ray_candidates` gives for `ray`, among `among` (a
+    /// [`Self::column_candidates`] list, in index order): the same objects
+    /// in the same order, but those whose widened bounds do not reach the
+    /// column's box, which cannot meet the part of the ray inside it.
+    pub fn ray_candidates_among(&self, ray: (Vec3, Vec3), among: &[usize], out: &mut Vec<usize>) {
+        let probe = Probe { ray, depth: None };
+        out.clear();
+        out.extend(
+            among
+                .iter()
+                .copied()
+                .filter(|&i| self.entries.get(i).is_some_and(|e| e.candidate(&probe))),
+        );
+    }
+
+    /// The objects of a radius of at least `min_radius` whose bounds come within'''
+
+[[patch]]
+id = "perf-pick-column-test"
+why = "goes with perf-pick-column: against the full pass, for random objects and segments"
+paths = ["crates/aurora-viewer/src/scene/hover.rs"]
+op = "literal"
+find = '''
+    #[test]
+    fn candidates_come_in_index_order() {
+'''
+replace = '''// aurora-local-patch: perf-pick-column-test
+    #[test]
+    fn a_column_gives_each_search_inside_it_what_the_full_pass_gives() {
+        let mut state = 7u64;
+        let mut rnd = |m: f32| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 40) as f32 / (1u64 << 24) as f32) * m
+        };
+        let mut index = PickIndex::default();
+        for i in 0..3000 {
+            let center = Vec3::new(rnd(16.0) - 8.0, rnd(16.0) - 8.0, rnd(24.0) - 12.0);
+            let e = match i % 50 {
+                0 => PickEntry::NEVER,
+                1 => PickEntry {
+                    center,
+                    ..always(0.0, 0.0)
+                },
+                _ => PickEntry {
+                    center,
+                    radius: rnd(3.0),
+                    ..sphere(0.0, 0.0, 0.0)
+                },
+            };
+            index.set(i, e);
+        }
+        let (min, max) = (Vec3::new(-1.5, -1.0, -5.0), Vec3::new(1.0, 1.5, 2.5));
+        let mut column = Vec::new();
+        index.column_candidates(min, max, &mut column);
+        assert!(column.len() < 3000, "the column leaves the far objects out");
+        let (mut full, mut among) = (Vec::new(), Vec::new());
+        for _ in 0..2000 {
+            // a searched segment inside the box: straight down (the feet's
+            // traces) or any way
+            let from = min + (max - min) * Vec3::new(rnd(1.0), rnd(1.0), rnd(1.0));
+            let to = if rnd(1.0) < 0.5 {
+                from.with_z(min.z + (from.z - min.z) * rnd(1.0))
+            } else {
+                min + (max - min) * Vec3::new(rnd(1.0), rnd(1.0), rnd(1.0))
+            };
+            let Some(dir) = (to - from).try_normalize() else { continue };
+            let length = from.distance(to);
+            index.ray_candidates((from, dir), &mut full);
+            index.ray_candidates_among((from, dir), &column, &mut among);
+            // the same order, nothing that the full pass does not give
+            let mut rest = full.iter();
+            assert!(among.iter().all(|i| rest.any(|j| j == i)), "{among:?} in {full:?}");
+            // and what it leaves out cannot meet the segment
+            for i in full.iter().filter(|i| !among.contains(i)) {
+                let e = index.entries[*i];
+                let along = (e.center - from).dot(dir).clamp(0.0, length);
+                assert!(!e.always, "an object tested whatever the ray stays");
+                assert!(
+                    e.center.distance(from + dir * along) > e.radius * 1.05 + 0.15,
+                    "{i}: {e:?} reaches the segment {from} {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidates_come_in_index_order() {'''
+
+[[patch]]
+id = "perf-ground-column-type"
+why = "the box around an avatar's support traces and the candidates taken for it"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+find = '''
+use super::anim::grounding::{Frame, Surface};
+use super::*;
+'''
+replace = '''use super::anim::grounding::{Frame, Surface};
+use super::*;
+
+// aurora-local-patch: perf-ground-column-type
+/// Where the ankle traces of a standing, kneeling or lifted pose search,
+/// around the avatar's root: half a body below its feet and a trace reach
+/// under them (Feet height lowering the traces by up to a metre), up to a
+/// trace reach over a leg raised to the root (m). A trace outside it takes
+/// the full pass.
+const COLUMN_BELOW: Vec3 = Vec3::new(1.5, 1.5, 5.0);
+const COLUMN_ABOVE: Vec3 = Vec3::new(1.5, 1.5, 2.5);
+/// Room around that box (m): an object the column leaves out is at least
+/// this far from every trace it serves (beyond `ray_candidates`' margin),
+/// more than anything moves between the pick index's sync and the trace.
+const COLUMN_SLACK: f32 = 1.0;
+
+/// The pick index's objects around one avatar's support traces
+/// (`Scene::support_column`).
+pub(super) struct SupportColumn {
+    min: Vec3,
+    max: Vec3,
+    among: Vec<usize>,
+}
+
+impl SupportColumn {
+    fn holds(&self, p: Vec3) -> bool {
+        p.cmpge(self.min).all() && p.cmple(self.max).all()
+    }
+}'''
+
+[[patch]]
+id = "perf-ground-column"
+why = "a support trace takes its candidates from its avatar's column when it lies in the column's box"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+find = '''
+    pub(super) fn ground_surface(&self, world: &World, frame: Frame, ankle: Vec3, now: Instant) -> Option<Surface> {
+        let reach = crate::settings::MAX_GROUND_FEET_HEIGHT + 0.002;
+        let ray = (ankle + Vec3::Z * reach, -Vec3::Z);
+        let mut candidates = Vec::new();
+        self.pick.ray_candidates(ray, &mut candidates);
+'''
+replace = '''#[cfg(test)]
+    pub(super) fn ground_surface(&self, world: &World, frame: Frame, ankle: Vec3, now: Instant) -> Option<Surface> {
+        self.ground_surface_in(world, frame, ankle, now, None)
+    }
+
+    // aurora-local-patch: perf-ground-column
+    /// The objects the support traces of the avatar of `frame` can meet:
+    /// one pass over the pick index for all its traces of a frame (16 to
+    /// 32), instead of one each.
+    pub(super) fn support_column(&self, frame: &Frame) -> SupportColumn {
+        let root = frame.to_world.transform_point3(self.avatar_lib.pelvis);
+        let (min, max) = (root - COLUMN_BELOW, root + COLUMN_ABOVE);
+        let mut among = Vec::new();
+        if min.is_finite() && max.is_finite() {
+            let slack = Vec3::splat(COLUMN_SLACK);
+            self.pick.column_candidates(min - slack, max + slack, &mut among);
+        }
+        SupportColumn { min, max, among }
+    }
+
+    /// `ground_surface`, its candidates taken from `column` when the trace
+    /// lies in its box (else the full pass, as before): the same objects
+    /// in the same order either way, so the same support.
+    pub(super) fn ground_surface_in(
+        &self,
+        world: &World,
+        frame: Frame,
+        ankle: Vec3,
+        now: Instant,
+        column: Option<&SupportColumn>,
+    ) -> Option<Surface> {
+        let reach = crate::settings::MAX_GROUND_FEET_HEIGHT + 0.002;
+        let ray = (ankle + Vec3::Z * reach, -Vec3::Z);
+        let mut candidates = Vec::new();
+        // (the trace's searched part: `support_hit` keeps 0..=2 reach)
+        match column.filter(|c| c.holds(ray.0) && c.holds(ray.0 + ray.1 * (reach * 2.0))) {
+            Some(c) => self.pick.ray_candidates_among(ray, &c.among, &mut candidates),
+            None => self.pick.ray_candidates(ray, &mut candidates),
+        }'''
+
+[[patch]]
+id = "perf-ground-column-test"
+why = "goes with perf-ground-column: the same supports with and without the column"
+paths = ["crates/aurora-viewer/src/scene/grounding.rs"]
+op = "literal"
+find = '''
+    #[test]
+    fn grounding_movement_scope_covers_signals_custom_motion_and_immediate_input() {
+'''
+replace = '''// aurora-local-patch: perf-ground-column-test
+    #[test]
+    fn a_support_column_gives_the_supports_of_the_full_pass() {
+        let (mut world, mut scene, front, _) = super::super::picking::tests::scene_with_two_objects();
+        let object = world.objects.get_mut(front).expect("platform");
+        object.update_flags = 0;
+        object.rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        scene.gpu[front].center = Vec3::new(3.0, 0.0, 50.0);
+        scene.gpu[front].radius = 1.0;
+        scene.pick.set(front, hover::PickEntry::of(&scene.gpu[front]));
+        let root = Vec3::new(3.0, 0.0, 51.6);
+        let now = Instant::now();
+        // the own avatar's native frame (no field named that another patch
+        // may add), placed and bounded here
+        world.agent.flying = false;
+        let idx = world.objects.index_of_uuid(&world.agent_id).expect("own avatar");
+        let mut frame = scene.legacy_grounding_frame(&world, idx, now).expect("native frame");
+        frame.to_world = Mat4::from_translation(root - scene.avatar_lib.pelvis);
+        frame.contact = Some(Vec4::new(0.0, 0.0, 1.0, 50.9));
+        frame.velocity_z = 0.0;
+        frame.sole_height = None;
+        frame.max_height = crate::settings::DEFAULT_GROUND_FEET_HEIGHT;
+        frame.standing_anchor = false;
+        let column = scene.support_column(&frame);
+        let support = |ankle, column| {
+            scene
+                .ground_surface_in(&world, frame, ankle, now, column)
+                .map(|s| (s.position, s.normal))
+        };
+        // on the platform, beside it, under it, and a trace the column
+        // does not hold (the full pass)
+        let ankles = [
+            Vec3::new(3.0, 0.0, 50.7),
+            Vec3::new(3.4, 0.2, 51.2),
+            Vec3::new(4.4, 0.0, 50.6),
+            Vec3::new(3.0, 0.0, 48.0),
+            Vec3::new(9.0, 0.0, 50.7),
+        ];
+        assert!(column.holds(ankles[0] + Vec3::Z * 1.1) && column.holds(ankles[0] - Vec3::Z * 1.1));
+        assert!(!column.holds(ankles[4]));
+        let top = support(ankles[0], Some(&column)).expect("platform top");
+        assert!((top.0.z - 50.5).abs() < 0.001, "{top:?}");
+        for ankle in ankles {
+            assert_eq!(support(ankle, Some(&column)), support(ankle, None), "{ankle}");
+        }
+        // a column of a frame far away: its box holds none of the traces
+        let far = Frame {
+            to_world: Mat4::from_translation(Vec3::new(200.0, 0.0, 51.6) - scene.avatar_lib.pelvis),
+            ..frame
+        };
+        let elsewhere = scene.support_column(&far);
+        for ankle in ankles {
+            assert_eq!(support(ankle, Some(&elsewhere)), support(ankle, None), "{ankle}");
+        }
+    }
+
+    #[test]
+    fn grounding_movement_scope_covers_signals_custom_motion_and_immediate_input() {'''
+
+[[patch]]
+id = "perf-ground-column-pass"
+why = "the pose workers take each grounded avatar's column at its first trace of the frame"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = '''
+            let frame = motions.ground;
+            let native_frame = motions.legacy_ground;
+            motions.evaluate_with_support(
+                &rig,
+                *pose_now,
+                Some(base),
+                chunk,
+                |point| frame.and_then(|frame| self.ground_surface(world, frame, point, now)),
+'''
+replace = '''let frame = motions.ground;
+            let native_frame = motions.legacy_ground;
+            // aurora-local-patch: perf-ground-column-pass
+            // (the candidates of this avatar's traces, taken at its first)
+            let column = std::cell::OnceCell::new();
+            motions.evaluate_with_support(
+                &rig,
+                *pose_now,
+                Some(base),
+                chunk,
+                |point| {
+                    frame.and_then(|frame| {
+                        let column = column.get_or_init(|| self.support_column(&frame));
+                        self.ground_surface_in(world, frame, point, now, Some(column))
+                    })
+                },'''
+
+# --------------------------------------------------------- water walking
+
+[[patch]]
+id = "perf-water-walk-column"
+why = "the five traces of the water walking top share one pass over the pick index"
+paths = ["crates/aurora-viewer/src/scene/picking.rs"]
+op = "literal"
+glue_for = "water-walk-object-probe"
+fn = "water_walk_top"
+find = '''
+        let mut candidates = Vec::new();
+        let mut best: Option<f32> = None;
+        for offset in [Vec3::ZERO, Vec3::X * radius, -Vec3::X * radius, Vec3::Y * radius, -Vec3::Y * radius] {
+            let ray = (position + offset, -Vec3::Z);
+            candidates.clear();
+            self.pick.ray_candidates(ray, &mut candidates);
+'''
+replace = '''let mut candidates = Vec::new();
+        let mut best: Option<f32> = None;
+        // aurora-local-patch: perf-water-walk-column
+        // one pass over the pick index for the five traces (each from the
+        // body's centre down to `lowest`), a metre of room around them, as
+        // the feet's support traces do (grounding.rs `support_column`):
+        // each trace still gets the full pass's objects in its order
+        let room = Vec3::new(radius, radius, 0.0) + Vec3::ONE;
+        let mut column = Vec::new();
+        self.pick
+            .column_candidates(position - room - Vec3::Z * distance, position + room, &mut column);
+        for offset in [Vec3::ZERO, Vec3::X * radius, -Vec3::X * radius, Vec3::Y * radius, -Vec3::Y * radius] {
+            let ray = (position + offset, -Vec3::Z);
+            candidates.clear();
+            self.pick.ray_candidates_among(ray, &column, &mut candidates);'''
+
+[[patch]]
+id = "perf-water-walk-skip"
+why = "no water walking top is looked for in the frames where the walk lets go before reading it"
+paths = ["crates/aurora-viewer/src/app/movement.rs"]
+op = "literal"
+glue_for = "water-walk-object-pass"
+find = '''
+            .filter(|water| prefs.water_walk && water.is_finite() && !frame.flying && !frame.seated)
+            .and_then(|water| {
+'''
+replace = '''.filter(|water| prefs.water_walk && water.is_finite() && !frame.flying && !frame.seated)
+            // aurora-local-patch: perf-water-walk-skip
+            // (nor when `water_walk::Runtime::update` lets the walk go
+            // before it reads the top: bridge not ready, suspended, locked
+            // while not walking, no water over the ground)
+            .filter(|water| {
+                frame.bridge_ready
+                    && !frame.suspended
+                    && !(frame.locked && !was_water_walking)
+                    && frame.ground.is_some_and(|ground| ground.is_finite() && water - ground > 0.06)
+            })
+            .and_then(|water| {'''
+
+# ------------------------------------------------------- texture uploads
+
+[[patch]]
+id = "perf-upload-staged-budget"
+why = "the uploads a decode job staged get room of their own beside the main thread's writes"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+find = '''
+    pub fn allows(&self, done: usize, bytes: u64, elapsed: Duration) -> bool {
+        done == 0 || (bytes < self.bytes && elapsed < self.time)
+    }
+}
+'''
+replace = '''pub fn allows(&self, done: usize, bytes: u64, elapsed: Duration) -> bool {
+        done == 0 || (bytes < self.bytes && elapsed < self.time)
+    }
+
+    // aurora-local-patch: perf-upload-staged-budget
+    /// `allows`, the uploads already staged by their decode job counted
+    /// apart: those written by the main thread (`direct` of the `bytes`)
+    /// keep `self.bytes`, and all of them together may reach
+    /// [`STAGED_FRAME_BYTES`]. A staged upload only records a copy, and the
+    /// staging chunk it holds (2 of 32 MB on a card without resizable BAR)
+    /// is free for the decode jobs once it is copied.
+    pub fn allows_split(&self, done: usize, direct: u64, bytes: u64, elapsed: Duration) -> bool {
+        self.allows(done, direct, elapsed) && (done == 0 || bytes < STAGED_FRAME_BYTES.max(self.bytes))
+    }
+}
+
+/// Bytes of GPU copies a frame may record with the uploads staged by the
+/// decode jobs (about 2 ms of GPU at the 24 MB a millisecond above).
+pub const STAGED_FRAME_BYTES: u64 = 48 << 20;'''
+
+[[patch]]
+id = "perf-upload-staged-spent"
+why = "goes with perf-upload-staged-budget: the frame's uploads go while the split budget holds"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+fn = "upload"
+find = '''
+        let mut spent = 0u64;
+        let mut done = 0usize;
+        // uploads whose texture page is not there yet, put back at the end,
+        // and their sizes
+        let mut waiting: Vec<PendingUpload> = Vec::new();
+        let mut waiting_sizes: HashSet<ChainSize> = HashSet::new();
+        let mut walk_started: Option<Instant> = None;
+        self.uploads.promote_ready();
+        while budget.allows(done, spent, t0.elapsed()) {
+'''
+replace = '''let mut spent = 0u64;
+        let mut spent_direct = 0u64; // aurora-local-patch: perf-upload-staged-spent
+        let mut done = 0usize;
+        // uploads whose texture page is not there yet, put back at the end,
+        // and their sizes
+        let mut waiting: Vec<PendingUpload> = Vec::new();
+        let mut waiting_sizes: HashSet<ChainSize> = HashSet::new();
+        let mut walk_started: Option<Instant> = None;
+        self.uploads.promote_ready();
+        while budget.allows_split(done, spent_direct, spent, t0.elapsed()) {'''
+
+[[patch]]
+id = "perf-upload-staged-direct"
+why = "goes with perf-upload-staged-budget: the main thread's writes counted apart"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+fn = "upload"
+find = '''
+                None => {
+                    self.stats.uploads_direct += 1;
+                    u.mips.iter().map(|m| m.2.len() as u64).sum::<u64>()
+                }
+'''
+replace = '''None => {
+                    self.stats.uploads_direct += 1;
+                    // aurora-local-patch: perf-upload-staged-direct
+                    let bytes = u.mips.iter().map(|m| m.2.len() as u64).sum::<u64>();
+                    spent_direct += bytes;
+                    bytes
+                }'''
+
+[[patch]]
+id = "perf-upload-staged-budget-test"
+why = "goes with perf-upload-staged-budget"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+find = '''
+        // either budget spent stops the frame's uploads
+        assert!(!b.allows(1, 1000, Duration::ZERO));
+        assert!(!b.allows(1, 10, Duration::from_millis(1)));
+    }
+'''
+replace = '''// either budget spent stops the frame's uploads
+        assert!(!b.allows(1, 1000, Duration::ZERO));
+        assert!(!b.allows(1, 10, Duration::from_millis(1)));
+    }
+
+    // aurora-local-patch: perf-upload-staged-budget-test
+    #[test]
+    fn staged_uploads_have_room_of_their_own() {
+        let b = UploadBudget::for_frame(Duration::from_millis(16));
+        let mb = |n: u64| n << 20;
+        // the first upload of the frame always goes
+        assert!(b.allows_split(0, mb(100), mb(100), Duration::from_millis(9)));
+        // staged copies go on past the 24 MB of the others, up to their own
+        assert!(b.allows_split(3, 0, mb(30), Duration::ZERO));
+        assert!(!b.allows_split(3, 0, STAGED_FRAME_BYTES, Duration::ZERO));
+        // the main thread's writes keep their 24 MB, counted in the total
+        assert!(!b.allows_split(3, mb(24), mb(24), Duration::ZERO));
+        assert!(!b.allows_split(3, mb(10), mb(48), Duration::ZERO));
+        // the time budget holds for both
+        assert!(!b.allows_split(3, 0, mb(1), b.time));
+        // without staged uploads it is `allows`
+        for (bytes, ms) in [(0, 0), (mb(23), 0), (mb(24), 0), (mb(1), 1), (mb(1), 5)] {
+            let elapsed = Duration::from_millis(ms);
+            assert_eq!(b.allows_split(2, bytes, bytes, elapsed), b.allows(2, bytes, elapsed));
+        }
+    }'''
+
+[[patch]]
+id = "perf-decode-move"
+why = "a decoded 4-channel image is moved into its levels instead of copied, unless a sculpt map keeps it"
+paths = ["crates/aurora-viewer/src/scene/textures.rs"]
+op = "literal"
+fn = "decode_job"
+find = '''
+        Ok((img, decode)) => {
+            let start = Instant::now();
+            let pixels = (img.width * img.height) as usize;
+            let rgba = if img.components == 4 {
+                img.data.clone()
+            } else {
+'''
+replace = '''Ok((mut img, decode)) => {
+            let start = Instant::now();
+            let pixels = (img.width * img.height) as usize;
+            let rgba = if img.components == 4 {
+                // aurora-local-patch: perf-decode-move
+                // (moved, not copied, unless a sculpt map keeps them below)
+                if keep_pixels {
+                    img.data.clone()
+                } else {
+                    std::mem::take(&mut img.data)
+                }
+            } else {'''
+
+# ---------------------------------------------- projector shadow profile
+
+[[patch]]
+id = "perf-spot-stats-fields"
+why = "the frame's projector shadow maps and their casters, for the profile"
+paths = ["crates/aurora-render/src/types.rs"]
+op = "literal"
+find = '''
+    /// without in-pass timestamps.
+    pub gpu_ms: Option<[f32; 5]>,
+}
+'''
+replace = '''/// without in-pass timestamps.
+    pub gpu_ms: Option<[f32; 5]>,
+    // aurora-local-patch: perf-spot-stats-fields
+    /// Projector shadow maps drawn (the shelter map included), and the
+    /// casters drawn in them: those of the CPU lists, terrain included,
+    /// and with the GPU lists the GPU's (read back a frame or two late).
+    pub spot_maps: u32,
+    pub spot_draws: u32,
+}'''
+
+[[patch]]
+id = "perf-spot-stats"
+why = "goes with perf-spot-stats-fields: the maps and the CPU lists' casters"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = '''
+        stats.shadow.draws = cpu_casters;
+        stats.shadow.cpu_draws = cpu_casters;
+'''
+replace = '''stats.shadow.draws = cpu_casters;
+        stats.shadow.cpu_draws = cpu_casters;
+        // aurora-local-patch: perf-spot-stats
+        stats.shadow.spot_maps = spot_vp.iter().flatten().count() as u32;
+        stats.shadow.spot_draws = spot_lists.iter().chain(&spot_terrain_lists).map(|l| l.len() as u32).sum();'''
+
+[[patch]]
+id = "perf-spot-stats-gpu"
+why = "goes with perf-spot-stats-fields: the GPU bins' casters"
+paths = ["crates/aurora-render/src/renderer.rs"]
+op = "literal"
+find = "stats.shadow.rigged_triangles = c.shadow_rigged_triangles;"
+replace = '''stats.shadow.rigged_triangles = c.shadow_rigged_triangles;
+            // aurora-local-patch: perf-spot-stats-gpu
+            stats.shadow.spot_draws += (0..SPOT_SHADOWS).map(|k| c.bins[BIN_SPOT + k]).sum::<u32>();'''
+
+[[patch]]
+id = "perf-spot-profile-fields"
+why = "goes with perf-spot-stats-fields: the profile's sums"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''
+    /// Shadow path of the period's frames (`shadow_cull::path`).
+    shadow_path: u32,
+'''
+replace = '''/// Shadow path of the period's frames (`shadow_cull::path`).
+    shadow_path: u32,
+    // aurora-local-patch: perf-spot-profile-fields
+    /// Projector shadow maps drawn, and their casters (`ShadowStats`).
+    spot_maps: u64,
+    spot_draws: u64,'''
+
+[[patch]]
+id = "perf-spot-profile-add"
+why = "goes with perf-spot-profile-fields"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''
+        if let Some(g) = sh.gpu_ms {
+            add(&mut p.gpu_shadow, &g);
+            p.gpu_shadow_frames += 1;
+        }
+'''
+replace = '''if let Some(g) = sh.gpu_ms {
+            add(&mut p.gpu_shadow, &g);
+            p.gpu_shadow_frames += 1;
+        }
+        // aurora-local-patch: perf-spot-profile-add
+        p.spot_maps += sh.spot_maps as u64;
+        p.spot_draws += sh.spot_draws as u64;'''
+
+[[patch]]
+id = "perf-spot-profile-line"
+why = "goes with perf-spot-profile-fields: in the profile line after the cascades' casters"
+paths = ["crates/aurora-viewer/src/frame_profile.rs"]
+op = "literal"
+find = '''
+        for (k, v) in by_cascade.iter().enumerate() {
+            let _ = write!(out, " {key}{k}={:.0}", count(*v) / unit);
+        }
+    }
+'''
+replace = '''for (k, v) in by_cascade.iter().enumerate() {
+            let _ = write!(out, " {key}{k}={:.0}", count(*v) / unit);
+        }
+    }
+    // aurora-local-patch: perf-spot-profile-line
+    // the projectors' shadow maps (their GPU time is in g_shadow2)
+    let _ = write!(out, " spot_maps={:.1} sd_spot={:.0}", count(p.spot_maps), count(p.spot_draws));'''
+
+[[patch]]
+id = "perf-spot-profile-docs"
+why = "goes with perf-spot-profile-line: the guide's profile keys"
+paths = ["docs/TESTING.md"]
+op = "literal"
+find = '''
+    triangles only count the draws of the GPU lists). `shadow_path`: the
+    shadow path of the second (`AURORA_SHADOW_LEGACY`);
+'''
+replace = '''triangles only count the draws of the GPU lists). `shadow_path`: the
+    shadow path of the second (`AURORA_SHADOW_LEGACY`). `spot_maps`: the
+    projector shadow maps drawn a frame (the shelter map included), and
+    `sd_spot` the casters drawn in them (local patch set; their GPU time is
+    in `g_shadow2`) <!-- // aurora-local-patch: perf-spot-profile-docs -->;'''
+
+# ------------------------------------------------- calm water and swell
+
+[[patch]]
+id = "perf-calm-grain"
+why = "the object slots' share of the frame's parallel loops"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "literal"
+glue_for = "ocean-swell-calm-module"
+find = '''
+/// The static objects whose drawn box meets the water within `[lo, hi]`.
+fn footprints(
+'''
+replace = '''// aurora-local-patch: perf-calm-grain
+/// The object slots' share of the frame's parallel loops (frame_par.rs):
+/// the main thread starts at once and helpers join it, instead of handing
+/// the loop to the pool and sleeping until it is done.
+const SLOTS_GRAIN: crate::frame_par::Grain = crate::frame_par::Grain { chunk: 512, per_helper: 8 };
+
+/// The static objects whose drawn box meets the water within `[lo, hi]`.
+fn footprints('''
+
+[[patch]]
+id = "perf-calm-footprints"
+why = "the static footprints listed by the frame's own parallel loop, in the slots' order as before"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "replace_fn_body"
+glue_for = "ocean-swell-calm-module"
+fn = "footprints"
+expect_sig = 'fn footprints\(world: &World, lo: Vec2, hi: Vec2, time: f32, movers: &Movers\) -> Vec<Footprint>'
+body = '''
+let now = Instant::now();
+let main_level = world.main_water_height();
+// (in the slots' order, as the pool's loop gave them)
+crate::frame_par::filter_map_indexed(&world.objects.slots, SLOTS_GRAIN, |idx, o| {
+    let o = o.as_ref()?;
+    if o.is_avatar() || o.pcode != aurora_prim::params::LL_PCODE_VOLUME || o.is_attachment() {
+        return None;
+    }
+    let root = root_of(world, o)?;
+    if root.is_avatar() || !ocean_ride::is_static(root, time, movers) {
+        return None;
+    }
+    let (center, rotation, hud) = Scene::object_transform_unshifted(world, idx, now)?;
+    if hud || !center.is_finite() {
+        return None;
+    }
+    let level = super::water_effects::water_at(world, center).unwrap_or(main_level);
+    let f = Footprint {
+        center,
+        rotation,
+        half: o.scale.abs() * 0.5,
+        level,
+    };
+    let e = f.extent().truncate();
+    let inside = (center.truncate() + e).cmpge(lo).all() && (center.truncate() - e).cmple(hi).all();
+    (inside && f.touches_water() && f.half.is_finite()).then_some(f)
+})
+'''
+
+[[patch]]
+id = "perf-calm-jobs"
+why = "the fine map built on the background jobs' pool; the tests keep the frame's"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "literal"
+glue_for = "ocean-swell-calm-module"
+find = '''
+    pub fn update(&mut self, world: &World, eye: Vec3, time: f32, settings: WaterEffects) -> Option<Arc<FineMap>> {
+'''
+replace = '''#[cfg(test)]
+    pub fn update(&mut self, world: &World, eye: Vec3, time: f32, settings: WaterEffects) -> Option<Arc<FineMap>> {
+        self.update_on(None, world, eye, time, settings)
+    }
+
+    // aurora-local-patch: perf-calm-jobs
+    /// `update`, the map made on the background jobs' pool (`Jobs::run`,
+    /// as the decodes) instead of the frame's: a rebuild never takes the
+    /// threads a frame's parallel loop waits for. Without `jobs` (tests),
+    /// on the frame's pool as before.
+    pub fn update_on(
+        &mut self,
+        jobs: Option<&super::jobs::Jobs>,
+        world: &World,
+        eye: Vec3,
+        time: f32,
+        settings: WaterEffects,
+    ) -> Option<Arc<FineMap>> {'''
+
+[[patch]]
+id = "perf-calm-jobs-pass"
+why = "goes with perf-calm-jobs"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "literal"
+glue_for = "ocean-swell-calm-module"
+find = "self.rebuild(world, origin, time);"
+replace = "self.rebuild(jobs, world, origin, time); // aurora-local-patch: perf-calm-jobs-pass"
+
+[[patch]]
+id = "perf-calm-rebuild"
+why = "goes with perf-calm-jobs; the moving roots listed by the frame's own parallel loop"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "literal"
+glue_for = "ocean-swell-calm-module"
+find = '''
+    fn rebuild(&mut self, world: &World, origin: Vec2, time: f32) {
+        let size = ocean::FINE_SIZE as f32 * ocean::FINE_CELL;
+        let (lo, hi) = (origin, origin + Vec2::splat(size));
+        // the keyframed roots seen moving now (held a while after they stop)
+        let moving: Vec<uuid::Uuid> = world
+            .objects
+            .slots
+            .par_iter()
+            .filter_map(|o| o.as_ref().filter(|o| ocean_ride::moving_root(o)).map(|o| o.full_id))
+            .collect();
+'''
+replace = '''// aurora-local-patch: perf-calm-rebuild
+    fn rebuild(&mut self, jobs: Option<&super::jobs::Jobs>, world: &World, origin: Vec2, time: f32) {
+        let size = ocean::FINE_SIZE as f32 * ocean::FINE_CELL;
+        let (lo, hi) = (origin, origin + Vec2::splat(size));
+        // the keyframed roots seen moving now (held a while after they stop)
+        let moving: Vec<uuid::Uuid> = crate::frame_par::filter_map_indexed(&world.objects.slots, SLOTS_GRAIN, |_, o| {
+            o.as_ref().filter(|o| ocean_ride::moving_root(o)).map(|o| o.full_id)
+        });'''
+
+[[patch]]
+id = "perf-calm-jobs-spawn"
+why = "goes with perf-calm-jobs"
+paths = ["crates/aurora-viewer/src/scene/ocean_calm.rs"]
+op = "literal"
+glue_for = "ocean-swell-calm-module"
+find = '''
+        let count = prints.len();
+        rayon::spawn(move || {
+            let land = rasterize(origin, &terrain, &prints);
+            if let Some(map) = FineMap::build(origin.to_array(), &land) {
+                // (a map no longer wanted finds its receiver gone)
+                let _ = sender.send(map);
+            }
+        });
+'''
+replace = '''let count = prints.len();
+        // aurora-local-patch: perf-calm-jobs-spawn
+        let build = move || {
+            let land = rasterize(origin, &terrain, &prints);
+            if let Some(map) = FineMap::build(origin.to_array(), &land) {
+                // (a map no longer wanted finds its receiver gone)
+                let _ = sender.send(map);
+            }
+        };
+        match jobs {
+            Some(jobs) => jobs.run(build),
+            None => rayon::spawn(build),
+        }'''
+
+[[patch]]
+id = "perf-field-imports"
+why = "goes with perf-field-sample: the pool's loop is no longer used here"
+paths = ["crates/aurora-viewer/src/scene/ocean_field.rs"]
+op = "literal"
+glue_for = "ocean-swell-field-module"
+find = '''
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex, mpsc};
+'''
+replace = "use std::sync::{Arc, Mutex, mpsc}; // aurora-local-patch: perf-field-imports"
+
+[[patch]]
+id = "perf-field-sample"
+why = "the swell's field sampled by the frame's own parallel loop, row by row in the same order"
+paths = ["crates/aurora-viewer/src/scene/ocean_field.rs"]
+op = "replace_fn_body"
+glue_for = "ocean-swell-field-module"
+fn = "sample"
+expect_sig = 'fn sample\(world: &World, origin: Vec2\) -> Vec<Cell>'
+body = '''
+let n = ocean::FIELD_SIZE as usize;
+let void_level = world.main_water_height();
+// (the frame's own parallel loop, which the main thread takes part in
+// instead of sleeping until the pool is done: frame_par.rs; row by row,
+// in the same order)
+const ROWS_GRAIN: crate::frame_par::Grain = crate::frame_par::Grain { chunk: 1, per_helper: 4 };
+let rows: Vec<usize> = (0..n).collect();
+let chunks = crate::frame_par::fold(&rows, ROWS_GRAIN, Vec::new, |mut cells, &y| {
+    cells.extend((0..n).map(|x| {
+        let xy = origin + (Vec2::new(x as f32, y as f32) + Vec2::splat(0.5)) * ocean::FIELD_CELL;
+        let p = xy.extend(0.0);
+        cell(super::water_effects::water_at(world, p), world.ground_height(p), void_level)
+    }));
+    cells
+});
+chunks.into_iter().flatten().collect()
+'''
+
+[[patch]]
+id = "perf-field-jobs"
+why = "the swell's field built on the background jobs' pool; the tests keep the frame's"
+paths = ["crates/aurora-viewer/src/scene/ocean_field.rs"]
+op = "literal"
+glue_for = "ocean-swell-field-module"
+find = '''
+    pub fn update(&mut self, world: &World, eye: Vec3, time: f32, settings: WaterEffects, wave1: Vec2) -> Ocean {
+'''
+replace = '''#[cfg(test)]
+    pub fn update(&mut self, world: &World, eye: Vec3, time: f32, settings: WaterEffects, wave1: Vec2) -> Ocean {
+        self.update_on(None, world, eye, time, settings, wave1)
+    }
+
+    // aurora-local-patch: perf-field-jobs
+    /// `update`, the field built on the background jobs' pool
+    /// (`Jobs::run`) instead of the frame's; without `jobs` (tests), on the
+    /// frame's pool as before.
+    pub fn update_on(
+        &mut self,
+        jobs: Option<&super::jobs::Jobs>,
+        world: &World,
+        eye: Vec3,
+        time: f32,
+        settings: WaterEffects,
+        wave1: Vec2,
+    ) -> Ocean {'''
+
+[[patch]]
+id = "perf-field-jobs-spawn"
+why = "goes with perf-field-jobs"
+paths = ["crates/aurora-viewer/src/scene/ocean_field.rs"]
+op = "literal"
+glue_for = "ocean-swell-field-module"
+find = '''
+                let (sender, receiver) = mpsc::channel();
+                rayon::spawn(move || {
+                    if let Some(field) = Field::build(origin.to_array(), &cells) {
+                        // (a field no longer wanted finds its receiver gone)
+                        let _ = sender.send(field);
+                    }
+                });
+'''
+replace = '''let (sender, receiver) = mpsc::channel();
+                // aurora-local-patch: perf-field-jobs-spawn
+                let build = move || {
+                    if let Some(field) = Field::build(origin.to_array(), &cells) {
+                        // (a field no longer wanted finds its receiver gone)
+                        let _ = sender.send(field);
+                    }
+                };
+                match jobs {
+                    Some(jobs) => jobs.run(build),
+                    None => rayon::spawn(build),
+                }'''
+
+[[patch]]
+id = "perf-ocean-jobs"
+why = "goes with perf-calm-jobs and perf-field-jobs: the scene's jobs given to both"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+glue_for = "ocean-swell-ground-update"
+find = '''
+        let mut ocean = self.ocean_field.update(world, eye, time, settings, self.ocean_wave1);
+        ocean.fine = self.ocean_calm.update(world, eye, time, settings);
+'''
+replace = '''// aurora-local-patch: perf-ocean-jobs
+        // (their maps built on the background jobs' pool)
+        let mut ocean = self
+            .ocean_field
+            .update_on(Some(&scene.jobs), world, eye, time, settings, self.ocean_wave1);
+        ocean.fine = self.ocean_calm.update_on(Some(&scene.jobs), world, eye, time, settings);'''
+
+[[patch]]
+id = "perf-shape-jobs"
+why = "the water shape's height map made on the background jobs' pool; the tests keep the frame's"
+paths = ["crates/aurora-viewer/src/scene/water_shape_source.rs"]
+op = "literal"
+glue_for = "water-normal-shape-source-module"
+find = '''
+    pub fn feed(&mut self, textures: &mut TextureStreamer, id: Uuid, settings: WaterEffects) {
+'''
+replace = '''#[cfg(test)]
+    pub fn feed(&mut self, textures: &mut TextureStreamer, id: Uuid, settings: WaterEffects) {
+        self.feed_on(None, textures, id, settings);
+    }
+
+    // aurora-local-patch: perf-shape-jobs
+    /// `feed`, the height map made on the background jobs' pool
+    /// (`Jobs::run`) instead of the frame's; without `jobs` (tests), on the
+    /// frame's pool as before.
+    pub fn feed_on(&mut self, jobs: Option<&super::jobs::Jobs>, textures: &mut TextureStreamer, id: Uuid, settings: WaterEffects) {'''
+
+[[patch]]
+id = "perf-shape-jobs-spawn"
+why = "goes with perf-shape-jobs"
+paths = ["crates/aurora-viewer/src/scene/water_shape_source.rs"]
+op = "literal"
+glue_for = "water-normal-shape-source-module"
+find = '''
+        let (sender, receiver) = mpsc::channel();
+        rayon::spawn(move || {
+            let map = HeightMap::from_normal_map(source.width, source.height, source.components, &source.pixels);
+            // (a map no longer wanted finds its receiver gone)
+            let _ = sender.send(map);
+        });
+'''
+replace = '''let (sender, receiver) = mpsc::channel();
+        // aurora-local-patch: perf-shape-jobs-spawn
+        let build = move || {
+            let map = HeightMap::from_normal_map(source.width, source.height, source.components, &source.pixels);
+            // (a map no longer wanted finds its receiver gone)
+            let _ = sender.send(map);
+        };
+        match jobs {
+            Some(jobs) => jobs.run(build),
+            None => rayon::spawn(build),
+        }'''
+
+[[patch]]
+id = "perf-shape-jobs-pass"
+why = "goes with perf-shape-jobs"
+paths = ["crates/aurora-viewer/src/scene/water_shape_source.rs"]
+op = "literal"
+glue_for = "water-normal-shape-source-module"
+find = "effects.water_shape.feed(&mut self.textures, self.env_tex[3].0, settings);"
+replace = '''// aurora-local-patch: perf-shape-jobs-pass
+        effects
+            .water_shape
+            .feed_on(Some(&self.jobs), &mut self.textures, self.env_tex[3].0, settings);'''
+
+# ----------------------------------------------------- complexity rules
+
+[[patch]]
+id = "perf-complexity-inputs"
+why = "the complexity rules' exceptions and friends kept between frames, made again on a change"
+paths = ["crates/aurora-viewer/src/scene/complexity.rs"]
+op = "literal"
+find = '''
+impl Rules<'_> {
+    /// Changes when any rule does (recompute at once).
+'''
+replace = '''// aurora-local-patch: perf-complexity-inputs
+/// The exceptions and friends a frame gives [`Rules`], kept from one frame
+/// to the next and made again only when what they come from changed: the
+/// saved choices (`Settings::render_exceptions`), the blocked residents
+/// and the friends list. Each is compared as it is, so a list replaced
+/// with another (a new login) is seen like any change.
+#[derive(Default)]
+pub struct Inputs {
+    built: bool,
+    saved: Vec<(String, u8)>,
+    blocked: Vec<Uuid>,
+    friend_ids: Vec<Uuid>,
+    scratch: Vec<Uuid>,
+    /// The saved choices alone (what the people lists' menus check).
+    pub saved_map: HashMap<Uuid, u8>,
+    /// With the blocked residents as silhouettes (3, FIRE-11783).
+    pub exceptions: HashMap<Uuid, u8>,
+    pub friends: HashSet<Uuid>,
+}
+
+impl Inputs {
+    /// This frame's inputs; `saved_map` makes the map of `saved` (called
+    /// only when it changed).
+    pub fn update(
+        &mut self,
+        saved: &[(String, u8)],
+        saved_map: impl FnOnce() -> HashMap<Uuid, u8>,
+        blocked: impl Iterator<Item = Uuid>,
+        friends: impl Iterator<Item = Uuid>,
+    ) {
+        self.scratch.clear();
+        self.scratch.extend(blocked);
+        let blocked_same = self.built && self.scratch == self.blocked;
+        if !blocked_same {
+            std::mem::swap(&mut self.scratch, &mut self.blocked);
+        }
+        let saved_same = self.built && self.saved.as_slice() == saved;
+        if !saved_same {
+            self.saved = saved.to_vec();
+            self.saved_map = saved_map();
+        }
+        if !saved_same || !blocked_same {
+            self.exceptions.clone_from(&self.saved_map);
+            for id in &self.blocked {
+                self.exceptions.insert(*id, 3);
+            }
+        }
+        self.scratch.clear();
+        self.scratch.extend(friends);
+        if !self.built || self.scratch != self.friend_ids {
+            std::mem::swap(&mut self.scratch, &mut self.friend_ids);
+            self.friends = self.friend_ids.iter().copied().collect();
+        }
+        self.built = true;
+    }
+}
+
+impl Rules<'_> {
+    /// Changes when any rule does (recompute at once).'''
+
+[[patch]]
+id = "perf-complexity-inputs-test"
+why = "goes with perf-complexity-inputs"
+paths = ["crates/aurora-viewer/src/scene/complexity.rs"]
+op = "literal"
+find = '''
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slider_matches_firestorm() {
+'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: perf-complexity-inputs-test
+    #[test]
+    fn the_kept_inputs_follow_every_change_of_what_they_come_from() {
+        let id = |n: u128| Uuid::from_u128(n);
+        let map = |saved: &[(String, u8)]| -> HashMap<Uuid, u8> {
+            saved.iter().filter_map(|(s, m)| Some((Uuid::parse_str(s).ok()?, *m))).collect()
+        };
+        // what the frame made before: the saved map, the blocked on top
+        let fresh = |saved: &[(String, u8)], blocked: &[Uuid], friends: &[Uuid]| {
+            let mut exceptions = map(saved);
+            for b in blocked {
+                exceptions.insert(*b, 3);
+            }
+            (map(saved), exceptions, friends.iter().copied().collect::<HashSet<Uuid>>())
+        };
+        let mut inputs = Inputs::default();
+        let mut made = 0;
+        let mut check = |inputs: &mut Inputs, saved: &[(String, u8)], blocked: &[Uuid], friends: &[Uuid]| {
+            inputs.update(
+                saved,
+                || {
+                    made += 1;
+                    map(saved)
+                },
+                blocked.iter().copied(),
+                friends.iter().copied(),
+            );
+            let (saved_map, exceptions, friends) = fresh(saved, blocked, friends);
+            assert_eq!(inputs.saved_map, saved_map);
+            assert_eq!(inputs.exceptions, exceptions);
+            assert_eq!(inputs.friends, friends);
+        };
+        let mut saved = vec![(id(1).to_string(), 2), ("not an id".to_string(), 1)];
+        check(&mut inputs, &saved, &[], &[]);
+        check(&mut inputs, &saved, &[], &[]);
+        // a saved choice changes, then one is added for a blocked resident
+        saved[0].1 = 1;
+        check(&mut inputs, &saved, &[], &[id(5)]);
+        check(&mut inputs, &saved, &[id(1)], &[id(5)]);
+        saved.push((id(7).to_string(), 2));
+        check(&mut inputs, &saved, &[id(1)], &[id(5)]);
+        // unblocked: the saved choice shows again; friends come and go
+        check(&mut inputs, &saved, &[], &[id(5), id(6)]);
+        check(&mut inputs, &saved, &[], &[id(6)]);
+        // a later choice for the same resident wins, as in the settings
+        saved.push((id(1).to_string(), 2));
+        check(&mut inputs, &saved, &[], &[]);
+        // everything gone (another login)
+        check(&mut inputs, &[], &[], &[]);
+        drop(check);
+        assert_eq!(made, 5, "the saved map is made again only when the choices change");
+    }
+
+    #[test]
+    fn slider_matches_firestorm() {'''
+
+[[patch]]
+id = "perf-complexity-inputs-field"
+why = "goes with perf-complexity-inputs: the app keeps them"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+    /// Throttle of the "sky frame" log line.
+    sky_log: crate::world::env::SkyLog,
+'''
+replace = '''/// Throttle of the "sky frame" log line.
+    sky_log: crate::world::env::SkyLog,
+    // aurora-local-patch: perf-complexity-inputs-field
+    /// The complexity rules' exceptions and friends, kept between frames.
+    complexity_inputs: crate::scene::complexity::Inputs,'''
+
+[[patch]]
+id = "perf-complexity-inputs-default"
+why = "goes with perf-complexity-inputs-field"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "sky_log: Default::default(),"
+replace = '''sky_log: Default::default(),
+            complexity_inputs: Default::default(), // aurora-local-patch: perf-complexity-inputs-default'''
+
+[[patch]]
+id = "perf-complexity-inputs-pass"
+why = "goes with perf-complexity-inputs: the frame's rules read the kept maps"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+            let mut exceptions = self.settings.render_exceptions_map();
+            // the people lists' menus check the saved choice, before the
+            // blocked residents' silhouettes below (allocation kept)
+            self.world.render_exceptions.clone_from(&exceptions);
+            // blocked residents: grey silhouettes (FIRE-11783)
+            for id in self.world.mutes.blocked_ids() {
+                exceptions.insert(id, 3);
+            }
+            let friends: std::collections::HashSet<uuid::Uuid> = self.world.social.friends.iter().map(|f| f.id).collect();
+            self.scene.update_complexity(
+                &self.world,
+                &crate::scene::complexity::Rules {
+                    max: self.settings.max_complexity,
+                    max_area: self.settings.max_attachment_area,
+                    mode: self.settings.complexity_mode,
+                    exceptions: &exceptions,
+                    friends: &friends,
+                },
+            );
+'''
+replace = '''// aurora-local-patch: perf-complexity-inputs-pass
+            // the saved choices, the blocked residents' grey silhouettes
+            // (FIRE-11783) and the friends: the last frame's maps unless
+            // one of them changed
+            let settings = &self.settings;
+            let inputs = &mut self.complexity_inputs;
+            inputs.update(
+                &settings.render_exceptions,
+                || settings.render_exceptions_map(),
+                self.world.mutes.blocked_ids(),
+                self.world.social.friends.iter().map(|f| f.id),
+            );
+            // the people lists' menus check the saved choice
+            if self.world.render_exceptions != inputs.saved_map {
+                self.world.render_exceptions.clone_from(&inputs.saved_map);
+            }
+            self.scene.update_complexity(
+                &self.world,
+                &crate::scene::complexity::Rules {
+                    max: settings.max_complexity,
+                    max_area: settings.max_attachment_area,
+                    mode: settings.complexity_mode,
+                    exceptions: &inputs.exceptions,
+                    friends: &inputs.friends,
+                },
+            );'''
+
+# ------------------------------------------------------------------ poses
+
+[[patch]]
+id = "perf-poses-retain"
+why = "the poses and skeletons of the avatars no longer posed or held go by set lookups, not list scans"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+fn = "update_poses"
+find = '''
+        world
+            .avatar_poses
+            .retain(|id, _| posed.iter().any(|p| p.0 == *id) || held.contains(id));
+        world.avatar_shape_dz.clear();
+        world.avatar_shape_dz.extend(shape_dz);
+        self.skeletons
+            .retain(|id, _| world.avatar_poses.contains_key(id) || posed.iter().any(|p| p.0 == *id));
+'''
+replace = '''// aurora-local-patch: perf-poses-retain
+        // (sets of the posed and held owners: a crowd's retains looked
+        // each one up in the lists, O(n²))
+        let posed_ids: HashSet<Uuid> = posed.iter().map(|p| p.0).collect();
+        let held_ids: HashSet<Uuid> = held.iter().copied().collect();
+        world.avatar_poses.retain(|id, _| posed_ids.contains(id) || held_ids.contains(id));
+        world.avatar_shape_dz.clear();
+        world.avatar_shape_dz.extend(shape_dz);
+        self.skeletons
+            .retain(|id, _| world.avatar_poses.contains_key(id) || posed_ids.contains(id));'''
+
+# ------------------------------------------------------ per-frame small work
+
+[[patch]]
+id = "perf-frame-cache-dir"
+why = "the media frame's cache folder made once: it is fixed once the run's folder is chosen, before the first frame"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                let cache_dir = crate::settings::cache_dir();
+                let frame = crate::media::MediaFrame {
+'''
+replace = '''// aurora-local-patch: perf-frame-cache-dir
+                // (fixed once `cache_location::init` ran, before the first
+                // frame: the chosen folder and the environment it reads do
+                // not change during a run)
+                static CACHE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+                let cache_dir = CACHE_DIR.get_or_init(crate::settings::cache_dir);
+                let frame = crate::media::MediaFrame {'''
+
+[[patch]]
+id = "perf-frame-cache-dir-use"
+why = "goes with perf-frame-cache-dir"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                    net: (!self.demo).then(|| (self.net.runtime(), self.net.caps_http())),
+                    cache_dir: &cache_dir,
+'''
+replace = '''net: (!self.demo).then(|| (self.net.runtime(), self.net.caps_http())),
+                    cache_dir, // aurora-local-patch: perf-frame-cache-dir-use'''
+
+[[patch]]
+id = "perf-frame-media-plugins"
+why = "the media plugins' folder text made again only when the folder changed"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+                self.options_ui.media_plugins = self
+                    .media
+                    .plugins_found()
+                    .map(|p| p.plugin_dir.display().to_string())
+                    .unwrap_or_default();
+'''
+replace = '''// aurora-local-patch: perf-frame-media-plugins
+                // (the folder's text is made again only when it changed)
+                let plugins = self.media.plugins_found().map(|p| p.plugin_dir.as_path());
+                let shown = self.options_ui.media_plugins.as_str();
+                if !plugins.map_or(shown.is_empty(), |dir| dir.to_str() == Some(shown)) {
+                    self.options_ui.media_plugins = plugins.map(|dir| dir.display().to_string()).unwrap_or_default();
+                }'''
+
+[[patch]]
+id = "perf-eep-source-hash"
+why = "the environment's source can be hashed (for the sky log's key)"
+paths = ["crates/aurora-viewer/src/world/eep_env.rs"]
+op = "literal"
+find = '''
+/// Where the shown environment comes from, by priority (EnvSelection_t).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+'''
+replace = '''/// Where the shown environment comes from, by priority (EnvSelection_t).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] // aurora-local-patch: perf-eep-source-hash
+pub enum Source {'''
+
+[[patch]]
+id = "perf-frame-sky-key"
+why = "goes with perf-eep-source-hash: the sky log's key hashes the source, not its text made every frame"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''format!("{:?}", self.world.eep.shown_source()).hash(&mut h);'''
+replace = '''// aurora-local-patch: perf-frame-sky-key
+                // (the value itself, not its text made every frame)
+                self.world.eep.shown_source().hash(&mut h);'''
+
+[[patch]]
+id = "perf-frame-demo-poser"
+why = "the poser demo's environment variable read only in the demo, where it is used"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+        let hovered = std::env::var("AURORA_DEMO_POSER").ok().and_then(|mode| match mode.as_str() {
+            // the forehead: from the demo camera, behind, the nose falls on
+            // the head's marker, which takes the pointer first
+            "compact-face" => Some("mFaceForeheadCenter"),
+            "compact-body" => Some("mChest"),
+            _ => None,
+        });
+'''
+replace = '''// aurora-local-patch: perf-frame-demo-poser
+        // (the environment read only in the demo, the one place it is used)
+        let hovered = self
+            .demo
+            .then(|| std::env::var("AURORA_DEMO_POSER").ok())
+            .flatten()
+            .and_then(|mode| match mode.as_str() {
+                // the forehead: from the demo camera, behind, the nose falls on
+                // the head's marker, which takes the pointer first
+                "compact-face" => Some("mFaceForeheadCenter"),
+                "compact-body" => Some("mChest"),
+                _ => None,
+            });'''
+
+# ------------------------------------------------- background work's pool
+
+[[patch]]
+id = "perf-paint-jobs"
+why = "the terrain paint map is baked on the background jobs' pool"
+paths = ["crates/aurora-viewer/src/world/terrain_paint.rs"]
+op = "literal"
+find = "pub fn poll_paint(&mut self, hm: &Heightmap, comp: Composition, pool: Arc<StagingPool>, max_dimension: u32) {"
+replace = '''pub fn poll_paint(
+        &mut self,
+        hm: &Heightmap,
+        comp: Composition,
+        pool: Arc<StagingPool>,
+        max_dimension: u32,
+        jobs: &crate::scene::jobs::Jobs, // aurora-local-patch: perf-paint-jobs
+    ) {'''
+
+[[patch]]
+id = "perf-paint-jobs-spawn"
+why = "goes with perf-paint-jobs: the bake and its wait for staging room"
+paths = ["crates/aurora-viewer/src/world/terrain_paint.rs"]
+op = "literal"
+fn = "poll_paint"
+find = '''
+            let resolution = resolution(max_dimension, pool.max_region_bytes());
+            rayon::spawn(move || {
+'''
+replace = '''let resolution = resolution(max_dimension, pool.max_region_bytes());
+            // aurora-local-patch: perf-paint-jobs-spawn
+            // (the bake and its wait for staging room on the background
+            // jobs' pool, as the decodes, not the frame's)
+            jobs.run(move || {'''
+
+[[patch]]
+id = "perf-paint-jobs-pass"
+why = "goes with perf-paint-jobs"
+paths = ["crates/aurora-viewer/src/scene/terrain_surface.rs"]
+op = "literal"
+find = '''
+            if region.terrain_surface.paint_busy() {
+                region
+                    .terrain_surface
+                    .poll_paint(&region.heightmap, comp, renderer.staging_pool(), renderer.max_texture_dimension());
+'''
+replace = '''if region.terrain_surface.paint_busy() {
+                // aurora-local-patch: perf-paint-jobs-pass
+                region.terrain_surface.poll_paint(
+                    &region.heightmap,
+                    comp,
+                    renderer.staging_pool(),
+                    renderer.max_texture_dimension(),
+                    &self.jobs,
+                );'''
+
+[[patch]]
+id = "perf-physics-jobs"
+why = "the physics shapes are prepared on the background jobs' pool"
+paths = ["crates/aurora-viewer/src/scene/physics_shapes.rs"]
+op = "literal"
+find = "pub fn update(&mut self, renderer: &mut Renderer, world: &World, meshes: &mut MeshStreamer, selected: &[(usize, u8)]) {"
+replace = '''pub fn update(
+        &mut self,
+        renderer: &mut Renderer,
+        world: &World,
+        meshes: &mut MeshStreamer,
+        selected: &[(usize, u8)],
+        jobs: &super::jobs::Jobs, // aurora-local-patch: perf-physics-jobs
+    ) {'''
+
+[[patch]]
+id = "perf-physics-jobs-spawn"
+why = "goes with perf-physics-jobs"
+paths = ["crates/aurora-viewer/src/scene/physics_shapes.rs"]
+op = "literal"
+find = '''
+                let (send, receive) = crossbeam_channel::bounded(1);
+                rayon::spawn(move || {
+                    let _ = send.send(prepare(params, scale, kind, view));
+                });
+'''
+replace = '''let (send, receive) = crossbeam_channel::bounded(1);
+                // aurora-local-patch: perf-physics-jobs-spawn
+                // (on the background jobs' pool, as the decodes, not the frame's)
+                jobs.run(move || {
+                    let _ = send.send(prepare(params, scale, kind, view));
+                });'''
+
+[[patch]]
+id = "perf-physics-jobs-pass"
+why = "goes with perf-physics-jobs"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = '''
+            self.scene
+                .physics_shapes
+                .update(&mut gfx.renderer, &self.world, &mut self.scene.meshes, &physics);
+'''
+replace = '''// aurora-local-patch: perf-physics-jobs-pass
+            self.scene
+                .physics_shapes
+                .update(&mut gfx.renderer, &self.world, &mut self.scene.meshes, &physics, &self.scene.jobs);'''
+
+[[patch]]
+id = "perf-paint-restage-jobs"
+why = "a paint map staged again (scene recreation) waits for staging room on the background jobs' pool"
+paths = ["crates/aurora-viewer/src/world/terrain_paint.rs"]
+op = "literal"
+find = "pub fn prepare(&mut self, pool: Arc<StagingPool>) -> Option<&StagedTexture> {"
+replace = '''pub fn prepare(
+        &mut self,
+        pool: Arc<StagingPool>,
+        jobs: &crate::scene::jobs::Jobs, // aurora-local-patch: perf-paint-restage-jobs
+    ) -> Option<&StagedTexture> {'''
+
+[[patch]]
+id = "perf-paint-restage-jobs-spawn"
+why = "goes with perf-paint-restage-jobs"
+paths = ["crates/aurora-viewer/src/world/terrain_paint.rs"]
+op = "literal"
+fn = "prepare"
+find = '''
+            self.restage = Some(Mutex::new(rx));
+            rayon::spawn(move || {
+'''
+replace = '''self.restage = Some(Mutex::new(rx));
+            // aurora-local-patch: perf-paint-restage-jobs-spawn
+            // (StagedTexture::new waits for staging room: on the background
+            // jobs' pool, as the bake, not the frame's)
+            jobs.run(move || {'''
+
+[[patch]]
+id = "perf-paint-restage-jobs-sync"
+why = "goes with perf-paint-restage-jobs: the surface's sync takes the jobs"
+paths = ["crates/aurora-viewer/src/scene/terrain_surface.rs"]
+op = "literal"
+find = '''
+        paintmap: Option<&mut terrain::PaintMap>,
+    ) -> bool {
+'''
+replace = '''paintmap: Option<&mut terrain::PaintMap>,
+        jobs: &super::jobs::Jobs, // aurora-local-patch: perf-paint-restage-jobs-sync
+    ) -> bool {'''
+
+[[patch]]
+id = "perf-paint-restage-jobs-prepare"
+why = "goes with perf-paint-restage-jobs"
+paths = ["crates/aurora-viewer/src/scene/terrain_surface.rs"]
+op = "literal"
+fn = "sync"
+find = "let Some(staged) = paintmap.prepare(renderer.staging_pool()) else {"
+replace = """// aurora-local-patch: perf-paint-restage-jobs-prepare
+                let Some(staged) = paintmap.prepare(renderer.staging_pool(), jobs) else {"""
+
+[[patch]]
+id = "perf-paint-restage-jobs-pass"
+why = "goes with perf-paint-restage-jobs"
+paths = ["crates/aurora-viewer/src/scene/terrain_surface.rs"]
+op = "literal"
+find = '''
+                &mut self.materials,
+                region.terrain_surface.paintmap.as_mut(),
+            );
+'''
+replace = '''&mut self.materials,
+                region.terrain_surface.paintmap.as_mut(),
+                &self.jobs, // aurora-local-patch: perf-paint-restage-jobs-pass
+            );'''
+
+# ------------------------------------------------- occlusion streaming (121)
+
+[[patch]]
+id = "perf-occl-tested-bits"
+why = "a verdict's tested objects read from their set bits only, lowest first, as the scan of all 32 bits of each word gave them"
+paths = ["crates/aurora-render/src/object_occlusion.rs"]
+op = "literal"
+glue_for = "occl-stream-render-module"
+fn = "tested_objects"
+find = '''
+            let seen = self.words[half + w];
+            (0..32u32)
+                .filter(move |b| tested & (1 << b) != 0)
+                .map(move |b| (w as u32 * 32 + b, seen & (1 << b) != 0))
+'''
+replace = '''let seen = self.words[half + w];
+            // aurora-local-patch: perf-occl-tested-bits
+            // (the set bits only, lowest first: the pairs and the order the
+            // test of every bit gave; a word of nothing tested costs one test)
+            let mut rest = tested;
+            std::iter::from_fn(move || {
+                (rest != 0).then(|| {
+                    let b = rest.trailing_zeros();
+                    rest &= rest - 1;
+                    (w as u32 * 32 + b, seen & (1 << b) != 0)
+                })
+            })'''
+
+[[patch]]
+id = "perf-occl-tested-bits-test"
+why = "goes with perf-occl-tested-bits: the same pairs in the same order as the test of every bit"
+paths = ["crates/aurora-render/src/object_occlusion.rs"]
+op = "literal"
+glue_for = "occl-stream-render-module"
+find = '''
+    #[test]
+    fn a_readback_of_the_wrong_length_is_refused() {
+'''
+replace = '''// aurora-local-patch: perf-occl-tested-bits-test
+    #[test]
+    fn the_tested_objects_are_those_of_every_bit_in_order() {
+        let mut x = 0x9e37_79b9u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        for objects in [0u32, 1, 31, 32, 33, 100, 1000] {
+            let half = words_for(objects);
+            let mut words: Vec<u32> = (0..2 * half).map(|_| next()).collect();
+            if let Some(w) = words.first_mut() {
+                *w |= 0x8000_0001;
+            }
+            if half > 1 {
+                words[1] = 0;
+            }
+            let o = ObjectOcclusion::from_words(1, objects, words.clone()).expect("both halves");
+            let every_bit: Vec<(u32, bool)> = (0..half)
+                .flat_map(|w| {
+                    let (tested, seen) = (words[w], words[half + w]);
+                    (0..32u32)
+                        .filter(move |b| tested & (1 << b) != 0)
+                        .map(move |b| (w as u32 * 32 + b, seen & (1 << b) != 0))
+                })
+                .collect();
+            assert_eq!(o.tested_objects().collect::<Vec<_>>(), every_bit, "{objects} objects");
+        }
+    }
+
+    #[test]
+    fn a_readback_of_the_wrong_length_is_refused() {'''
+
+# ------------------------------------------------------------- sky rays
+
+[[patch]]
+id = "perf-sky-rays-march"
+why = "the cascades' projections of a sky ray made once at its start, one multiply-add a sample"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+glue_for = "sky-rays-shader"
+find = '''
+fn sky_ray_cascade(world_pos: vec3<f32>, cascade: u32) -> f32 {
+    let matrix = frame.cascade_vp[cascade];
+    let lp = matrix * vec4<f32>(world_pos, 1.0);
+    let ndc = lp.xyz / lp.w;
+'''
+replace = '''// aurora-local-patch: perf-sky-rays-march
+// The three cascades' projections of a ray, made once at its start: the
+// clip position of the sample at `t` is start + t * direction (the matrix
+// is linear in the homogeneous position), one multiply-add per sample
+// instead of a matrix product.
+struct SkyRayMarch {
+    s0: vec4<f32>,
+    s1: vec4<f32>,
+    s2: vec4<f32>,
+    d0: vec4<f32>,
+    d1: vec4<f32>,
+    d2: vec4<f32>,
+}
+
+fn sky_ray_march(eye: vec3<f32>, ray: vec3<f32>) -> SkyRayMarch {
+    let e = vec4<f32>(eye, 1.0);
+    let r = vec4<f32>(ray, 0.0);
+    return SkyRayMarch(
+        frame.cascade_vp[0] * e,
+        frame.cascade_vp[1] * e,
+        frame.cascade_vp[2] * e,
+        frame.cascade_vp[0] * r,
+        frame.cascade_vp[1] * r,
+        frame.cascade_vp[2] * r,
+    );
+}
+
+fn sky_ray_clip(m: SkyRayMarch, cascade: u32, t: f32) -> vec4<f32> {
+    switch cascade {
+        case 0u: { return fma(m.d0, vec4<f32>(t), m.s0); }
+        case 1u: { return fma(m.d1, vec4<f32>(t), m.s1); }
+        default: { return fma(m.d2, vec4<f32>(t), m.s2); }
+    }
+}
+
+fn sky_ray_cascade(m: SkyRayMarch, t: f32, cascade: u32) -> f32 {
+    let matrix = frame.cascade_vp[cascade];
+    let lp = sky_ray_clip(m, cascade, t);
+    let ndc = lp.xyz / lp.w;'''
+
+[[patch]]
+id = "perf-sky-rays-visibility"
+why = "goes with perf-sky-rays-march: a sample's visibility from the march"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+glue_for = "sky-rays-shader"
+find = '''
+fn sky_ray_visibility(world_pos: vec3<f32>, distance_to_eye: f32) -> f32 {
+    let splits = frame.cascade_splits.xyz;
+    var cascade = select(0u, 1u, distance_to_eye > splits.x);
+    if (distance_to_eye > splits.y) { cascade = 2u; }
+    let visible = sky_ray_cascade(world_pos, cascade);
+'''
+replace = '''// aurora-local-patch: perf-sky-rays-visibility
+fn sky_ray_visibility(m: SkyRayMarch, t: f32, distance_to_eye: f32) -> f32 {
+    let splits = frame.cascade_splits.xyz;
+    var cascade = select(0u, 1u, distance_to_eye > splits.x);
+    if (distance_to_eye > splits.y) { cascade = 2u; }
+    let visible = sky_ray_cascade(m, t, cascade);'''
+
+[[patch]]
+id = "perf-sky-rays-next"
+why = "goes with perf-sky-rays-march: the next cascade from the march"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+glue_for = "sky-rays-shader"
+find = "let next = sky_ray_cascade(world_pos, cascade + 1u);"
+replace = "let next = sky_ray_cascade(m, t, cascade + 1u); // aurora-local-patch: perf-sky-rays-next"
+
+[[patch]]
+id = "perf-sky-rays-loop"
+why = "goes with perf-sky-rays-march: the march made once a ray"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+glue_for = "sky-rays-shader"
+find = '''
+    var transmission = 1.0;
+    var sum = 0.0;
+    for (var i = 0u; i < samples; i++) {
+        let t = (f32(i) + jitter) * step;
+        let near = smoothstep(0.0, max(frame.sky_rays.y, 0.01), t);
+        let far = 1.0 - smoothstep(limit * 0.8, limit, t);
+        sum += sky_ray_visibility(eye + ray*t, t) * near * far * transmission;
+'''
+replace = '''var transmission = 1.0;
+    var sum = 0.0;
+    let march = sky_ray_march(eye, ray); // aurora-local-patch: perf-sky-rays-loop
+    for (var i = 0u; i < samples; i++) {
+        let t = (f32(i) + jitter) * step;
+        let near = smoothstep(0.0, max(frame.sky_rays.y, 0.01), t);
+        let far = 1.0 - smoothstep(limit * 0.8, limit, t);
+        sum += sky_ray_visibility(march, t, t) * near * far * transmission;'''
+
+# ------------------------------------------------------------------- log
+
+[[patch]]
+id = "perf-log-follow-sim"
+why = "a follow-simulator list line that only reorders or deduplicates at debug level"
+paths = ["crates/aurora-viewer/src/scene/anim/follow_sim.rs"]
+op = "literal"
+glue_for = "follow-sim-list-module"
+find = '''
+    log::info!("follow simulator list: avatar {}: {}", f.owner, parts.join("; "));
+}
+'''
+replace = '''// aurora-local-patch: perf-log-follow-sim
+    // (a change of order or of duplicates alone, the bulk of these lines
+    // in a crowd, at debug level; an animation added or removed stays)
+    if added.is_empty() && removed.is_empty() {
+        log::debug!("follow simulator list: avatar {}: {}", f.owner, parts.join("; "));
+    } else {
+        log::info!("follow simulator list: avatar {}: {}", f.owner, parts.join("; "));
+    }
+}'''
+
+[[patch]]
+id = "perf-log-media-idle"
+why = "the media list's faces neither wanted nor loaded counted in one line"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+find = '''
+            self.last_diag = now;
+            for m in &self.impls {
+                log::info!(
+'''
+replace = '''self.last_diag = now;
+            // aurora-local-patch: perf-log-media-idle
+            // (the faces neither wanted nor loaded, most of a busy place's,
+            // in one line instead of one each)
+            let idle = |m: &MediaImpl| !m.wanted && !m.is_loaded() && m.failed.is_none() && matches!(m.priority, Priority::Unloaded);
+            let idle_count = self.impls.iter().filter(|m| idle(m)).count();
+            if idle_count > 0 {
+                log::info!("media: {idle_count} faces neither wanted nor loaded");
+            }
+            for m in self.impls.iter().filter(|m| !idle(m)) {
+                log::info!('''
+
+[[patch]]
+id = "perf-log-projector"
+why = "the projector shadow maps line at most one every 2 s, with the range it went through"
+paths = ["crates/aurora-viewer/src/scene/lights.rs"]
+op = "literal"
+find = '''
+    objects: Vec<usize>,
+    shadow_map_count: usize,
+}
+'''
+replace = '''objects: Vec<usize>,
+    shadow_map_count: usize,
+    shadow_log: ShadowMapLog, // aurora-local-patch: perf-log-projector-field
+}
+
+// aurora-local-patch: perf-log-projector
+/// Seconds between two "projector shadow maps active" lines at most.
+const SHADOW_LOG_EVERY: f32 = 2.0;
+
+/// The "projector shadow maps active" line: written when the count of maps
+/// changed, at most one every [`SHADOW_LOG_EVERY`] (the count flickers
+/// when a light sits on the ranking's edge, up to ten lines a second). A
+/// line written after a wait gives the lowest and highest counts since the
+/// last one; the count a run of changes ends on is always written.
+#[derive(Default)]
+struct ShadowMapLog {
+    /// The count of the last line (0 before the first: none is written
+    /// while there are no maps, as before).
+    shown: usize,
+    at: Option<Instant>,
+    /// The lowest and highest counts since the last line, when any differs.
+    range: Option<(usize, usize)>,
+}
+
+impl ShadowMapLog {
+    /// What to write for this frame's `active` count, if anything.
+    fn note(&mut self, active: usize, now: Instant) -> Option<String> {
+        if active == self.shown && self.range.is_none() {
+            return None;
+        }
+        let (low, high) = self.range.unwrap_or((self.shown, self.shown));
+        self.range = Some((low.min(active), high.max(active)));
+        if self
+            .at
+            .is_some_and(|at| now.saturating_duration_since(at).as_secs_f32() < SHADOW_LOG_EVERY)
+        {
+            return None;
+        }
+        let (low, high) = self.range.take().unwrap_or((active, active));
+        // (the range only when the count went beyond the last line's and
+        // this one's)
+        let line = if low < self.shown.min(active) || high > self.shown.max(active) {
+            format!("{active} (from {low} to {high} since the last line)")
+        } else {
+            format!("{active}")
+        };
+        self.shown = active;
+        self.at = Some(now);
+        Some(line)
+    }
+}'''
+
+[[patch]]
+id = "perf-log-projector-take"
+why = "goes with perf-log-projector"
+paths = ["crates/aurora-viewer/src/scene/lights.rs"]
+op = "literal"
+find = '''
+            mut objects,
+            shadow_map_count,
+        } = std::mem::take(&mut self.light_scratch);
+'''
+replace = '''mut objects,
+            shadow_map_count,
+            mut shadow_log, // aurora-local-patch: perf-log-projector-take
+        } = std::mem::take(&mut self.light_scratch);'''
+
+[[patch]]
+id = "perf-log-projector-line"
+why = "goes with perf-log-projector"
+paths = ["crates/aurora-viewer/src/scene/lights.rs"]
+op = "literal"
+find = '''
+        if active != shadow_map_count {
+            log::info!("projector shadow maps active: {active}, limit {}", view.projector_shadow_limit);
+        }
+'''
+replace = '''// aurora-local-patch: perf-log-projector-line
+        if (active != shadow_map_count || shadow_log.range.is_some())
+            && let Some(count) = shadow_log.note(active, now)
+        {
+            log::info!("projector shadow maps active: {count}, limit {}", view.projector_shadow_limit);
+        }'''
+
+[[patch]]
+id = "perf-log-projector-keep"
+why = "goes with perf-log-projector"
+paths = ["crates/aurora-viewer/src/scene/lights.rs"]
+op = "literal"
+find = '''
+            objects,
+            shadow_map_count: active,
+        };
+'''
+replace = '''objects,
+            shadow_map_count: active,
+            shadow_log, // aurora-local-patch: perf-log-projector-keep
+        };'''
+
+[[patch]]
+id = "perf-log-projector-test"
+why = "goes with perf-log-projector"
+paths = ["crates/aurora-viewer/src/scene/lights.rs"]
+op = "literal"
+find = '''
+mod tests {
+    use super::*;
+'''
+replace = '''mod tests {
+    use super::*;
+
+    // aurora-local-patch: perf-log-projector-test
+    #[test]
+    fn the_projector_maps_line_is_written_on_a_change_at_most_every_two_seconds() {
+        let start = Instant::now();
+        let at = |s: f32| start + std::time::Duration::from_secs_f32(s);
+        let mut log = ShadowMapLog::default();
+        assert_eq!(log.note(0, at(0.0)), None, "no maps, no line");
+        assert_eq!(log.note(15, at(0.1)).as_deref(), Some("15"));
+        assert_eq!(log.note(15, at(0.2)), None);
+        // a flicker within the wait: one line once the time is up
+        assert_eq!(log.note(16, at(0.5)), None);
+        assert_eq!(log.note(15, at(0.6)), None);
+        assert_eq!(log.note(14, at(1.0)), None);
+        assert_eq!(log.note(14, at(2.2)).as_deref(), Some("14 (from 14 to 16 since the last line)"));
+        assert_eq!(log.note(14, at(9.0)), None, "nothing changed since");
+        // back where it was within the wait: still told
+        assert_eq!(log.note(12, at(9.5)).as_deref(), Some("12"));
+        assert_eq!(log.note(13, at(10.0)), None);
+        assert_eq!(log.note(12, at(10.5)), None);
+        assert_eq!(log.note(12, at(11.6)).as_deref(), Some("12 (from 12 to 13 since the last line)"));
+        // a single step after a wait: the plain count
+        assert_eq!(log.note(0, at(20.0)).as_deref(), Some("0"));
+        assert_eq!(log.note(0, at(21.0)), None);
+    }'''

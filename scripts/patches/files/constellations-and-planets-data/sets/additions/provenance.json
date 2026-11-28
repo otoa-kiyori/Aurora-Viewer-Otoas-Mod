@@ -1,0 +1,95 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "Cae": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cha": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Cru": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Men": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Nor": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "Oct": {
+   "drawing": "made",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {},
+ "notes": {
+  "Cae": {
+   "drawing": "redrawn after the plate: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  },
+  "Cha": {
+   "drawing": "new drawing: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  },
+  "Cru": {
+   "drawing": "redrawn over the plate: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  },
+  "Men": {
+   "drawing": "redrawn over the plate: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  },
+  "Nor": {
+   "drawing": "new drawing: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  },
+  "Oct": {
+   "drawing": "redrawn after the plate: drawn for this viewer after the 1801 plates (no picture of the plates is shipped)"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "made",
+  "es": "made",
+  "fr": "unknown",
+  "it": "made",
+  "ja": "unknown",
+  "nb": "made",
+  "pl": "made",
+  "pt": "made",
+  "pt-BR": "made",
+  "ru": "made",
+  "tr": "made",
+  "uk": "made",
+  "zh-Hans": "made",
+  "zh-Hant": "made"
+ },
+ "unit": "set additions"
+}

@@ -1,0 +1,60 @@
+{
+ "credits": [
+  {
+   "holder": "Made for this viewer",
+   "work": "Equuleus, Musca Borealis, Noctua and Telescopium Herschelii, redrawn from the line work of the Urania's Mirror cards (1824)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-25",
+   "note": "The cards' own vector line work (the CC0 traces), star marks and lettering removed; a new outline drawn for this viewer where the card's was missing (Equuleus, Noctua, Telescopium Herschelii), holes filled with the body tone (Musca Borealis); each placed on the modern star positions."
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Eridanus, a new drawing of the whole river in the manner of the Urania's Mirror cards (1824)",
+   "licence": "Own work; the subject after a public-domain card",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-26",
+   "note": "Drawn with code on the catalogue star positions, from its source at Cursa beside Orion's foot to Achernar; no line of an engraving is used. Card 28 (Fluvius Eridanus) was looked at for the subject only."
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Equuleus: redrawn over the card, after Urania's Mirror (1824), card 15 (public-domain vector trace, as used by the 1824 set)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-25",
+   "note": "The card's own line work for the horse's head (upside down, as on the card), star marks and lettering removed, a new outline where the card's wash had swallowed it; placed on its own stars by a shape-keeping fit (5 marks, 0.26 deg rms); stops short of Pegasus' muzzle"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Musca Borealis: redrawn over the card, after Urania's Mirror (1824), card 16 (public-domain vector trace, as used by the 1824 set)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-25",
+   "note": "The card's own line work for the fly, star marks and lettering removed, the marks' holes in the dark body filled with its tone; placed on its own stars by a shape-keeping fit (5 marks, 0.06 deg rms)"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Noctua: redrawn over the card, after Urania's Mirror (1824), card 32 (public-domain vector trace, as used by the 1824 set)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-25",
+   "note": "The card's own line work for the owl, cut from the snake it perches on, star marks and lettering removed, a new outline where the card's was missing; placed on its own stars by a shape-keeping fit (6 of 12 marks, 0.13 deg rms)"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Telescopium Herschelii: redrawn over the card, after Urania's Mirror (1824), card 8 (public-domain vector trace, as used by the 1824 set)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-25",
+   "note": "The card's own line work for the telescope and tripod, star marks removed, a new outline round the tube; placed at the card's own scale and turn, shifted onto its two star marks (0.06 deg)"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Eridanus: new drawing, after Urania's Mirror (1824), card 28 (subject only)",
+   "licence": "Own work on CC0 and public-domain references",
+   "url": "https://openclipart.org/detail/234009",
+   "imported": "2026-11-26",
+   "note": "The whole river as one band, drawn afresh: banks of the cards' outline weight, a broken inner shore line, long wavy flow lines and small wavelets, widening downstream from a spring pool at Cursa (beside Orion's foot) to Achernar; every stick-line star on the band; it passes behind Cetus' paws, Fornax and the southern neighbours and keeps clear of the name; no star marks or lettering"
+  }
+ ]
+}

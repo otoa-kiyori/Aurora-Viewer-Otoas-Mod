@@ -1,0 +1,1008 @@
+# Voice is heard across region borders: on the estate (region-wide) voice
+# channel the viewer keeps one WebRTC connection to the agent's region (the
+# primary connection) and one to each neighbouring region within reach, as
+# the Legacy Viewer does.
+#
+# Cause: upstream opens a single connection, to the agent's region, joins it
+# as primary and leaves it at every region change. Residents standing in the
+# next region are on another voice server: they are never heard, however
+# close they stand, while the Legacy Viewer hears them.
+#
+# Port of indra/newview/llvoicewebrtc.cpp (originally LGPL 2.1):
+#
+# - LLWebRTCVoiceClient::updateNeighboringRegions: the neighbours are the
+#   regions under eight points 2 * MAX_AUDIO_DIST (100 m) around the speaker
+#   (the avatar's head), among the regions the viewer is connected to
+#   (World::regions, kept by EnableSimulator / EstablishAgentCommunication
+#   and emptied by RegionRemoved). files/voice-neighbours/neighbours.rs.
+# - estateSessionState::processConnectionStates and isRegionWebRTCEnabled:
+#   a neighbour gets a connection when its SimulatorFeatures say "webrtc"
+#   and its seed gave a ProvisionVoiceAccountRequest capability; the
+#   connection is closed when the region is out of reach or no longer
+#   WebRTC. The provision, the ICE trickle and the logout go to the
+#   neighbour region's own ProvisionVoiceAccountRequest and
+#   VoiceSignalingRequest (LLVoiceWebRTCSpatialConnection::
+#   requestVoiceConnection, processIceUpdatesCoro, breakVoiceConnectionCoro:
+#   getRegionFromID(mRegionID)), with the estate body (channel_type
+#   "local", no parcel_local_id): the same request and the same retries as
+#   the primary connection (aurora-voice's session.rs, unchanged).
+# - parcelSessionState: a parcel with its own voice channel, and a call,
+#   keep a single connection; their neighbours close.
+# - LLVoiceWebRTCConnection::sendJoin and the VOICE_STATE_SESSION_UP check:
+#   a neighbour connection joins with {"j":{}}, the primary one with
+#   {"j":{"p":true}}; when the agent's region changes, the connection to the
+#   new region becomes primary and joins again with p, the old one joins
+#   again without it and stays a neighbour if still in reach (closed
+#   otherwise). Nothing is torn down at a crossing: the Legacy Viewer's
+#   estate session ("Estate") outlives region changes. While the new
+#   region's parcel is still awaited after a crossing, the estate channel is
+#   kept on the new region's connection (the Legacy Viewer treats an unknown
+#   parcel as estate voice); once the parcel is known its rules apply as
+#   upstream (own channel, or no voice).
+# - LLVoiceWebRTCSpatialConnection::setMuteMic (`setMute(mMuted ||
+#   !mPrimary)`): a connection to another region than the agent's never
+#   carries the microphone, the muted track's silence is sent instead, as
+#   libwebrtc does for a muted track; it does not even read the capture.
+#   Enforced in aurora-voice's sender (neighbours::outgoing), whatever the
+#   viewer asks.
+# - sendPositionUpdate (sessionState::sendData): every connection receives
+#   the same positions, with the same 100 ms / 10 cm / 4 degree throttling.
+# - sessionState::setUserMute and setUserVolume: the block list and the
+#   per-resident volumes go to every connection.
+# - OnDataReceivedImpl and addParticipantByID: the primary connection and a
+#   call list a resident only on that resident's join (on a spatial channel
+#   only a join with the primary flag), as the Legacy Viewer; a neighbour
+#   connection also lists a resident it is not listing yet on a join
+#   without the flag or on a level / speaking update (never the agent,
+#   never on a leave). The lists are merged into one, each resident once
+#   (voice dots, speaking indicators, moderation). A neighbour connection
+#   takes a moderator mute only together with that resident's primary join
+#   in the same message (OnDataReceivedImpl ignores the muted flags of a
+#   non-primary server). Residents listed by the relaxed rule stay when the
+#   connection becomes primary at a crossing: they are the residents that
+#   server reports, the server does not repeat their joins, and they leave
+#   on their own leave or when the connection closes, like every entry.
+#
+# Audio: every connection has its own Opus decoder, packet loss concealment
+# and its own Voice sink (the mixer sums the sinks, each with its own
+# jitter buffer): the received voice of every connection is played on the
+# Voice channel, with today's quality path.
+#
+# Voice off (audio.voice_enabled, upstream's Enable voice), logout, land that forbids
+# voice: every connection closes. A closed neighbour connection logs out in
+# the background and is kept with upstream's sessions being left
+# (`Voice::closing`); a quit closes them all without their logout and waits
+# for their threads, as upstream's close_for_exit does for its own. The region and parcel rules are upstream's,
+# for the agent's region. No setting and no new text: the Legacy Viewer has
+# no switch for it either (its FSDisableNeighbourRegionConnections is off by
+# default; refusing the neighbour regions, an upstream switch, already
+# leaves no neighbour region to connect to).
+#
+# Log: one INFO line when a neighbour connection opens or closes and when a
+# connection changes role; the `voice stats` line of each connection says
+# `primary`, `neighbour` or `call`. About 10 s after its join, then at most
+# once a minute while they changed, each connection logs three counts of
+# the entries it received for residents it was not listing at that moment
+# (joins with the primary flag, joins without it, level / speaking only):
+# counts only, no id. No capability URL is logged.
+#
+# Differences, on purpose: the primary connection's first join already says
+# primary (upstream's; the Legacy Viewer sends a non-primary join first and
+# the primary one 100 ms later). No connection is started while the agent's
+# parcel is unknown except to keep the estate channel through a crossing
+# (upstream waits for the parcel). A neighbour connection lists the
+# residents it hears even without their primary join: a connection opened
+# after a resident of the neighbouring region joined there was heard but
+# never got a voice dot nor a lit name tag, because that server did not
+# repeat the resident's primary join to it. The Legacy Viewer keeps the
+# primary-join rule on every connection (it adds a participant only on a
+# primary join in spatial voice, to avoid duplicates); here the merge
+# already lists each resident once. The Legacy Viewer's own behaviour in
+# this case was not checked on the grid.
+#
+# Tests: crates/aurora-voice/src/neighbours.rs (neighbours in reach at the
+# edges, corners and on larger regions, the join and its hand-over, a
+# neighbour never sends the microphone, the merged participants, the
+# tagged stats line, the neighbour's relaxed listing and its mute rule, the
+# primary and the calls unchanged, the unlisted counts and their log
+# timing); crates/aurora-viewer/src/voice.rs (the primary
+# hand-over at a crossing, parcel channels and calls have no neighbours,
+# the estate channel kept while the parcel is awaited, voice off closes
+# every connection).
+# Apply or skip the whole file, not one patch of it.
+
+# --------------------------------------------------------------- aurora-voice
+
+[[patch]]
+id = "voice-neighbours-module"
+why = "the pure rules of cross-region voice: neighbours in reach, microphone gate, join, participants merge, tests"
+op = "add_file"
+paths = ["crates/aurora-voice/src/neighbours.rs"]
+source = "files/voice-neighbours/neighbours.rs"
+
+[[patch]]
+id = "voice-neighbours-mod"
+why = "declare the module"
+paths = ["crates/aurora-voice/src/lib.rs"]
+op = "literal"
+find = "mod link_stats;"
+replace = '''mod link_stats;
+// aurora-local-patch: voice-neighbours-mod
+pub mod neighbours;'''
+
+[[patch]]
+id = "voice-neighbours-primary"
+why = "a connection is primary (the agent's region) or a neighbour; the viewer sets it"
+paths = ["crates/aurora-voice/src/lib.rs"]
+op = "literal"
+find = "/// Updates the spatial coordinates (global metres; rotations in the"
+replace = '''// aurora-local-patch: voice-neighbours-primary
+    /// Whether this connection is to the agent's region (primary, the
+    /// default) or to a neighbouring one (LLVoiceWebRTCConnection::mPrimary,
+    /// indra/newview/llvoicewebrtc.cpp, originally LGPL 2.1). A connection
+    /// that is not primary never reads nor sends the microphone and joins
+    /// without the primary flag; a change is told to the server again
+    /// within 100 ms (the VOICE_STATE_SESSION_UP check). Set it right after
+    /// [`VoiceSession::connect`]: it is first read when the data channel
+    /// opens and when the sender starts, both after the provisioning.
+    pub fn set_primary(&self, primary: bool) {
+        self.shared.primary.store(primary, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See [`VoiceSession::set_primary`].
+    pub fn is_primary(&self) -> bool {
+        self.shared.primary.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Updates the spatial coordinates (global metres; rotations in the'''
+
+[[patch]]
+id = "voice-neighbours-shared"
+why = "the primary state, shared by the handle, the sender and the session loop"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+find = "pub tx: TxControl,"
+replace = '''pub tx: TxControl,
+    // aurora-local-patch: voice-neighbours-shared
+    /// The agent's region's connection (`VoiceSession::set_primary`).
+    pub primary: AtomicBool,'''
+
+[[patch]]
+id = "voice-neighbours-shared-new"
+why = "a connection is primary unless the viewer says otherwise (calls, and upstream's single connection)"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+find = "tx: TxControl::new(),"
+replace = '''tx: TxControl::new(),
+            primary: AtomicBool::new(true), // aurora-local-patch: voice-neighbours-shared-new'''
+
+[[patch]]
+id = "voice-neighbours-mic-gate"
+why = "a neighbour connection sends the muted track's silence and never reads the microphone (setMute(mMuted || !mPrimary))"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+fn = "send_audio"
+find = '''let mic = shared.tx.mic.lock().clone();
+                if let Some(mic) = &mic {
+                    stats.mic_backlog(mic.available());
+                }
+                let transmit = shared.tx.transmit();'''
+replace = '''// aurora-local-patch: voice-neighbours-mic-gate
+                // LLVoiceWebRTCSpatialConnection::setMuteMic: peers of a
+                // neighbouring region must not hear us twice
+                let (mic, transmit) = crate::neighbours::outgoing(
+                    shared.primary.load(Ordering::Relaxed),
+                    shared.tx.transmit(),
+                    shared.tx.mic.lock().clone(),
+                );
+                if let Some(mic) = &mic {
+                    stats.mic_backlog(mic.available());
+                }'''
+
+[[patch]]
+id = "voice-neighbours-sent-primary"
+why = "the primary state the server was last told"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+fn = "session_loop"
+find = "let mut joined = false;"
+replace = '''let mut joined = false;
+    // aurora-local-patch: voice-neighbours-sent-primary
+    let mut sent_primary: Option<bool> = None;
+    let mut unlisted_log = crate::neighbours::UnlistedLog::default();'''
+
+[[patch]]
+id = "voice-neighbours-join"
+why = "sendJoin: the join says whether this server is the agent's region's"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+fn = "session_loop"
+find = "let _ = dc.send_text(&protocol::join_message(true)).await;"
+replace = '''// aurora-local-patch: voice-neighbours-join
+                    // LLVoiceWebRTCConnection::sendJoin: {"j":{}} from a
+                    // neighbour connection, {"j":{"p":true}} from the
+                    // agent's region's (and from a call's)
+                    let primary = shared.primary.load(Ordering::Relaxed);
+                    if let Some(join) = crate::neighbours::rejoin(None, primary) {
+                        let _ = dc.send_text(&join).await;
+                    }
+                    sent_primary = Some(primary);
+                    shared.participants.lock().set_neighbour(spatial && !primary);
+                    unlisted_log.joined(Instant::now());'''
+
+[[patch]]
+id = "voice-neighbours-rejoin"
+why = "the primary hand-over at a region change: the join again with the new state"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+fn = "session_loop"
+find = '''if spatial {
+                        let msg = shared.spatial.lock().take_message(false);'''
+replace = '''// aurora-local-patch: voice-neighbours-rejoin
+                    // LLVoiceWebRTCConnection::connectionStateMachine,
+                    // VOICE_STATE_SESSION_UP: primary follows the agent's
+                    // region; a change is sent as a new join
+                    let primary = shared.primary.load(Ordering::Relaxed);
+                    if spatial
+                        && let (Some(join), Some(dc)) = (crate::neighbours::rejoin(sent_primary, primary), &data)
+                    {
+                        let _ = dc.send_text(&join).await;
+                        sent_primary = Some(primary);
+                        shared.participants.lock().set_neighbour(!primary);
+                        log::info!("voice: joined again as {}", crate::neighbours::role(spatial, primary));
+                    }
+                    if spatial {
+                        let msg = shared.spatial.lock().take_message(false);'''
+
+[[patch]]
+id = "voice-neighbours-stats"
+why = "one voice stats line per connection, saying which one"
+paths = ["crates/aurora-voice/src/session.rs"]
+op = "literal"
+fn = "session_loop"
+find = '''log::info!("{}", link_stats::line(&window, &RtcpView::from_report(&report)));'''
+replace = '''// aurora-local-patch: voice-neighbours-stats
+                    let role = crate::neighbours::role(spatial, shared.primary.load(Ordering::Relaxed));
+                    log::info!(
+                        "{}",
+                        crate::neighbours::tag_stats(&link_stats::line(&window, &RtcpView::from_report(&report)), role)
+                    );
+                    let counts = shared.participants.lock().unlisted();
+                    if unlisted_log.due(Instant::now(), counts) {
+                        log::info!("{}", crate::neighbours::unlisted_line(role, counts));
+                    }'''
+
+[[patch]]
+id = "voice-neighbours-table"
+why = "the participant table knows it is a neighbour connection's and counts the entries for unlisted residents"
+paths = ["crates/aurora-voice/src/state.rs"]
+op = "literal"
+find = '''pub(crate) struct ParticipantTable {
+    map: HashMap<Uuid, Participant>,
+}'''
+replace = '''pub(crate) struct ParticipantTable {
+    map: HashMap<Uuid, Participant>,
+    // aurora-local-patch: voice-neighbours-table
+    /// A neighbour connection's table (spatial, not primary), set by the
+    /// session loop at each join: see `crate::neighbours::heard`.
+    neighbour: bool,
+    /// Entries received for residents not listed at that moment: joins
+    /// with the primary flag, joins without it, level / speaking only.
+    unlisted: [u64; 3],
+}'''
+
+[[patch]]
+id = "voice-neighbours-table-role"
+why = "the session loop sets the table's role; the diagnostic reads its counts"
+paths = ["crates/aurora-voice/src/state.rs"]
+op = "literal"
+find = '''impl ParticipantTable {
+    pub(crate) fn clear(&mut self) {'''
+replace = '''impl ParticipantTable {
+    // aurora-local-patch: voice-neighbours-table-role
+    /// A neighbour connection's table lists the residents it hears
+    /// (`crate::neighbours::heard`). Residents listed that way stay when the
+    /// connection becomes primary: the server does not repeat their joins,
+    /// and they leave on their own leave like every entry.
+    pub(crate) fn set_neighbour(&mut self, neighbour: bool) {
+        self.neighbour = neighbour;
+    }
+
+    /// The counts of entries for unlisted residents, for the diagnostic.
+    pub(crate) fn unlisted(&self) -> [u64; 3] {
+        self.unlisted
+    }
+
+    pub(crate) fn clear(&mut self) {'''
+
+[[patch]]
+id = "voice-neighbours-listing"
+why = "a neighbour connection also lists the residents it hears without their primary join (the server does not repeat it to a late connection); upstream's comment above the rule is reworded to match"
+paths = ["crates/aurora-voice/src/state.rs"]
+op = "literal"
+fn = "apply"
+find = '''// Ignore joins reported by non-primary servers in spatial
+            // (cross-region) voice, to avoid duplicates.
+            if !self.map.contains_key(&id) && up.joined.is_some() && (primary || !spatial) {'''
+replace = '''// aurora-local-patch: voice-neighbours-listing
+            // A join reported without the primary flag in spatial
+            // (cross-region) voice lists nobody (OnDataReceivedImpl, to
+            // avoid duplicates), except on a neighbour connection, which
+            // also lists the residents it hears: that server never repeats
+            // their primary join to it, and the merged list keeps each
+            // resident once.
+            let listed = self.map.contains_key(&id);
+            if !listed {
+                crate::neighbours::count_unlisted(&mut self.unlisted, up, self_id);
+            }
+            let heard = self.neighbour && crate::neighbours::heard(up, self_id);
+            if !listed && ((up.joined.is_some() && (primary || !spatial)) || heard) {'''
+
+[[patch]]
+id = "voice-neighbours-mute"
+why = "OnDataReceivedImpl: a non-primary server's moderator mute only with the resident's primary join"
+paths = ["crates/aurora-voice/src/state.rs"]
+op = "literal"
+fn = "apply"
+find = '''if let Some(m) = up.moderator_muted {
+                    p.moderator_muted = m;'''
+replace = '''// aurora-local-patch: voice-neighbours-mute
+                // OnDataReceivedImpl ignores the muted flags of a
+                // non-primary server unless they come with the resident's
+                // primary join
+                if let Some(m) = up.moderator_muted
+                    && (!self.neighbour || primary)
+                {
+                    p.moderator_muted = m;'''
+
+# ------------------------------------------------------------- aurora-viewer
+
+[[patch]]
+id = "voice-neighbours-inputs"
+why = "the regions the viewer is connected to, for the neighbour connections"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''pub call: Option<&'a CallChannel>,
+}'''
+replace = '''pub call: Option<&'a CallChannel>,
+    // aurora-local-patch: voice-neighbours-inputs
+    /// The regions the viewer is connected to (`World::regions`), among
+    /// which the estate channel's neighbours are chosen; `None` in tests.
+    pub regions: Option<&'a HashMap<aurora_net::RegionHandle, crate::world::Region>>,
+}'''
+
+[[patch]]
+id = "voice-neighbours-field"
+why = "the estate channel's connections to the neighbouring regions"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''receive_volume: Option<f32>,
+}'''
+replace = '''receive_volume: Option<f32>,
+    // aurora-local-patch: voice-neighbours-field
+    /// The estate channel's connections to the neighbouring regions, by
+    /// region handle (estateSessionState's other connections). `session`
+    /// stays the primary one.
+    neighbours: std::collections::BTreeMap<u64, Neighbour>,
+}'''
+
+[[patch]]
+id = "voice-neighbours-types"
+why = "a neighbour connection, which neighbours to connect to, which channel has neighbours"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = "impl Voice {"
+replace = '''// aurora-local-patch: voice-neighbours-types
+/// A connection of the estate channel to a neighbouring region
+/// (LLVoiceWebRTCSpatialConnection with INVALID_PARCEL_ID, not primary,
+/// indra/newview/llvoicewebrtc.cpp, originally LGPL 2.1): it hears the
+/// residents there and never carries the microphone. The mutes and volumes
+/// it was sent are its own: each connection of the Legacy Viewer receives
+/// them (sessionState::setUserMute, setUserVolume).
+struct Neighbour {
+    session: VoiceSession,
+    muted: HashSet<Uuid>,
+    volumes: HashMap<Uuid, f32>,
+}
+
+impl Neighbour {
+    fn new(session: VoiceSession) -> Self {
+        Self {
+            session,
+            muted: HashSet::new(),
+            volumes: HashMap::new(),
+        }
+    }
+
+    fn connected(&self) -> bool {
+        matches!(self.session.status(), VoiceStatus::Connected)
+    }
+}
+
+/// What a neighbour connection needs of its region: its own capabilities
+/// and voice server.
+#[derive(Debug, Clone, PartialEq)]
+struct NeighbourLink {
+    provision: String,
+    signaling: Option<String>,
+    server: String,
+}
+
+/// The neighbouring regions to connect to: in reach of the speaker
+/// (LLWebRTCVoiceClient::updateNeighboringRegions), with WebRTC voice
+/// (estateSessionState::isRegionWebRTCEnabled) and their own
+/// ProvisionVoiceAccountRequest: requestVoiceConnection asks the neighbour
+/// region's capability, never the agent's region's.
+fn neighbour_links(
+    own: u64,
+    speaker: DVec3,
+    regions: &HashMap<aurora_net::RegionHandle, crate::world::Region>,
+) -> std::collections::BTreeMap<u64, NeighbourLink> {
+    use aurora_voice::neighbours::{RegionArea, neighbouring_regions};
+    let areas: Vec<RegionArea> = regions
+        .iter()
+        .map(|(&handle, r)| RegionArea::from_handle(handle, f64::from(r.heightmap.size_x), f64::from(r.heightmap.size_y)))
+        .collect();
+    neighbouring_regions(own, speaker, &areas)
+        .into_iter()
+        .filter_map(|handle| {
+            let r = regions.get(&handle)?;
+            if !aurora_voice::is_webrtc_voice_server(&r.voice_server) {
+                return None;
+            }
+            let provision = r.caps.get("ProvisionVoiceAccountRequest")?.clone();
+            let link = NeighbourLink {
+                provision,
+                signaling: r.caps.get("VoiceSignalingRequest").cloned(),
+                server: r.voice_server.clone(),
+            };
+            Some((handle, link))
+        })
+        .collect()
+}
+
+/// The region of the estate channel's primary connection; `None` on a
+/// parcel's own channel or a call, which have no neighbours
+/// (parcelSessionState: a single connection).
+fn estate_region(key: Option<&ChannelKey>) -> Option<u64> {
+    match key {
+        Some(ChannelKey::Local { region, parcel: None }) => Some(*region),
+        _ => None,
+    }
+}
+
+impl Voice {'''
+
+[[patch]]
+id = "voice-neighbours-restart"
+why = "a restart drops the neighbour connections too"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "restart"
+find = '''self.leave();
+        self.mic = None;'''
+replace = '''self.leave();
+        // aurora-local-patch: voice-neighbours-restart
+        self.release_neighbours();
+        self.mic = None;'''
+
+[[patch]]
+id = "voice-neighbours-methods"
+why = "the primary hand-over, the crossing, the neighbour pass and the merged participants"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = "/// Apply a native-window microphone override without waiting for a frame."
+replace = '''// aurora-local-patch: voice-neighbours-methods
+    /// A channel change. On the estate channel the connections outlive a
+    /// region change, as the Legacy Viewer's "Estate" session does: the old
+    /// region's connection becomes a neighbour (closed by the neighbour
+    /// pass if out of reach) and the new region's, when there is one,
+    /// becomes primary (the VOICE_STATE_SESSION_UP check of
+    /// LLVoiceWebRTCConnection::connectionStateMachine; each joins again
+    /// with its new state). Any other change leaves the old channel and its
+    /// neighbours. True when a neighbour became the primary connection;
+    /// otherwise `session` is empty and a new one is to be made.
+    fn hand_over(&mut self, key: &ChannelKey) -> bool {
+        let ChannelKey::Local { region, parcel: None } = key else {
+            self.leave();
+            self.close_neighbours();
+            return false;
+        };
+        match self.session.take() {
+            Some((
+                ChannelKey::Local {
+                    region: left,
+                    parcel: None,
+                },
+                s,
+            )) => {
+                // the microphone first: the capture has a single reader
+                s.set_mic(None);
+                s.set_primary(false);
+                log::info!("voice: region {left:x} is now a neighbour connection");
+                let mut n = Neighbour::new(s);
+                n.muted = std::mem::take(&mut self.muted);
+                n.volumes = std::mem::take(&mut self.volumes);
+                self.neighbours.insert(left, n);
+            }
+            Some((_, s)) => self.retire(s),
+            None => {}
+        }
+        let Some(n) = self.neighbours.remove(region) else {
+            return false;
+        };
+        n.session.set_primary(true);
+        n.session.set_mic(self.mic.clone());
+        log::info!("voice: region {region:x} is now the primary connection");
+        self.muted = n.muted;
+        self.volumes = n.volumes;
+        self.session = Some((key.clone(), n.session));
+        true
+    }
+
+    /// Right after a crossing on the estate channel the new region's parcel
+    /// is not known yet: the estate channel goes on, on the new region's
+    /// neighbour connection, instead of leaving (the Legacy Viewer's
+    /// voiceConnectionCoro takes an unknown parcel as estate voice). Only
+    /// when that connection exists, and only for the parcel wait: every
+    /// other reason to leave stands.
+    fn crossing(&self, v: &VoiceInputs) -> Option<(ChannelKey, ChannelKind, String, Option<String>)> {
+        let Some((
+            ChannelKey::Local {
+                region: from,
+                parcel: None,
+            },
+            _,
+        )) = &self.session
+        else {
+            return None;
+        };
+        let to = v.region?;
+        if to == *from || v.call.is_some() || v.parcel.is_some() || !self.neighbours.contains_key(&to) {
+            return None;
+        }
+        let caps = v.caps?;
+        let provision = caps.get("ProvisionVoiceAccountRequest")?.clone();
+        Some((
+            ChannelKey::Local { region: to, parcel: None },
+            ChannelKind::Local { parcel_local_id: None },
+            provision,
+            caps.get("VoiceSignalingRequest").cloned(),
+        ))
+    }
+
+    /// leaveChannel: every neighbour connection logs out and closes.
+    fn close_neighbours(&mut self) {
+        for region in self.neighbours.keys() {
+            log::info!("voice: closing the neighbour connection to region {region:x}");
+        }
+        self.release_neighbours();
+    }
+
+    /// Every neighbour connection logs out in the background, kept with the
+    /// sessions left (`closing`) so that a quit in the meantime waits for
+    /// them too, as upstream's `leave` does for the primary one.
+    fn release_neighbours(&mut self) {
+        let neighbours = std::mem::take(&mut self.neighbours);
+        for n in neighbours.into_values() {
+            self.retire(n.session);
+        }
+    }
+
+    /// A session that closes: it logs out in the background and is kept
+    /// until its thread ends (upstream's `leave`, for any session).
+    fn retire(&mut self, session: VoiceSession) {
+        self.closing.retain(|s| !s.is_finished());
+        self.closing.push(session.disconnect());
+    }
+
+    /// estateSessionState::processConnectionStates: a connection to each
+    /// neighbouring region in reach with WebRTC voice, closed when the
+    /// region leaves reach, stops being WebRTC or the channel is not the
+    /// estate one. Each gets its own Voice sink: the mixer sums them.
+    fn update_neighbours(&mut self, v: &VoiceInputs, speaker: DVec3) {
+        let wanted = match (estate_region(self.session.as_ref().map(|(k, _)| k)), v.regions) {
+            (Some(own), Some(regions)) => neighbour_links(own, speaker, regions),
+            _ => std::collections::BTreeMap::new(),
+        };
+        let gone: Vec<u64> = self
+            .neighbours
+            .keys()
+            .filter(|region| !wanted.contains_key(region))
+            .copied()
+            .collect();
+        for region in gone {
+            log::info!("voice: closing the neighbour connection to region {region:x}");
+            if let Some(n) = self.neighbours.remove(&region) {
+                self.retire(n.session);
+            }
+        }
+        let Some(engine) = v.engine else {
+            return;
+        };
+        for (region, link) in wanted {
+            if self.neighbours.contains_key(&region) {
+                continue;
+            }
+            log::info!("voice: opening a neighbour connection to region {region:x}");
+            let params = VoiceConnectParams {
+                provision_cap_url: link.provision,
+                signaling_cap_url: link.signaling,
+                agent_id: v.agent_id,
+                voice_server_type: link.server,
+                // the estate body: no parcel_local_id
+                channel: ChannelKind::Local { parcel_local_id: None },
+                grid: v.grid.to_owned(),
+                stun_servers: None,
+            };
+            let session = VoiceSession::connect(v.http.clone(), params, engine.voice_sink());
+            session.set_primary(false);
+            self.neighbours.insert(region, Neighbour::new(session));
+        }
+    }
+
+    /// The channel's participants: the primary connection's and those of
+    /// the connected neighbours, each resident once.
+    fn nearby_participants(&self, primary: &VoiceSession) -> Vec<aurora_voice::Participant> {
+        let neighbours = self.neighbours.values().filter(|n| n.connected()).map(|n| n.session.participants());
+        aurora_voice::neighbours::merge_participants(std::iter::once(primary.participants()).chain(neighbours))
+    }
+
+    /// Apply a native-window microphone override without waiting for a frame.'''
+
+[[patch]]
+id = "voice-neighbours-keep-estate"
+why = "a crossing keeps the estate channel while the new region's parcel is awaited"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = "match Self::wanted(&v, self.session.as_ref().map(|(key, _)| key)) {"
+replace = '''// aurora-local-patch: voice-neighbours-keep-estate
+        let mut wanted = Self::wanted(&v, self.session.as_ref().map(|(key, _)| key));
+        if wanted
+            .as_ref()
+            .is_err_and(|why| *why == aurora_i18n::tr!("voice-waiting-for-parcel"))
+            && let Some(next) = self.crossing(&v)
+        {
+            wanted = Ok(Some(next));
+        }
+        match wanted {'''
+
+[[patch]]
+id = "voice-neighbours-handover"
+why = "a region change on the estate channel hands the primary over instead of reconnecting"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''// changing channel: leave the old one first (the drop
+                    // detaches the microphone at once, then logs out)
+                    self.leave();
+                    if let Some(engine) = v.engine {'''
+replace = '''// aurora-local-patch: voice-neighbours-handover
+                    // changing channel: the estate channel keeps its
+                    // connections across a region change (hand_over); any
+                    // other change leaves the old one first (the drop
+                    // detaches the microphone at once, then logs out)
+                    if !self.hand_over(&key)
+                        && let Some(engine) = v.engine
+                    {'''
+
+[[patch]]
+id = "voice-neighbours-leave"
+why = "voice off, logout or forbidding land: every connection closes"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''if self.leave() {
+                    log::info!("voice: leaving ({why})");
+                }'''
+replace = '''if self.leave() {
+                    log::info!("voice: leaving ({why})");
+                }
+                // aurora-local-patch: voice-neighbours-leave
+                // leaveChannel: the neighbour connections close with it
+                self.close_neighbours();'''
+
+[[patch]]
+id = "voice-neighbours-exit"
+why = "a quit closes the neighbour connections without their logout and waits for them, like the primary one"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "close_for_exit"
+find = "let current = self.session.take().map(|(_, session)| session.close_for_exit());"
+replace = '''// aurora-local-patch: voice-neighbours-exit
+        // the neighbour connections give up their logout with the others
+        // (ExitWait::with): LLWebRTCVoiceClient::drainConnections shuts
+        // down every connection
+        let neighbours = std::mem::take(&mut self.neighbours);
+        self.closing.extend(neighbours.into_values().map(|n| n.session.disconnect()));
+        let current = self.session.take().map(|(_, session)| session.close_for_exit());'''
+
+[[patch]]
+id = "voice-neighbours-update"
+why = "the neighbour pass every frame, and the same positions on every connection"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''let Some((_, s)) = &self.session else {
+            return;
+        };
+        s.set_transmit(v.transmit && self.mic.is_some());
+        let (avatar, listener) = listening_positions(v.avatar, v.listener, v.ear);
+        s.set_position(avatar.0, avatar.1, listener.0, listener.1);'''
+replace = '''// aurora-local-patch: voice-neighbours-update
+        // LLWebRTCVoiceClient::updatePosition: the neighbours follow the
+        // speaker (the avatar's head), and sendPositionUpdate gives every
+        // connection the same positions
+        let (avatar, listener) = listening_positions(v.avatar, v.listener, v.ear);
+        self.update_neighbours(&v, avatar.0);
+        for n in self.neighbours.values() {
+            n.session.set_position(avatar.0, avatar.1, listener.0, listener.1);
+        }
+        let Some((_, s)) = &self.session else {
+            return;
+        };
+        s.set_transmit(v.transmit && self.mic.is_some());
+        s.set_position(avatar.0, avatar.1, listener.0, listener.1);'''
+
+[[patch]]
+id = "voice-neighbours-moderation"
+why = "the moderation of the neighbouring regions' residents, from their primary servers"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "nearby_moderation"
+find = '''self.connected
+            .then(|| s.participants().into_iter().map(|p| (p.agent_id, p.moderator_muted)).collect())'''
+replace = '''// aurora-local-patch: voice-neighbours-moderation
+        self.connected.then(|| {
+            self.nearby_participants(s)
+                .into_iter()
+                .map(|p| (p.agent_id, p.moderator_muted))
+                .collect()
+        })'''
+
+[[patch]]
+id = "voice-neighbours-blocks"
+why = "sessionState::setUserMute: the block list goes to every connection"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "apply_blocks"
+find = '''for p in s.participants() {
+            let want = blocked(&p.agent_id);'''
+replace = '''// aurora-local-patch: voice-neighbours-blocks
+        // LLWebRTCVoiceClient::sessionState::setUserMute: to every
+        // connection of the channel, for every resident it lists
+        let everyone = self.nearby_participants(s);
+        for n in self.neighbours.values_mut().filter(|n| n.connected()) {
+            for p in &everyone {
+                let want = blocked(&p.agent_id);
+                if want != n.muted.contains(&p.agent_id) {
+                    n.session.set_user_mute(p.agent_id, want);
+                    if want {
+                        n.muted.insert(p.agent_id);
+                    } else {
+                        n.muted.remove(&p.agent_id);
+                    }
+                }
+            }
+        }
+        for p in everyone {
+            let want = blocked(&p.agent_id);'''
+
+[[patch]]
+id = "voice-neighbours-volumes"
+why = "sessionState::setUserVolume: the volumes go to every connection"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "apply_volumes"
+find = '''for p in s.participants() {
+            let want = saved.get(&p.agent_id).copied().unwrap_or(0.5);'''
+replace = '''// aurora-local-patch: voice-neighbours-volumes
+        // LLWebRTCVoiceClient::sessionState::setUserVolume: to every
+        // connection of the channel
+        let everyone = self.nearby_participants(s);
+        for n in self.neighbours.values_mut().filter(|n| n.connected()) {
+            for p in &everyone {
+                let want = saved.get(&p.agent_id).copied().unwrap_or(0.5);
+                let sent = n.volumes.get(&p.agent_id).copied().unwrap_or(0.5);
+                if (want - sent).abs() > f32::EPSILON {
+                    n.session.set_user_volume(p.agent_id, want);
+                    n.volumes.insert(p.agent_id, want);
+                }
+            }
+        }
+        for p in everyone {
+            let want = saved.get(&p.agent_id).copied().unwrap_or(0.5);'''
+
+[[patch]]
+id = "voice-neighbours-levels"
+why = "the speaking indicators of the neighbouring regions' residents"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "levels"
+find = "Some((_, s)) if self.connected => tag_levels(s.participants(), agent_id, s.own_level()),"
+replace = '''// aurora-local-patch: voice-neighbours-levels
+            Some((_, s)) if self.connected => tag_levels(self.nearby_participants(s), agent_id, s.own_level()),'''
+
+[[patch]]
+id = "voice-neighbours-app"
+why = "the viewer's regions reach the voice"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_voice"
+find = '''call: self.world.calls.active.as_ref().and_then(|c| c.channel.as_ref()),
+        };'''
+replace = '''call: self.world.calls.active.as_ref().and_then(|c| c.channel.as_ref()),
+            regions: Some(&self.world.regions), // aurora-local-patch: voice-neighbours-app
+        };'''
+
+[[patch]]
+id = "voice-neighbours-test-inputs"
+why = "the test inputs have no regions"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+fn = "inputs"
+find = '''call: None,
+        }'''
+replace = '''call: None,
+            regions: None, // aurora-local-patch: voice-neighbours-test-inputs
+        }'''
+
+[[patch]]
+id = "voice-neighbours-tests"
+why = "the primary hand-over, no neighbours off the estate channel, the crossing, voice off"
+paths = ["crates/aurora-viewer/src/voice.rs"]
+op = "literal"
+find = '''#[test]
+    fn the_current_call_survives_teleport_region_data_gaps() {'''
+replace = '''// aurora-local-patch: voice-neighbours-tests
+    /// A session that never contacts anything: a backend this build does
+    /// not speak stops before any request.
+    fn idle_session() -> VoiceSession {
+        let params = VoiceConnectParams {
+            provision_cap_url: "never contacted".into(),
+            signaling_cap_url: None,
+            agent_id: Uuid::from_u128(1),
+            voice_server_type: "vivox".into(),
+            channel: ChannelKind::Local { parcel_local_id: None },
+            grid: "test".into(),
+            stun_servers: None,
+        };
+        VoiceSession::connect(reqwest::Client::new(), params, aurora_audio::VoiceSink::null())
+    }
+
+    fn estate(region: u64) -> ChannelKey {
+        ChannelKey::Local { region, parcel: None }
+    }
+
+    #[test]
+    fn a_region_change_on_the_estate_channel_hands_the_primary_over() {
+        let blocked = Uuid::from_u128(5);
+        let mut voice = Voice {
+            session: Some((estate(7), idle_session())),
+            ..Default::default()
+        };
+        voice.muted.insert(blocked);
+        let east = idle_session();
+        east.set_primary(false);
+        voice.neighbours.insert(8, Neighbour::new(east));
+        // into region 8: its connection becomes primary, region 7's a neighbour
+        assert!(voice.hand_over(&estate(8)));
+        let (key, s) = voice.session.as_ref().expect("a primary connection");
+        assert_eq!(*key, estate(8));
+        assert!(s.is_primary());
+        assert!(voice.muted.is_empty(), "the new primary keeps what it was sent");
+        let west = voice.neighbours.get(&7).expect("the region left stays a neighbour");
+        assert!(!west.session.is_primary());
+        assert!(west.muted.contains(&blocked));
+        assert_eq!(voice.neighbours.len(), 1);
+        // into a region with no connection yet: both stay neighbours, a new
+        // primary connection is to be made
+        assert!(!voice.hand_over(&estate(9)));
+        assert!(voice.session.is_none());
+        assert_eq!(voice.neighbours.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+        assert!(!voice.neighbours[&8].session.is_primary());
+    }
+
+    #[test]
+    fn a_parcel_channel_or_a_call_has_no_neighbours() {
+        assert_eq!(estate_region(Some(&estate(7))), Some(7));
+        assert_eq!(
+            estate_region(Some(&ChannelKey::Local {
+                region: 7,
+                parcel: Some(42)
+            })),
+            None
+        );
+        assert_eq!(estate_region(Some(&ChannelKey::Call("test-call".into()))), None);
+        assert_eq!(estate_region(None), None);
+        for key in [
+            ChannelKey::Local {
+                region: 7,
+                parcel: Some(42),
+            },
+            ChannelKey::Call("test-call".into()),
+        ] {
+            let mut voice = Voice {
+                session: Some((estate(7), idle_session())),
+                ..Default::default()
+            };
+            voice.neighbours.insert(8, Neighbour::new(idle_session()));
+            // a parcel's own channel or a call: one connection, the neighbours close
+            assert!(!voice.hand_over(&key));
+            assert!(voice.session.is_none() && voice.neighbours.is_empty());
+        }
+        // without an estate session the neighbour pass keeps none
+        let http = reqwest::Client::new();
+        let mut voice = Voice {
+            session: Some((
+                ChannelKey::Local {
+                    region: 7,
+                    parcel: Some(42),
+                },
+                idle_session(),
+            )),
+            ..Default::default()
+        };
+        voice.neighbours.insert(8, Neighbour::new(idle_session()));
+        voice.update_neighbours(&inputs(&http), DVec3::ZERO);
+        assert!(voice.neighbours.is_empty());
+    }
+
+    #[test]
+    fn a_crossing_keeps_the_estate_channel_while_the_parcel_is_awaited() {
+        let http = reqwest::Client::new();
+        let caps = HashMap::from([("ProvisionVoiceAccountRequest".to_string(), "never contacted".to_string())]);
+        let mut voice = Voice {
+            session: Some((estate(7), idle_session())),
+            ..Default::default()
+        };
+        let mut v = inputs(&http);
+        v.region = Some(8);
+        v.caps = Some(&caps);
+        // no connection to region 8: nothing to keep
+        assert!(voice.crossing(&v).is_none());
+        voice.neighbours.insert(8, Neighbour::new(idle_session()));
+        let (key, kind, _, _) = voice.crossing(&v).expect("the neighbour connection carries on");
+        assert_eq!(key, estate(8));
+        assert_eq!(kind, ChannelKind::Local { parcel_local_id: None });
+        // the parcel known, a call, or still in the same region: the usual rules
+        let parcel = aurora_net::ParcelInfo::default();
+        v.parcel = Some(&parcel);
+        assert!(voice.crossing(&v).is_none());
+        v.parcel = None;
+        let call = CallChannel {
+            id: "test-call".into(),
+            credentials: String::new(),
+        };
+        v.call = Some(&call);
+        assert!(voice.crossing(&v).is_none());
+        v.call = None;
+        v.region = Some(7);
+        assert!(voice.crossing(&v).is_none());
+        // a parcel's own channel before the crossing: no estate to keep
+        v.region = Some(8);
+        voice.session = Some((
+            ChannelKey::Local {
+                region: 7,
+                parcel: Some(42),
+            },
+            idle_session(),
+        ));
+        assert!(voice.crossing(&v).is_none());
+    }
+
+    #[test]
+    fn switching_voice_off_closes_every_connection() {
+        let http = reqwest::Client::new();
+        let mut voice = Voice {
+            session: Some((estate(7), idle_session())),
+            ..Default::default()
+        };
+        voice.neighbours.insert(8, Neighbour::new(idle_session()));
+        voice.neighbours.insert(9, Neighbour::new(idle_session()));
+        let mut v = inputs(&http);
+        v.enabled = false;
+        voice.update(v);
+        assert!(voice.session.is_none() && voice.neighbours.is_empty());
+        assert_eq!(voice.light, VoiceLight::Off);
+    }
+
+    #[test]
+    fn the_current_call_survives_teleport_region_data_gaps() {'''

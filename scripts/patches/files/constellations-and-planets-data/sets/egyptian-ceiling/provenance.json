@@ -1,0 +1,106 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "eg001": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg003": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg005": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg011": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg012": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg014": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "eg017": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {},
+ "notes": {
+  "eg001": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: the bull (msxtyw) on its platform; star discs taken off"
+  },
+  "eg003": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: the lion; the ceiling's 17 star marks taken off, the lines the marks lay across re-joined; star discs taken off; 17 star marks taken off and the lines they lay across re-joined by drawing"
+  },
+  "eg005": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: Sah striding in his boat"
+  },
+  "eg011": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: the crocodile"
+  },
+  "eg012": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: Selkis, the goddess lying flat; star discs taken off"
+  },
+  "eg014": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: Horus, the falcon-headed god with his spear"
+  },
+  "eg017": {
+   "drawing": "cut out: star marks and loose discs taken off; genuine cut-out: the hippopotamus Isis-Djamet with the crocodile on her back; star discs taken off"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "unknown",
+  "es": "unknown",
+  "fr": "unknown",
+  "it": "unknown",
+  "ja": "unknown",
+  "nb": "unknown",
+  "pl": "unknown",
+  "pt": "unknown",
+  "pt-BR": "unknown",
+  "ru": "unknown",
+  "tr": "unknown",
+  "uk": "unknown",
+  "zh-Hans": "unknown",
+  "zh-Hant": "unknown"
+ },
+ "unit": "set egyptian-ceiling"
+}

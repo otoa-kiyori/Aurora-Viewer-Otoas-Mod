@@ -1,0 +1,60 @@
+{
+ "credits": [
+  {
+   "holder": "Made for this viewer",
+   "work": "New drawings of Crux, Norma, Chamaeleon, Mensa, Caelum and Octans, after the plates of Bode's Uranographia (1801)",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Crux and Mensa are redrawn over the plate figures, Caelum and Octans after them (their parts followed, not traced); Norma and Chamaeleon are new drawings of the plates' subjects. Drawn with code for this viewer; no star marks or lettering. One entry per figure below."
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Crux: redrawn over the plate, after Uranographia (1801), Tab. XX",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Latin cross following the plate figure; upright through gamma and alpha Crucis, bar through beta and delta; stippled face, hatched shadow strips; no star marks or lettering"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Norma: new drawing, after Uranographia (1801), Tab. XV (subject only)",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Set square and rule, the subject of the plate figure (Norma et Regula, two long bars there); composed afresh on the modern figure: square corner on gamma2 Normae, arms through epsilon and delta, rule along epsilon-eta; no star marks or lettering"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Chamaeleon: new drawing, after Uranographia (1801), Tab. XX (subject only)",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "The plate has a lizard figure, crossed by the polar grid and distorted near the pole; this drawing does not follow it. Drawn fresh on its stars in the plate manner: torso on gamma-delta-beta-epsilon, head to the east, tail coiled on alpha; no star marks or lettering"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Mensa: redrawn over the plate, after Uranographia (1801), Tab. XX",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Table mountain following the plate figure (Mons Mensae): flat summit under the Large Cloud, foot towards the pole; patchy stipple, outlined summit and cliffs, hatched shaded cliff; beta Mensae lies in the Cloud, off the mountain, as on the plate; no star marks or lettering"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Caelum: redrawn after the plate, after Uranographia (1801), Tab. XVIII",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Two burins crossed and tied with a ribbon, after the plate figure (Caela Scalptoris): one tool along beta-alpha, one along gamma-delta, the knot below alpha; the plate ribbon loops reduced to a bow and two tails; no star marks or lettering"
+  },
+  {
+   "holder": "Made for this viewer",
+   "work": "Octans: redrawn after the plate, after Uranographia (1801), Tab. XX",
+   "licence": "Own work on a public-domain reference",
+   "url": "https://doi.org/10.3931/e-rara-11148",
+   "imported": "2026-11-25",
+   "note": "Reflecting octant after the plate figure (Octans Nauticus), its parts followed rather than traced (the plate figure is buried in the polar grid): head at nu Octantis, long arm through delta, beta on the other arm, graduated limb, index arm, mirrors and sight; no star marks or lettering"
+  }
+ ]
+}

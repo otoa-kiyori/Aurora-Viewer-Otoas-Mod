@@ -1,0 +1,385 @@
+# An optional local log of the web addresses the world shows, for a
+# separate program that checks them later. The viewer writes the file and
+# nothing else: it does not show it, read it back or send it anywhere.
+#
+# What (files/url-log/url_log.rs, with its tests):
+#
+# - the address of a media on a prim face (in the world, on a worn item, on
+#   a HUD), of the parcel media and of the parcel music, when it is turned
+#   on: a face's media created, given a new address, or there when the log
+#   is turned on (reconcile_prims, a per-media number, no allocation in the
+#   frame), the parcel's media address while media is on (update_parcel),
+#   the parcel music's while the radio plays it or the filter holds or
+#   blocks it (update_audio). The entry's `state` is the media filter's
+#   answer at that moment (allowed, held for its question, blocked; music
+#   the radio never plays, not http or https, is written as `unsupported`).
+#   While a kind of media is off nothing is written for it and its address
+#   is not taken as seen, so the entry comes when it is turned on; turning
+#   it off, stopping, unloading or removing it writes nothing;
+# - every http or https address said in nearby chat or in an IM, by an
+#   avatar or an object, found by the chat's own link finder (a link with
+#   its own text gives its address): lines that reach the conversation
+#   only, so a muted or blocked speaker, a filtered object or spam writes
+#   nothing, as for the transcript. Not group chat, not our own lines;
+# - with each entry, for media: the region, the position (of the
+#   linkset's top or of the avatar wearing it, rounded to 1 m), the parcel
+#   and its owner (parcel media and music), the object and face, and the
+#   linkset's name and owner when the viewer knows them (`object_name`:
+#   the name of an ObjectProperties answer it got anyway, else the
+#   inventory item a worn item of ours came from; `owner`: the wearer of a
+#   worn item or HUD, else the answer's owner, else the object update's);
+#   for chat and IM: the speaker (UUID, name, avatar or object, and the
+#   owner of an object when the message carries it), and where it was: a
+#   chat line the region and position its message gives (our own region
+#   alone when no region we know holds it), an object's IM the location it
+#   carries. Never an asset id, and no request is made for a name or an
+#   owner: what is not known is left out. By the owner's decision the
+#   region and the position are written also while the RLVa location
+#   restriction is active: the log is the user's own local record and never
+#   leaves the machine;
+# - each line ends with `"v":2`, the format's version; a line without it
+#   is of version 1, which had no `object_name` nor `owner` on media and
+#   parcel lines and no `region` nor `pos` on chat and IM lines. The other
+#   keys keep their names and forms. The time is `t`, RFC 3339
+#   in UTC to the second (`2026-11-14T09:30:05Z`);
+# - the same address from the same face, parcel or speaker once per
+#   session (a bounded set).
+#
+# Addresses are stored with a `*` just before their scheme
+# (`*https://example.com/a?b=1`), so that an editor does not make the log
+# clickable; a reading program removes the first `*` to get the address
+# back. The host (`host`) is written bare.
+#
+# Where: `<data dir>/url-log/YYYY-MM-DD.jsonl`, the data dir being the
+# folder of the viewer's `logs` (the offline demo writes to `url-log-demo`),
+# the day in UTC, one JSON object per line written in one piece. The folder
+# is 0700 and the files 0600 on Unix, links are refused, and files more
+# than 30 days old (by the date in their exact name) are deleted when the
+# writer starts and once a day. One writer thread, a bounded queue (a full
+# queue drops the entry and counts it): the frame thread never touches the
+# disk, and nothing is created while the switch is off.
+#
+# The switch: Preferences > Media > Filter > "Log web addresses"
+# (media.url_log), off by default. The viewer's own log gets one line when
+# logging starts (the folder) and a daily debug count, never an address.
+#
+# A local addition: the Legacy Viewer has nothing like it. Needs no other
+# patch. With 84-media-filter-switches (it applies later), its step
+# media-filter-switches-url-log-peek adds "Don't ask" to the peek as a
+# refusal, as the filter answers, and its fail guard
+# media-filter-switches-url-log-peek-kept stops the run if that arm goes
+# missing while this peek is there: the log notes the filter's answer
+# either way. 85-media-filter-guard lists media.url_log among the fields of
+# MediaSettings it allows.
+#
+# Apply or skip the whole file, not one patch of it.
+
+# ------------------------------------------------------------- the module
+
+[[patch]]
+id = "url-log-module"
+why = "the log: entries, their line, the once-per-session set, the writer thread, the 30 days, and the hooks' functions"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/url_log.rs"]
+source = "files/url-log/url_log.rs"
+
+[[patch]]
+id = "url-log-mod"
+why = "declare the module"
+paths = ["crates/aurora-viewer/src/main.rs"]
+op = "literal"
+find = "mod url_scheme;"
+replace = '''mod url_log; // aurora-local-patch: url-log-mod
+mod url_scheme;'''
+
+# ---------------------------------------------------------------- setting
+
+[[patch]]
+id = "url-log-setting"
+why = "the switch in settings.json; MediaSettings is serde(default), so older files read it as off"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "pub filter_explained: bool,"
+replace = '''pub filter_explained: bool,
+    // aurora-local-patch: url-log-setting
+    /// Local addition (local patch set, url_log.rs): the web addresses of
+    /// media, parcel music, nearby chat and IMs are written to a local log
+    /// for a separate checking program. Off by default.
+    pub url_log: bool,'''
+
+[[patch]]
+id = "url-log-impl-field"
+why = "each media keeps the log's number it was looked at under (url_log::generation), so a face is given to the log once, without a key built every frame"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = """pub may_control: bool,
+}
+
+impl MediaImpl {"""
+replace = """pub may_control: bool,
+    // aurora-local-patch: url-log-impl-field
+    /// Local addition (url_log.rs): the log's number this media was given
+    /// to it under; 0 for none yet, and again when its address changes.
+    url_log_gen: u64,
+}
+
+impl MediaImpl {"""
+
+[[patch]]
+id = "url-log-impl-new"
+why = "goes with url-log-impl-field: a new media was not given to the log yet"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "may_control: true,"
+replace = """may_control: true,
+            url_log_gen: 0, // aurora-local-patch: url-log-impl-new"""
+
+[[patch]]
+id = "url-log-default"
+why = "goes with url-log-setting: off by default"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+find = "filter_explained: false,"
+replace = '''filter_explained: false,
+            url_log: false, // aurora-local-patch: url-log-default'''
+
+# ------------------------------------------------------------- the filter
+
+[[patch]]
+id = "url-log-peek"
+why = "the filter's answer for an address without asking, telling or keeping anything, for the entry's state"
+paths = ["crates/aurora-viewer/src/media/filter.rs"]
+op = "literal"
+find = "pub fn rules(&self) -> &[Rule] {"
+replace = '''// aurora-local-patch: url-log-peek
+    /// What the filter would answer for a URL now, without asking, telling
+    /// or keeping anything: for the local URL log (url_log.rs), which notes
+    /// the answer when an address is first seen. `trusted`: a worn item
+    /// that check_trusted would take. With patch 84, "Don't ask" counts as
+    /// a refusal (its step media-filter-switches-url-log-peek).
+    pub fn peek(&self, url: &str, trusted: bool) -> Verdict {
+        let url = url.trim();
+        let host = match target(url) {
+            Target::Site(host) => host,
+            Target::Blank => return Verdict::Allow,
+            Target::Refused(_) => return Verdict::Deny,
+        };
+        match rule_for(&self.rules, url, &host).or_else(|| self.session.get(url).copied()) {
+            Some(Action::Allow) => Verdict::Allow,
+            Some(Action::Deny) => Verdict::Deny,
+            _ if trusted => Verdict::Allow,
+            _ => Verdict::Ask,
+        }
+    }
+
+    pub fn rules(&self) -> &[Rule] {'''
+
+# ---------------------------------------------------- the chat's link finder
+
+[[patch]]
+id = "url-log-links"
+why = "the web addresses of a chat line, found as the conversation finds its links"
+paths = ["crates/aurora-viewer/src/ui/chat.rs"]
+op = "literal"
+find = "pub(crate) fn mentions(text: &str, agent: &uuid::Uuid) -> bool {"
+replace = '''// aurora-local-patch: url-log-links
+/// The http and https addresses of a text, as written and in order: the
+/// links the conversation shows, the address of a link with its own text
+/// included. Other schemes (secondlife://, hop://) and addresses without a
+/// scheme (www.…) are left out. For the local URL log (url_log.rs).
+pub(crate) fn web_addresses(text: &str) -> Vec<String> {
+    fn address(seg: &Seg<'_>) -> Option<String> {
+        match seg {
+            Seg::Url(u) | Seg::Slurl(u) | Seg::Place(u, _) | Seg::App(u, _) => Some(u.to_string()),
+            Seg::Labelled(_, inner) => address(inner),
+            _ => None,
+        }
+    }
+    let web = |u: &String| {
+        ["http://", "https://"]
+            .iter()
+            .any(|s| u.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)))
+    };
+    segments(text).iter().filter_map(address).filter(web).collect()
+}
+
+/// The text mentions `agent` (LLUrlRegistry::containsAgentMention).
+pub(crate) fn mentions(text: &str, agent: &uuid::Uuid) -> bool {'''
+
+# --------------------------------------------------------- where it is fed
+
+[[patch]]
+id = "url-log-face"
+why = "a media face is given to the log once per log number: new (LLViewerMedia::updateMediaImpl), with a new address, or there when the log is turned on; two atomic loads a face and frame"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "reconcile_prims"
+find = """m.may_control = may_control;
+if m.entry.as_ref() != Some(entry) {"""
+replace = """m.may_control = may_control;
+                    // aurora-local-patch: url-log-face
+                    if m.url_log_gen != crate::url_log::generation() {
+                        m.url_log_gen = crate::url_log::generation();
+                        crate::url_log::face(
+                            world,
+                            f.settings,
+                            crate::url_log::Face {
+                                object: *id,
+                                idx: om.idx,
+                                face: fi as u8,
+                                hud: om.hud,
+                                own: om.on_own_avatar,
+                            },
+                            entry.url(),
+                        );
+                    }
+                    if m.entry.as_ref() != Some(entry) {"""
+
+[[patch]]
+id = "url-log-face-change"
+why = "a media face's entry changes: it is given to the log again (its new address is written next frame; the same one is not written twice)"
+paths = ["crates/aurora-viewer/src/media/update.rs"]
+op = "literal"
+fn = "reconcile_prims"
+find = "let old_url = m.entry.as_ref().map(|e| e.url().to_string()).unwrap_or_default();"
+replace = """m.url_log_gen = 0; // aurora-local-patch: url-log-face-change
+                        let old_url = m.entry.as_ref().map(|e| e.url().to_string()).unwrap_or_default();"""
+
+[[patch]]
+id = "url-log-parcel"
+why = "the parcel media's address as each frame reads it (also what ParcelMediaUpdate changed): written when first seen or changed"
+paths = ["crates/aurora-viewer/src/media/mod.rs"]
+op = "literal"
+fn = "update_parcel"
+find = "let url = effective_parcel_url(pm, &parcel.media_url);"
+replace = '''let url = effective_parcel_url(pm, &parcel.media_url);
+        crate::url_log::parcel_media(world, f.settings, &url); // aurora-local-patch: url-log-parcel'''
+
+[[patch]]
+id = "url-log-music"
+why = "the switch followed each frame; the parcel music's address with the filter's answer, written when first seen or changed"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "update_audio"
+find = "let want = want.to_owned();"
+replace = '''let want = want.to_owned();
+        // aurora-local-patch: url-log-music
+        crate::url_log::follow(self.settings.media.url_log);
+        crate::url_log::parcel_music(&self.world, self.parcel_music.station(), &want, verdict);'''
+
+[[patch]]
+id = "url-log-properties"
+why = "the names and owners of the ObjectProperties answers the viewer gets anyway, kept while the log is on for the name and owner of a media's linkset; no request is made for them"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.object_profile.on_properties(&props);"
+replace = '''self.object_profile.on_properties(&props);
+                crate::url_log::on_properties(&props); // aurora-local-patch: url-log-properties'''
+
+[[patch]]
+id = "url-log-chat"
+why = "a nearby chat line accepted (after the mute, block, object filter and anti-spam checks), as the transcript gets it"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+fn = "on_chat_line"
+find = '''
+self.push_chat(ChatLine {
+    time,
+    from,
+    text: c.message,'''
+replace = '''// aurora-local-patch: url-log-chat
+        // the speaker's place as the line's own position gives it, in the
+        // region under it (as getObjectImSLURL above)
+        let url_log_at = c
+            .region
+            .and_then(|r| self.region_at_offset(r, c.position))
+            .map(|(r, p)| (r.name.as_str(), p));
+        crate::url_log::chat(self, &c.message, kind, c.source_id, &from, c.owner_id, url_log_at);
+        self.push_chat(ChatLine {
+            time,
+            from,
+            text: c.message,'''
+
+[[patch]]
+id = "url-log-im"
+why = "an avatar's IM accepted into its conversation (after the block, anti-spam and friends-only checks)"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+fn = "on_im"
+find = "self.conversation_push(im.from_agent_id, line, true);"
+replace = '''crate::url_log::im(self.agent_id, &im.message, im.from_agent_id, &line.from, false, Uuid::nil(), None); // aurora-local-patch: url-log-im
+            self.conversation_push(im.from_agent_id, line, true);'''
+
+[[patch]]
+id = "url-log-object-im"
+why = "an object's IM (llInstantMessage) accepted into the nearby chat; the speaker is the object, the owner the sender"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+fn = "on_im"
+find = '''
+self.push_chat(ChatLine {
+    time,
+    from,
+    text,
+    kind,
+    source,'''
+replace = '''// aurora-local-patch: url-log-object-im
+        // the location an object's IM carries (IM_FROM_TASK's binary bucket)
+        let url_log_object = kind == ChatKind::ObjectIm;
+        let url_log_at = url_log_object.then(|| object_im_filter::origin(&im.binary_bucket)).flatten();
+        let url_log_at = url_log_at.as_ref().map(|o| (o.region.as_str(), o.pos));
+        crate::url_log::im(self.agent_id, &text, source, &from, url_log_object, im.from_agent_id, url_log_at);
+        self.push_chat(ChatLine {
+            time,
+            from,
+            text,
+            kind,
+            source,'''
+
+# --------------------------------------------------------- the preferences
+
+[[patch]]
+id = "url-log-page"
+why = "the switch in Preferences > Media, in the filter's group but not greyed with it"
+paths = ["crates/aurora-viewer/src/ui/options/pages/media.rs"]
+op = "literal"
+find = '''
+// the note about the filter shown once
+cx.track(&field!(media.filter_explained));'''
+replace = '''// aurora-local-patch: url-log-page
+        cx.toggle(tr!("ui-options-url-log"), tr!("ui-options-url-log-help"), &field!(media.url_log));
+        // the note about the filter shown once
+        cx.track(&field!(media.filter_explained));'''
+
+[[patch]]
+id = "url-log-text-en"
+why = "the label and help of the switch (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: url-log-text-en
+ui-options-url-log = Log web addresses
+ui-options-url-log-help = Writes the full web addresses of media, parcel music and links said in nearby chat or IMs, with who or what showed them, to the url-log folder beside the viewer's logs, readable only by you. Kept 30 days; nothing is sent anywhere'''
+
+[[patch]]
+id = "url-log-text-fr"
+why = "goes with url-log-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: url-log-text-fr
+ui-options-url-log = Noter les adresses web
+ui-options-url-log-help = Écrit les adresses web complètes des médias, de la musique de la parcelle et des liens dits dans le chat local ou les messages privés, avec qui ou quoi les a montrées, dans le dossier url-log à côté des journaux de la visionneuse, lisible par vous seul. Gardées 30 jours ; rien n'est envoyé nulle part'''
+
+[[patch]]
+id = "url-log-text-ja"
+why = "goes with url-log-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-media-filter-own-worn-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: url-log-text-ja
+ui-options-url-log = ウェブアドレスを記録
+ui-options-url-log-help = メディア、区画の音楽、近くのチャットやＩＭで送られたリンクの完全なウェブアドレスを、表示したアバターやオブジェクトとともに、ビューアのログの隣にあるurl-logフォルダに記録します。このフォルダはあなただけが読めます。３０日間保存し、どこにも送信しません。'''

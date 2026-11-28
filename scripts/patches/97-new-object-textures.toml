@@ -1,0 +1,423 @@
+# Default texture, normal map and specular map of new objects: Preferences ›
+# Build › Look of new objects gets three pickers, and every prim made with
+# the Create tool starts with those maps on every face.
+#
+# Reference, not a copy: the Legacy Viewer has a default texture only
+# (FSDefaultObjectTexture, set on every face by
+# FSCommon::applyDefaultBuildPreferences, indra/newview/fscommon.cpp, its
+# picker in FSPanelPrefs::onCommitTexture, indra/newview/fspanelprefs.cpp).
+# The default NORMAL and SPECULAR maps are a deliberate addition beyond the
+# Legacy Viewer: it has no such defaults.
+#
+# Aurora's design (files/new-object-textures/new_prim_maps.rs, module doc):
+# - settings build.new_prim_texture (default 89556747-…, the region's own
+#   plywood, so nothing changes until a texture is picked),
+#   build.new_prim_normal and build.new_prim_specular (default none). Each
+#   holds a built-in texture or an INVENTORY ITEM id, never another asset
+#   id: settings.json goes into the settings backups, an exported file;
+# - the texture at Default leaves the faces as the region made them; another
+#   one is painted on every face in the existing ObjectImage of the new
+#   objects' look (build/new_defaults.rs), the mapping kept;
+# - the maps go through the Build window's own Blinn-Phong path
+#   (BuildTool::legacy_put, the RenderMaterials PUT, and ui.legacy_pending so
+#   the Texture tab shows them at once) with the Build window's default
+#   material: repeats 1, offsets 0, rotation 0, white specular colour,
+#   glossiness 51, environment 0 (LegacyMaterial::default, approved by
+#   Otoa). Its alpha mode follows the diffuse texture: the PUT waits up to
+#   5 s for it to load (blend with alpha, none otherwise), then sends none.
+#
+# Creators' permissions (AGENTS.md section 2): one shared rule,
+# texture_copy::new_object_map, built from contents_drop::copyable and
+# texture_copy::requires_contents. A built-in texture applies as is; an item
+# must be a texture or snapshot the agent may COPY and TRANSFER (a Library
+# item: copy). STRICTER than the Legacy Viewer, which asks copy only: a
+# default is painted on prim after prim without going into their contents,
+# where LLToolDragAndDrop::handleDropTextureProtections would put a
+# no-transfer texture. Approved by Otoa. The rule runs when a texture is
+# picked (the picker greys the others out and refuses their drop) and again
+# for every new prim: an item gone or whose rights changed applies nothing,
+# and the log says why. Debug Settings typing goes through the same check.
+# The page shows names and swatches, never an asset id; the picker's UUID
+# field keeps its own rule (actions::asset_uuid_shown).
+#
+# Demo: AURORA_DEMO_NEW_OBJECT_TEXTURES=1|refused (docs/TESTING.md).
+# Retire this file if upstream ports the defaults. Apply or skip the whole
+# file, not one patch of it.
+
+# ------------------------------------------------------------ new files
+
+[[patch]]
+id = "new-object-textures-module"
+why = "the slots, the plan a new prim takes, the deferred material PUT, the page's picker state"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/build/new_prim_maps.rs"]
+source = "files/new-object-textures/new_prim_maps.rs"
+
+[[patch]]
+id = "new-object-textures-tests"
+why = "settings round trip, what gets applied, the permission matrix, a created prim"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/build/new_prim_maps_tests.rs"]
+source = "files/new-object-textures/new_prim_maps_tests.rs"
+
+[[patch]]
+id = "new-object-textures-app"
+why = "the app side: the rows' data, the picker after the window, the demo scenario"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/app/new_object_textures.rs"]
+source = "files/new-object-textures/app_new_object_textures.rs"
+
+[[patch]]
+id = "new-object-textures-page-rows"
+why = "the three rows of Look of new objects"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/ui/options/pages/build_maps.rs"]
+source = "files/new-object-textures/build_maps.rs"
+
+# ------------------------------------------------------------ build
+
+[[patch]]
+id = "new-object-textures-build-mod"
+why = "declare build::new_prim_maps"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+find = "mod new_defaults;"
+replace = """mod new_defaults;
+pub mod new_prim_maps; // aurora-local-patch: new-object-textures-build-mod"""
+
+[[patch]]
+id = "new-object-textures-settings"
+why = "the three settings, after the new objects' others"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+find = "pub new_prim_phantom: bool,"
+replace = """pub new_prim_phantom: bool,
+    // aurora-local-patch: new-object-textures-settings
+    /// New prim texture (FSDefaultObjectTexture): a built-in texture or an
+    /// inventory item id, the region's plywood by default
+    /// (build/new_prim_maps.rs).
+    pub new_prim_texture: uuid::Uuid,
+    /// New prim Blinn-Phong normal map (Aurora): a built-in texture or an
+    /// inventory item id, none by default.
+    pub new_prim_normal: uuid::Uuid,
+    /// New prim Blinn-Phong specular map (Aurora), as the normal map.
+    pub new_prim_specular: uuid::Uuid,"""
+
+[[patch]]
+id = "new-object-textures-settings-default"
+why = "the settings' defaults: nothing changes until one is picked"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+find = "new_prim_phantom: false,"
+replace = """new_prim_phantom: false,
+            // aurora-local-patch: new-object-textures-settings-default
+            new_prim_texture: aurora_prim::te::DEFAULT_TEXTURE,
+            new_prim_normal: uuid::Uuid::nil(),
+            new_prim_specular: uuid::Uuid::nil(),"""
+
+[[patch]]
+id = "new-object-textures-tool-field"
+why = "the new prims whose maps wait for their texture's alpha"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+find = "new_defaults_pending: u32,"
+replace = """new_defaults_pending: u32,
+    /// New prims whose default maps wait for their texture's alpha
+    /// (new_prim_maps.rs). // aurora-local-patch: new-object-textures-tool-field
+    new_prim_materials: Vec<new_prim_maps::Pending>,"""
+
+[[patch]]
+id = "new-object-textures-tool-init"
+why = "no new prim waits at first"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+find = "new_defaults_pending: 0,"
+replace = """new_defaults_pending: 0,
+            new_prim_materials: Vec::new(), // aurora-local-patch: new-object-textures-tool-init"""
+
+[[patch]]
+id = "new-object-textures-send"
+why = "once per frame, before the early returns: the maps whose texture is known or that waited long enough"
+paths = ["crates/aurora-viewer/src/build/mod.rs"]
+op = "literal"
+fn = "update"
+find = "self.update_material_preview(world, s);"
+replace = """self.update_material_preview(world, s);
+        self.send_new_prim_materials(world, scene); // aurora-local-patch: new-object-textures-send"""
+
+[[patch]]
+id = "new-object-textures-plan"
+why = "the defaults through the shared rule, once per new prim that takes the new objects' look"
+paths = ["crates/aurora-viewer/src/build/new_defaults.rs"]
+op = "literal"
+fn = "apply_new_defaults"
+find = "self.new_defaults_pending -= 1;"
+replace = """self.new_defaults_pending -= 1;
+        // aurora-local-patch: new-object-textures-plan
+        // the default texture and maps the rule allows (new_prim_maps.rs)
+        let maps = super::new_prim_maps::Plan::resolve(&world.inventory, world.agent_id, s);"""
+
+[[patch]]
+id = "new-object-textures-paint"
+why = "the default texture on every face, in the same ObjectImage"
+paths = ["crates/aurora-viewer/src/build/new_defaults.rs"]
+op = "literal"
+fn = "apply_new_defaults"
+find = "*face = styled_face(face, s);"
+replace = """*face = styled_face(face, s);
+                maps.paint(face); // aurora-local-patch: new-object-textures-paint"""
+
+[[patch]]
+id = "new-object-textures-queue"
+why = "the default maps follow the texture entry"
+paths = ["crates/aurora-viewer/src/build/new_defaults.rs"]
+op = "literal"
+fn = "apply_new_defaults"
+find = "self.send_te(world, idx);"
+replace = """self.send_te(world, idx);
+            self.queue_new_prim_materials(world, idx, maps); // aurora-local-patch: new-object-textures-queue"""
+
+[[patch]]
+id = "new-object-textures-rule"
+why = "the shared rule: which stored default may be painted on a new prim"
+paths = ["crates/aurora-viewer/src/build/texture_copy.rs"]
+op = "literal"
+find = "const AT_MATERIAL: i32 = 57;"
+replace = """// aurora-local-patch: new-object-textures-rule
+/// Why a default map of new objects is not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewObjectMapRefusal {
+    /// The item is not (or no longer) in the inventory.
+    Missing,
+    /// Not a texture or a snapshot.
+    NotTexture,
+    NoCopy,
+    NoTransfer,
+}
+
+/// The asset a default map of new objects (Preferences › Build, local patch
+/// set) may paint on a prim the Create tool made. `stored` is a built-in
+/// texture (get_is_predefined_texture, or the picker's Transparent), applied
+/// as is, or an inventory item, its link followed, whose asset is applied.
+/// FSPanelPrefs::onCommitTexture (indra/newview/fspanelprefs.cpp) refuses an
+/// item without copy (LLPermissions::allowOperationBy(PERM_COPY)). Stricter
+/// here: the item also needs transfer, unless it is in the Library
+/// (`requires_contents`), since a default is painted on prim after prim
+/// without going into their contents, where
+/// LLToolDragAndDrop::handleDropTextureProtections
+/// (indra/newview/lltooldraganddrop.cpp) would put a no-transfer one. Asked
+/// when the default is chosen and again for every new prim: a stored id
+/// never skips it.
+pub fn new_object_map(inv: &Inventory, agent: Uuid, stored: Uuid) -> Result<Uuid, NewObjectMapRefusal> {
+    if predefined(stored) || stored == aurora_prim::te::TRANSPARENT_TEXTURE {
+        return Ok(stored);
+    }
+    let item = rules::original(inv, stored)
+        .and_then(|id| inv.items.get(&id))
+        .ok_or(NewObjectMapRefusal::Missing)?;
+    // IT_TEXTURE, IT_SNAPSHOT
+    if !matches!(item.inv_type, 0 | 15) || item.asset_id.is_nil() {
+        return Err(NewObjectMapRefusal::NotTexture);
+    }
+    if !contents_drop::copyable(item, agent) {
+        return Err(NewObjectMapRefusal::NoCopy);
+    }
+    if requires_contents(inv, item, agent) {
+        return Err(NewObjectMapRefusal::NoTransfer);
+    }
+    Ok(item.asset_id)
+}
+
+const AT_MATERIAL: i32 = 57;"""
+
+# ------------------------------------------------------------ preferences
+
+[[patch]]
+id = "new-object-textures-options-state"
+why = "the page's picker state and rows, filled by the app"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = "pub flycam_active: bool,"
+replace = """pub flycam_active: bool,
+    /// Build › Look of new objects: the default maps' rows and picker
+    /// (build/new_prim_maps.rs). // aurora-local-patch: new-object-textures-options-state
+    pub new_prim_maps: crate::build::new_prim_maps::PrefsUi,"""
+
+[[patch]]
+id = "new-object-textures-pages-mod"
+why = "declare the rows' module"
+paths = ["crates/aurora-viewer/src/ui/options/pages.rs"]
+op = "literal"
+find = "pub mod build;"
+replace = """pub mod build;
+pub mod build_maps; // aurora-local-patch: new-object-textures-pages-mod"""
+
+[[patch]]
+id = "new-object-textures-page"
+why = "the three rows at the end of Look of new objects"
+paths = ["crates/aurora-viewer/src/ui/options/pages/build.rs"]
+op = "literal"
+fn = "page"
+find = """.combo(tr!("build-ui-texture-shininess"), "", &field!(build.new_prim_shiny), &shines);"""
+replace = """.combo(tr!("build-ui-texture-shininess"), "", &field!(build.new_prim_shiny), &shines);
+        super::build_maps::rows(cx); // aurora-local-patch: new-object-textures-page"""
+
+# ------------------------------------------------------------ app
+
+[[patch]]
+id = "new-object-textures-app-mod"
+why = "declare the app side"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "mod texture_picker;"
+replace = """mod new_object_textures; // aurora-local-patch: new-object-textures-app-mod
+mod texture_picker;"""
+
+[[patch]]
+id = "new-object-textures-refresh"
+why = "the rows' names and swatches, before the window draws"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "draw_options"
+find = "let before_camera = self.settings.camera.clone();"
+replace = """self.new_object_maps_refresh(); // aurora-local-patch: new-object-textures-refresh
+        let before_camera = self.settings.camera.clone();"""
+
+[[patch]]
+id = "new-object-textures-picker"
+why = "the picker the page opened, after the window; a choice is saved with the other settings"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "draw_options"
+find = "let mut res = ui::options::show(ctx, p, &self.skin.icons, &mut self.settings, &mut self.options_ui, &mut open);"
+replace = """let mut res = ui::options::show(ctx, p, &self.skin.icons, &mut self.settings, &mut self.options_ui, &mut open);
+        res.changed |= self.new_object_maps_picker(ctx, p, open); // aurora-local-patch: new-object-textures-picker"""
+
+[[patch]]
+id = "new-object-textures-images"
+why = "the swatches' and the picker's images"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "images.extend(self.day_editor.wanted_images.drain());"
+replace = """images.extend(self.day_editor.wanted_images.drain());
+        images.extend(self.options_ui.new_prim_maps.wanted_images.drain()); // aurora-local-patch: new-object-textures-images"""
+
+[[patch]]
+id = "new-object-textures-demo"
+why = "AURORA_DEMO_NEW_OBJECT_TEXTURES, once the demo inventory is there"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.demo_altgr_shortcuts();"
+replace = """self.demo_altgr_shortcuts();
+        self.demo_new_object_textures(); // aurora-local-patch: new-object-textures-demo"""
+
+# ------------------------------------------------------------ text
+
+[[patch]]
+id = "new-object-textures-text-en"
+why = "the rows' labels, hints and refusals"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-build-new-faces = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: new-object-textures-text-en
+ui-options-build-new-normal = Normal map
+ui-options-build-new-specular = Specular map
+ui-options-build-new-texture-hint = Every face of a new prim starts with this texture. Default keeps the one the region gives. Only a texture you may copy and transfer can be chosen; if it can no longer be used, nothing is applied.
+ui-options-build-new-normal-hint = Every face of a new prim gets this Blinn-Phong normal map. None: no material. Only a texture you may copy and transfer can be chosen; if it can no longer be used, nothing is applied.
+ui-options-build-new-specular-hint = Every face of a new prim gets this Blinn-Phong specular map, with a white specular color, glossiness 51 and no environment shine. None: no material. Only a texture you may copy and transfer can be chosen; if it can no longer be used, nothing is applied.
+ui-options-build-new-map-builtin = Built-in texture
+ui-options-build-new-map-missing = It is not in your inventory.
+ui-options-build-new-map-not-texture = It is not a texture.
+ui-options-build-new-map-no-copy = It has no copy permission.
+ui-options-build-new-map-no-transfer = It has no transfer permission.
+ui-options-build-new-map-refused = This texture cannot be a default for new objects. { $reason }'''
+
+[[patch]]
+id = "new-object-textures-text-en-gb"
+why = "the British English spelling of the one hint that has an American one (the catalogue test asks for an en-GB override; Australian English inherits it)"
+paths = ["crates/aurora-i18n/locales/en-GB.ftl"]
+op = "regex"
+pattern = '^language-name = English \(UK\)$'
+replace = '''\g<0>
+
+# // aurora-local-patch: new-object-textures-text-en-gb
+ui-options-build-new-specular-hint = Every face of a new prim gets this Blinn-Phong specular map, with a white specular colour, glossiness 51 and no environment shine. None: no material. Only a texture you may copy and transfer can be chosen; if it can no longer be used, nothing is applied.'''
+
+[[patch]]
+id = "new-object-textures-text-fr"
+why = "the rows' labels, hints and refusals"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-build-new-faces = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: new-object-textures-text-fr
+ui-options-build-new-normal = Carte de normales
+ui-options-build-new-specular = Carte spéculaire
+ui-options-build-new-texture-hint = Chaque face d'un nouveau prim commence avec cette texture. Par défaut : celle que donne la région. Seule une texture que vous pouvez copier et transférer peut être choisie ; si elle n'est plus utilisable, rien n'est appliqué.
+ui-options-build-new-normal-hint = Chaque face d'un nouveau prim reçoit cette carte de normales Blinn-Phong. Aucune : pas de matériau. Seule une texture que vous pouvez copier et transférer peut être choisie ; si elle n'est plus utilisable, rien n'est appliqué.
+ui-options-build-new-specular-hint = Chaque face d'un nouveau prim reçoit cette carte spéculaire Blinn-Phong, avec une couleur spéculaire blanche, une brillance de 51 et aucun reflet de l'environnement. Aucune : pas de matériau. Seule une texture que vous pouvez copier et transférer peut être choisie ; si elle n'est plus utilisable, rien n'est appliqué.
+ui-options-build-new-map-builtin = Texture intégrée
+ui-options-build-new-map-missing = Elle n'est pas dans votre inventaire.
+ui-options-build-new-map-not-texture = Ce n'est pas une texture.
+ui-options-build-new-map-no-copy = Elle n'a pas la permission de copie.
+ui-options-build-new-map-no-transfer = Elle n'a pas la permission de transfert.
+ui-options-build-new-map-refused = Cette texture ne peut pas servir par défaut aux nouveaux objets. { $reason }'''
+
+[[patch]]
+id = "new-object-textures-text-ja"
+why = "the rows' labels, hints and refusals"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-build-new-faces = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: new-object-textures-text-ja
+ui-options-build-new-normal = 法線マップ
+ui-options-build-new-specular = 鏡面反射マップ
+ui-options-build-new-texture-hint = 新しいプリムのすべての面がこのテクスチャで始まります。「デフォルト」はリージョンが付けるテクスチャのままです。コピーと譲渡ができるテクスチャだけを選べます。使えなくなった場合は何も適用されません。
+ui-options-build-new-normal-hint = 新しいプリムのすべての面にこのBlinn-Phong法線マップが付きます。「なし」は素材なしです。コピーと譲渡ができるテクスチャだけを選べます。使えなくなった場合は何も適用されません。
+ui-options-build-new-specular-hint = 新しいプリムのすべての面にこのBlinn-Phong鏡面反射マップが、白い鏡面反射色、光沢５１、環境反射なしで付きます。「なし」は素材なしです。コピーと譲渡ができるテクスチャだけを選べます。使えなくなった場合は何も適用されません。
+ui-options-build-new-map-builtin = 組み込みテクスチャ
+ui-options-build-new-map-missing = インベントリにありません。
+ui-options-build-new-map-not-texture = テクスチャではありません。
+ui-options-build-new-map-no-copy = コピーの許可がありません。
+ui-options-build-new-map-no-transfer = 譲渡の許可がありません。
+ui-options-build-new-map-refused = このテクスチャは新しいオブジェクトのデフォルトにできません。{ $reason }'''
+
+# ------------------------------------------------------------ docs
+
+[[patch]]
+id = "new-object-textures-testing-table"
+why = "docs/TESTING.md: the scenario in the building table"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^\| `AURORA_DEMO_BUILD_STYLE=aurora\\\|legacy` \|[^\n]*$'
+replace = '''\g<0>
+| `AURORA_DEMO_NEW_OBJECT_TEXTURES=1\|refused` | Default texture, normal map and specular map of new objects (local patch set) <!-- // aurora-local-patch: new-object-textures-testing-table --> |'''
+
+[[patch]]
+id = "new-object-textures-testing-details"
+why = "docs/TESTING.md: what the scenario shows"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = '^`AURORA_DEMO_BUILD=create-delete,object:118` creates a primitive at'
+replace = '''Default maps of new objects (local patch set):
+`AURORA_DEMO_NEW_OBJECT_TEXTURES=1` adds three full-permission textures to
+the demo inventory ("New object texture", "New object normal map", "New
+object specular map") and makes them the texture, normal map and specular
+map of Preferences › Build › Look of new objects; `AURORA_DEMO_OPTIONS=build`
+shows the three rows with their swatches and names, never an asset id.
+`refused` takes the transfer permission from the normal map's item and
+leaves the specular map's item out of the inventory: both rows say why, and
+a new prim gets the texture alone (two "new object … nothing applied" log
+lines). With `AURORA_DEMO_BUILD=create-ready,object:118` and
+`AURORA_DEMO_BUILD_TAB=texture`, the new cube shows the texture on every
+face and the Texture tab its normal and specular maps ("new object maps: …
+faces" in the log; the offline simulator does not answer the
+RenderMaterials request, so the maps stay those the Texture tab shows). A
+demo run without the variable puts back the defaults a previous run left.
+<!-- // aurora-local-patch: new-object-textures-testing-details -->
+
+\g<0>'''

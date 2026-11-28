@@ -1,0 +1,330 @@
+# With the AO on, its animations win over scripted animation state overrides
+# (llSetAnimationOverride: a worn AO script, a vehicle, a HUD, furniture).
+#
+# The simulator plays an override's own animation in place of the stock state
+# animation, and the viewer is never told which state it stands for. The AO
+# picked its state only from the stock animations, so it played nothing for
+# that state and the scripted animation played alone, for us and for everyone.
+#
+# Now an override is told apart (ao/scripted.rs): a signal that is not a stock
+# animation nor the sit's cover, that this viewer did not ask for (every
+# AgentAnimation start sent is logged), whose source (AnimationSourceList) is
+# our agent, one of our attachments or our seat, while no stock signal of its
+# state plays. The simulator may give the override our agent or the object
+# that set it as its source, so both are taken. An attachment's animation is
+# taken only when it starts at a change of state (1.5 s), so a worn object's
+# own animation started at another time (a hold, a dance) stays. Its state is
+# told from the seat, the flight, the keys, the speed, the ground contact and
+# the body turn; a ground sit and the air without flight (jumps, falls,
+# landings) are not told, and their overrides stay.
+#
+# The runtime then treats the override as that state's stock clip: the AO's
+# animation replaces it and masks it here, and for the steady states it is
+# stopped on the simulator and started again when the AO lets go (AO off or
+# paused, no animation for the state), the same pair as for the stock clips
+# (AOEngine::enable, indra/newview/aoengine.cpp). Upstream (#2807) now
+# leaves the stock movement clips playing on the region (stop_region_signal);
+# a replaced override is still stopped in every state the AO replaces, as
+# before. Sits use the sit options
+# unchanged: Override sits off keeps the scripted sit; Smart sit keeps it when
+# the seat plays animations (as before) or when its source is our agent (the
+# setter is not known, it may be the seat); a worn object's sit is replaced
+# like the stock sit (cover and AO sit started, never stopped). With Smart sit
+# off, a seat's own animation playing without the stock sit is now replaced by
+# the AO's sit too (it used to play alone).
+#
+# The Legacy Viewer's AO loses to overrides: AOEngine::override and
+# AOSet::getStateByRemapID (indra/newview/aoset.cpp) only know the stock state
+# animations. This patch deliberately differs: the AO wins.
+#
+# Tests: in files/ao-over-scripted-overrides/scripted.rs (state inference,
+# detection by source and timing, our own starts, known overrides held and
+# restarted, the stand take-over and release, a stock signal winning, a state
+# without an AO animation, the sit options). Retire this whole file if
+# upstream handles scripted overrides. Apply or skip the whole file, not one
+# patch of it. Fits on top of 94 (ao-sit-cover-order) and 95
+# (ao-repair-any-loop).
+
+[[patch]]
+id = "ao-over-scripted-module"
+why = "ao::scripted: tell scripted state overrides and their state"
+paths = ["crates/aurora-viewer/src/ao/scripted.rs"]
+op = "add_file"
+source = "files/ao-over-scripted-overrides/scripted.rs"
+
+[[patch]]
+id = "ao-over-scripted-mod"
+why = "declare ao::scripted"
+paths = ["crates/aurora-viewer/src/ao/mod.rs"]
+op = "literal"
+find = "pub mod runtime;"
+replace = """pub mod runtime;
+pub mod scripted; // aurora-local-patch: ao-over-scripted-mod"""
+
+[[patch]]
+id = "ao-over-scripted-frame"
+why = "the runtime's frame carries this frame's scripted overrides"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+find = """pub underwater: bool,
+    pub region: Option<u64>,
+}"""
+replace = """pub underwater: bool,
+    pub region: Option<u64>,
+    /// Scripted state overrides standing for a state (`scripted::Tracker`).
+    // aurora-local-patch: ao-over-scripted-frame
+    pub scripted: &'a [super::scripted::Override],
+}"""
+
+[[patch]]
+id = "ao-over-scripted-field"
+why = "the runtime keeps the override tracker"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+find = """hold_since: Option<Instant>,
+}"""
+replace = """hold_since: Option<Instant>,
+    // aurora-local-patch: ao-over-scripted-field
+    scripted: super::scripted::Tracker,
+}"""
+
+[[patch]]
+id = "ao-over-scripted-default"
+why = "the tracker starts empty"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+find = """hold_since: None,
+        }
+    }
+}"""
+replace = """hold_since: None,
+            // aurora-local-patch: ao-over-scripted-default
+            scripted: Default::default(),
+        }
+    }
+}"""
+
+[[patch]]
+id = "ao-over-scripted-methods"
+why = "Runtime::scripted_overrides and note_command feed the tracker"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+find = "pub fn suppressed_locomotion(&self) -> Option<PlayingAnimation> {"
+replace = """/// This frame's scripted state overrides (`scripted::Tracker::update`):
+    /// the signals this runtime stopped or starts again keep their state.
+    // aurora-local-patch: ao-over-scripted-methods
+    pub fn scripted_overrides(
+        &mut self,
+        raw: &[PlayingAnimation],
+        context: &super::scripted::Context,
+        source_of: impl FnMut(&Uuid) -> Option<super::scripted::Source>,
+        now: Instant,
+    ) -> Vec<super::scripted::Override> {
+        let held: Vec<Uuid> = self
+            .suppressed
+            .keys()
+            .copied()
+            .chain(self.restoring.map(|(_, signal, _)| signal.id))
+            .collect();
+        self.scripted.update(raw, context, source_of, &held, now)
+    }
+    /// Every command sent (`App::send_from`): our own animation starts are
+    /// never scripted overrides.
+    pub fn note_command(&mut self, command: &aurora_net::NetCommand, now: Instant) {
+        self.scripted.note_command(command, now);
+    }
+    pub fn suppressed_locomotion(&self) -> Option<PlayingAnimation> {"""
+
+[[patch]]
+id = "ao-over-scripted-primary"
+why = "with no stock state signal, a scripted override gives the state"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+fn = "update_with_easing"
+find = """// Standing variants accompany stand; never steal the locomotion state.
+        if primary.is_none() {"""
+replace = """// aurora-local-patch: ao-over-scripted-primary
+        // A scripted override stands for its state (ao::scripted) when no
+        // stock signal gives one: the AO replaces it as it does the stock clip.
+        let scripted = frame.scripted;
+        let scripted_state = |id: Uuid| scripted.iter().find(|o| o.signal.id == id).map(|o| o.state);
+        if primary.is_none() {
+            primary = scripted.iter().map(|o| (o.state, o.signal)).max_by_key(|(_, a)| a.continuous_start);
+        }
+        // Standing variants accompany stand; never steal the locomotion state.
+        if primary.is_none() {"""
+
+[[patch]]
+id = "ao-over-scripted-smart-sit"
+why = "Smart sit keeps a scripted sit of our agent, as the seat's own; a worn object's is replaced"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+fn = "update_with_easing"
+find = "State::Sitting => set.sits && !(set.smart && frame.seat_animations),"
+replace = """// aurora-local-patch: ao-over-scripted-smart-sit
+                    // A scripted sit of our agent may be the seat's (its
+                    // setter is not known): Smart sit keeps it like the
+                    // seat's animations. A worn object's is not the seat's
+                    // (AOEngine::foreignAnimations).
+                    State::Sitting => {
+                        set.sits
+                            && !(set.smart
+                                && (frame.seat_animations
+                                    || scripted
+                                        .iter()
+                                        .any(|o| o.state == State::Sitting && o.source == super::scripted::Source::Agent)))
+                    }"""
+
+[[patch]]
+id = "ao-over-scripted-pose"
+why = "a replaced scripted override is masked in our pose like the stock clip"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+fn = "update_with_easing"
+find = "let state = State::from_motion(a.id);"
+replace = """// aurora-local-patch: ao-over-scripted-pose
+                let state = State::from_motion(a.id).or_else(|| scripted_state(a.id));"""
+
+[[patch]]
+id = "ao-over-scripted-suppress"
+why = "a replaced scripted override is stopped on the simulator in every overriding state (the stock clips follow stop_region_signal)"
+paths = ["crates/aurora-viewer/src/ao/runtime.rs"]
+op = "literal"
+fn = "update_with_easing"
+# upstream #2807 (stop_region_signal) keeps ordinary stock movement on the
+# region (the OpenSimulator STAND reset concerns the stock defaults); a
+# replaced override is still stopped in every overriding state, as before
+find = """if let Some(state) = State::from_motion(signal.id)
+                && overrides(state)
+                && !self.active.iter().any(|a| a.id == signal.id)
+                && stop_region_signal(state, &frame)
+            {"""
+replace = """// aurora-local-patch: ao-over-scripted-suppress
+            if let Some((state, scripted_signal)) = State::from_motion(signal.id)
+                .map(|state| (state, false))
+                .or_else(|| scripted_state(signal.id).map(|state| (state, true)))
+                && overrides(state)
+                && !self.active.iter().any(|a| a.id == signal.id)
+                && (scripted_signal || stop_region_signal(state, &frame))
+            {"""
+
+[[patch]]
+id = "ao-over-scripted-test-frame"
+why = "the AO tests' frame has no scripted override"
+paths = ["crates/aurora-viewer/src/ao/tests.rs"]
+op = "literal"
+fn = "frame"
+find = """region: Some(1),
+    }"""
+replace = """region: Some(1),
+        scripted: &[], // aurora-local-patch: ao-over-scripted-test-frame
+    }"""
+
+[[patch]]
+id = "ao-over-scripted-detect"
+why = "update_ao tells this frame's scripted overrides from the world"
+paths = ["crates/aurora-viewer/src/app/ao.rs"]
+op = "literal"
+fn = "update_ao"
+find = "let frame = runtime::Frame {"
+replace = """// aurora-local-patch: ao-over-scripted-detect
+        // Scripted state overrides carry no state: tell it from the seat,
+        // the flight, the keys and the ground (ao::scripted).
+        let scripted = {
+            let height = self.movement_height();
+            let position = self.world.agent.server_pos;
+            let plane = self
+                .world
+                .objects
+                .index_of_uuid(&self.world.agent_id)
+                .and_then(|i| self.world.objects.get(i))
+                .and_then(|o| o.foot_plane);
+            let flags = self.autopilot_controls(self.world.agent.control_flags(&self.input, self.camera.mouselook()));
+            let context = crate::ao::scripted::Context {
+                on_object,
+                ground_sit: self.world.agent.ground_sit,
+                flying: self.world.agent.flying,
+                on_ground: crate::movement::run::on_ground(position, height, plane, self.world.ground_height(position), false),
+                intent: crate::own_motion::Intent::from_flags(flags, self.world.agent.yaw, self.running()),
+                speed: self.world.agent.velocity.truncate().length(),
+                down: self.input.down,
+                body_turn: self.world.agent.body_turn,
+            };
+            let world = &self.world;
+            self.ao_runtime
+                .scripted_overrides(raw, &context, |id| world.own_animation_source(id), now)
+        };
+        let frame = runtime::Frame {"""
+
+[[patch]]
+id = "ao-over-scripted-frame-field"
+why = "update_ao hands the overrides to the runtime"
+paths = ["crates/aurora-viewer/src/app/ao.rs"]
+op = "literal"
+fn = "update_ao"
+find = "region: self.world.main_region,"
+replace = """region: self.world.main_region,
+            scripted: &scripted, // aurora-local-patch: ao-over-scripted-frame-field"""
+
+[[patch]]
+id = "ao-over-scripted-requests"
+why = "every animation start this viewer sends is logged, never an override"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+fn = "send_from"
+# the outfit, attachment and sit notes are in World::rlva_note_sent
+# (world/rlva/boundary.rs) since upstream #3856: logged right after them
+find = "self.world.rlva_note_sent(&mut cmd, actor, Instant::now());"
+replace = """self.world.rlva_note_sent(&mut cmd, actor, Instant::now());
+        self.ao_runtime.note_command(&cmd, Instant::now()); // aurora-local-patch: ao-over-scripted-requests"""
+
+[[patch]]
+id = "ao-over-scripted-source"
+why = "World::own_animation_source: our agent, an attachment, our seat or another object"
+paths = ["crates/aurora-viewer/src/world/mod.rs"]
+op = "literal"
+find = "/// AOEngine::foreignAnimations: only the seat/linkset can cancel smart"
+replace = """/// Who started `id` on our avatar (AnimationSourceList): our agent, one of
+    /// our attachments, our seat (its linkset) or another object; the closest
+    /// when several did. None without a known source.
+    // aurora-local-patch: ao-over-scripted-source
+    pub fn own_animation_source(&self, id: &Uuid) -> Option<crate::ao::scripted::Source> {
+        use crate::ao::scripted::Source;
+        let seat = self
+            .objects
+            .index_of_uuid(&self.agent_id)
+            .and_then(|i| self.objects.get(i))
+            .and_then(|avatar| avatar.parent_key());
+        self.animation_sources
+            .iter()
+            .filter(|(_, motions)| motions.contains(id))
+            .map(|(source, _)| {
+                if *source == self.agent_id {
+                    return Source::Agent;
+                }
+                let Some(mut object) = self.objects.index_of_uuid(source).and_then(|i| self.objects.get(i)) else {
+                    return Source::Other;
+                };
+                let mut visited = HashSet::new();
+                while visited.insert(object.key) {
+                    if object.is_avatar() {
+                        return if object.full_id == self.agent_id {
+                            Source::Attachment
+                        } else {
+                            Source::Other
+                        };
+                    }
+                    if Some(object.key) == seat {
+                        return Source::Seat;
+                    }
+                    let Some(next) = self.objects.parent_of(object).and_then(|i| self.objects.get(i)) else {
+                        return Source::Other;
+                    };
+                    object = next;
+                }
+                Source::Other
+            })
+            .min()
+    }
+
+    /// AOEngine::foreignAnimations: only the seat/linkset can cancel smart"""

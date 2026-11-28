@@ -1,0 +1,651 @@
+# Wave shape from the water normal map: Preferences › Graphics › Aurora
+# water, in the gear of "Enhanced water effects", right under "Geometric
+# waves" (greyed while they are off, above patch 109's swell rows): "Wave
+# shape from the normal map" (the Ratio, 0 to 1, 0.01 steps, default 0) and
+# "Normal map scale" (x1 to x100, logarithmic, default x1). All drawing only.
+#
+# The environment's water normal map (the EEP water's texture, the one the
+# shading reads) holds slopes. When it changes (and once at start) its
+# decoded texels, which the texture streamer keeps on the CPU for it as it
+# keeps a sculpt map's (full resolution, no block compression for that one
+# texture; scene/water_shape_source.rs), go to the thread pool: their slopes
+# (-x / z, -y / z) are averaged onto 256 x 256 texels (resampled when the
+# map's sides are not multiples of 256), integrated by a Fourier (Poisson)
+# solve, H = F⁻¹[−i(kx·Fx + ky·Fy) / (kx² + ky²)], mean 0 (a radix-2 FFT
+# of our own, no new dependency), and filtered into nine levels by 2 x 2
+# averages (files/water-normal-shape/water_shape.rs). No GPU readback, no
+# wait in the frame. The levels reach the GPU in 256 rows of the bathymetry
+# texture under patch 109's maps and the shape's vec4 of the shared water
+# uniform (Ratio, Scale, the vertex spacing, loaded; patch
+# 108-water-uniform-tail): no new binding.
+#
+# The water's vertices read the same three layers the shading reads (the
+# big wave and two little ones of env.wgsl water_pixel: their scales, the
+# wave1 / wave2 scroll directions and speeds, the slow x warp, their weights
+# 0.5, 0.2 and 0.3), each Scale times larger: a layer of L metres is Scale
+# times L long and Scale times L times its weight times H high, its slopes
+# the map's. Each layer takes the level whose texel is at least two vertex
+# spacings of the dense water mesh at the chosen quality (2, 1.33, 1 and
+# 0.67 m), trilinear, so the pattern does not shimmer as it scrolls; a layer
+# finer than the last level is skipped. The big wave (25 m at x1) reads its
+# finest level from about x27 at medium quality (x41 low, x20 high, x14
+# ultra); at x1 its coarser levels (texels of 1.6 to 3 m) already give its
+# largest features, low ones. The finest little wave (1.1 to 2.2 m) shows
+# from about x2.4 at medium quality; the other (5 to 10 m) is there at every
+# Scale, only coarse below about x137. Like the geometric waves it mixes
+# with, the shape fades out from 80 to 160 m from the camera (the far
+# water's quads and patch 109's coarse grid would crack against the dense
+# mesh): it does not show on the far grid.
+#
+# The Ratio: the short waves' vertical movement is mix(geometric waves,
+# shape, Ratio); their horizontal motion and their foam compression scale by
+# 1 - Ratio (none at 1). The open-sea swell stays on top with its own
+# sliders; the calming of patch 109 and the shallow-water damping scale the
+# result as they scale the geometric waves. The shading takes the shape's
+# analytic gradient (the same texels and levels, the warp's Jacobian in it)
+# in place of the waves' gradient by the same mix, so shading and shape
+# agree; the per-pixel normal map itself is unchanged. At Ratio 0, with the
+# geometric waves off or before the map is in, nothing here runs: the
+# shaders take their earlier lines (a test of the vec4), the vec4 stays
+# zero, the CPU surface is today's bit for bit.
+#
+# What follows the new shape where it followed the geometric waves: the
+# camera's waterline and the underwater view (camera_level), the body
+# contacts, our own heave (WaterGround::surface's CPU model, which mirrors
+# the WGSL, files/water-normal-shape/water_shape.rs: an agreement test
+# draws both), the splash droplets' and bubbles' kill height
+# (particle_water_level). What followed only the swell keeps the swell
+# only: the objects' contacts, the riders, rain and snow at the surface, the
+# underwater light and fog on what lies under it, the refracted water's
+# fog, the planar reflection's plane, the underwater sound.
+#
+# Cost while it is on: per water vertex and per water pixel, 2 or 3 layers
+# of 2 levels of 4 texel loads (16 to 24 loads from a 1 MB block of
+# 8-byte texels) and some arithmetic; nothing off. The height map: a few
+# milliseconds on the pool each time the normal map changes.
+#
+# Cross-fade (patch 998): while an environment change fades from one water
+# normal map to another (never between a day cycle's keyframes), the second
+# map's height map is made the same way into 256 rows of its own under the
+# first's (the bathymetry texture is 512 x 1216), two more vec4 of the
+# uniform hold its wave directions and its share, and the two shapes, each
+# scrolled along its own waves, are mixed by it (on the GPU, twice the loads
+# while it lasts, and in the CPU model); when the fade ends the second
+# height map is the first one's, not made again. No fade: the share is 0 and
+# only the first shape is read, as before.
+#
+# Apply or skip the whole file, not one patch of it. It needs, one way:
+# - patch 108-water-uniform-tail (it applies earlier): the shape's region of
+#   the shared water uniform (its offset, the shaders' `shape`,
+#   `shape_next`, `shape_fade` fields);
+# - patch 109 (it applies earlier), whose maps, swell and files it extends
+#   (a genuine extension: most of its steps sit on 109's text);
+# - patch 998 (it applies later), whose fade fields it reads (scene/
+#   water_shape_source.rs set_water_shape_waves: WaterParams.fade, and
+#   feed_water_shape: Scene::env_fade_tex). Kept on purpose: without 998
+#   the same function would need a second, fade-free copy of its wave and
+#   share rules, or 998 would carry 120's own rules.
+# It needs nothing of patch 91.
+
+# ------------------------------------------------------------ render crate
+
+[[patch]]
+id = "water-normal-shape-module"
+why = "the height map (integration, levels), the CPU sampling, the uniform's vec4, tests"
+op = "add_file"
+paths = ["crates/aurora-render/src/water_shape.rs"]
+source = "files/water-normal-shape/water_shape.rs"
+
+[[patch]]
+id = "water-normal-shape-mod"
+why = "a public child module of water_effects beside the swell's: it extends WaterGpu"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """#[path = "ocean_swell.rs"]
+pub mod ocean;"""
+replace = """#[path = "ocean_swell.rs"]
+pub mod ocean;
+// aurora-local-patch: water-normal-shape-mod
+#[path = "water_shape.rs"]
+pub mod shape;"""
+
+[[patch]]
+id = "water-normal-shape-effects-field"
+why = "the Ratio and the Scale travel with the other water choices"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = """    pub calm_edge: f32,
+}
+
+impl Default for WaterEffects {"""
+replace = """pub calm_edge: f32,
+    // aurora-local-patch: water-normal-shape-effects-field
+    /// Wave shape from the water normal map (water_shape.rs): the share of
+    /// the short waves' height it takes (0: today's waves) and how many
+    /// times its pattern is enlarged.
+    pub shape_ratio: f32,
+    pub shape_scale: f32,
+}
+
+impl Default for WaterEffects {"""
+
+[[patch]]
+id = "water-normal-shape-effects-default"
+why = "off: Ratio 0, Scale 1"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "calm_edge: ocean::CALM_EDGE_DEFAULT,"
+replace = """calm_edge: ocean::CALM_EDGE_DEFAULT,
+            // aurora-local-patch: water-normal-shape-effects-default
+            shape_ratio: shape::RATIO_DEFAULT,
+            shape_scale: shape::SCALE_DEFAULT,"""
+
+[[patch]]
+id = "water-normal-shape-ground-texture"
+why = "the height map's rows under the swell's maps"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "height: ocean::GROUND_HEIGHT,"
+replace = "height: shape::GROUND_HEIGHT, // aurora-local-patch: water-normal-shape-ground-texture"
+
+[[patch]]
+id = "water-normal-shape-gpu-field"
+why = "WaterGpu remembers the uploaded height map and the vec4"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "ocean: ocean::Gpu, // aurora-local-patch: ocean-swell-gpu-field"
+replace = """ocean: ocean::Gpu, // aurora-local-patch: ocean-swell-gpu-field
+    shape: shape::Gpu, // aurora-local-patch: water-normal-shape-gpu-field"""
+
+[[patch]]
+id = "water-normal-shape-gpu-init"
+why = "goes with water-normal-shape-gpu-field"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = "ocean: Default::default(), // aurora-local-patch: ocean-swell-gpu-init"
+replace = """ocean: Default::default(), // aurora-local-patch: ocean-swell-gpu-init
+            shape: Default::default(), // aurora-local-patch: water-normal-shape-gpu-init"""
+
+[[patch]]
+id = "water-normal-shape-prepare"
+why = "each frame, after the swell's tail: the height map and the vec4, written only when they change"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "prepare"
+find = "self.prepare_ocean(queue, settings, ground, valid_ground); // aurora-local-patch: ocean-swell-prepare"
+replace = """self.prepare_ocean(queue, settings, ground, valid_ground); // aurora-local-patch: ocean-swell-prepare
+        self.prepare_shape(queue, settings, ground); // aurora-local-patch: water-normal-shape-prepare"""
+
+[[patch]]
+id = "water-normal-shape-ocean-field"
+why = "the shape travels with the swell's state in the bathymetry, to the renderer and to the CPU surface"
+paths = ["crates/aurora-render/src/ocean_swell.rs"]
+op = "literal"
+find = """    pub eye_mean: f32,
+}"""
+replace = """pub eye_mean: f32,
+    // aurora-local-patch: water-normal-shape-ocean-field
+    /// The wave shape from the water normal map (water_shape.rs).
+    pub shape: super::shape::Shape,
+}"""
+
+[[patch]]
+id = "water-normal-shape-cpu-waves"
+why = "the CPU surface's short waves mix in the shape as the vertices do, before the shallow water and the calming scale them"
+paths = ["crates/aurora-render/src/ocean_swell.rs"]
+op = "literal"
+fn = "surface_level"
+find = "offset * shore * ocean.calm_at(p, settings).0"
+replace = """// aurora-local-patch: water-normal-shape-cpu-waves
+        ocean.shape.blend(p, time, settings, offset) * shore * ocean.calm_at(p, settings).0"""
+
+[[patch]]
+id = "water-normal-shape-cpu-surface"
+why = "the displayed surface takes the swell's CPU model while the shape takes part too (upstream's otherwise, as before)"
+paths = ["crates/aurora-render/src/ocean_swell.rs"]
+op = "literal"
+fn = "surface"
+find = "if self.ocean.active(settings).is_some() || self.ocean.calming(settings).is_some() {"
+replace = """// aurora-local-patch: water-normal-shape-cpu-surface
+        if self.ocean.active(settings).is_some() || self.ocean.calming(settings).is_some() || self.ocean.shape.active(settings).is_some() {"""
+
+[[patch]]
+id = "water-normal-shape-surface-test"
+why = "the CPU surface: Ratio 0 is today's bit for bit, the shape follows the vertices, the calming scales it"
+paths = ["crates/aurora-render/src/ocean_swell.rs"]
+op = "literal"
+find = """    #[test]
+    fn the_shader_constants_are_these() {"""
+replace = """#[test]
+    fn the_wave_shape_from_the_normal_map_follows_the_ratio_and_the_calming() {
+        // aurora-local-patch: water-normal-shape-surface-test
+        use super::super::shape::{self, HeightMap, Shape};
+        let n = shape::SIZE as usize;
+        let slopes: Vec<[f32; 2]> = (0..n * n)
+            .map(|i| {
+                let (u, v) = (((i % n) as f32 + 0.5) / n as f32, ((i / n) as f32 + 0.5) / n as f32);
+                let x = std::f32::consts::TAU * (2.0 * u + v);
+                [0.6 * x.cos(), 0.3 * x.cos()]
+            })
+            .collect();
+        let with_shape = |g: WaterGround| WaterGround {
+            ocean: Ocean {
+                shape: Shape {
+                    map: HeightMap::from_slopes(&slopes).map(Arc::new),
+                    waves: [0.6, -0.8, -0.3, 0.95],
+                    ..Default::default()
+                },
+                ..g.ocean
+            },
+            ..g
+        };
+        let shaped = |ratio: f32| WaterEffects {
+            shape_ratio: ratio,
+            shape_scale: 20.0,
+            ..calmed(0.0, 0.0, 100.0, 1.0)
+        };
+        let plain = with_shape(ground(None, None));
+        for (x, y, t) in [(43.0, 118.0, 7.3), (-12.0, 3.5, 0.0), (300.0, -77.0, 1234.5)] {
+            let xy = Vec2::new(x, y);
+            // Ratio 0: upstream's surface exactly, map or not
+            let up = super::super::surface_level(xy, t, shaped(0.0), 20.0, 13.0);
+            assert_eq!(plain.surface(xy, t, shaped(0.0), 20.0, 13.0).to_bits(), up.to_bits());
+        }
+        // Ratio 1: the shape's height alone (it has no horizontal motion)
+        let mut moved = 0.0f32;
+        for i in 0..40 {
+            let xy = Vec2::new(i as f32 * 3.7 - 60.0, 20.0 - i as f32 * 1.9);
+            let t = i as f32 * 0.4;
+            let h = plain.ocean.shape.at(xy, t, shaped(1.0)).x;
+            assert!((plain.surface(xy, t, shaped(1.0), 20.0, 0.0) - (20.0 + h)).abs() < 1e-5);
+            moved = moved.max(h.abs());
+        }
+        assert!(moved > 0.05, "the shape moves the surface: {moved}");
+        // the calming scales it as it scales the waves: still at a pier
+        let pier = with_shape(ground(None, Some(pier())));
+        let calm = WaterEffects {
+            calm_edge: 0.0,
+            ..shaped(1.0)
+        };
+        let near = (0..40)
+            .map(|i| (pier.surface(Vec2::new(2.1, 10.0 + i as f32), i as f32 * 0.3, calm, 20.0, 0.0) - 20.0).abs())
+            .fold(0.0f32, f32::max);
+        let far = (0..40)
+            .map(|i| (pier.surface(Vec2::new(150.0, 10.0 + i as f32 * 2.3), i as f32 * 0.3, calm, 20.0, 0.0) - 20.0).abs())
+            .fold(0.0f32, f32::max);
+        assert!(near < 0.01 && far > 0.05, "{near} {far}");
+    }
+
+    #[test]
+    fn the_shader_constants_are_these() {"""
+
+# ------------------------------------------------------------ shaders
+
+[[patch]]
+id = "water-normal-shape-spectrum"
+why = "the height map's lookup and the three layers, pure functions shared by the water shaders and the tests"
+paths = ["crates/aurora-render/src/shaders/water_spectrum.wgsl"]
+op = "literal"
+find = """    return vec2<f32>(edge+(1.0-edge)*x*x*(3.0-2.0*x),(1.0-edge)*ds);
+}"""
+replace = """return vec2<f32>(edge+(1.0-edge)*x*x*(3.0-2.0*x),(1.0-edge)*ds);
+}
+
+// Wave shape from the water normal map (local patch set; water_shape.rs
+// mirrors these and its tests keep the constants equal): the normal map's
+// height map, SHAPE_SIZE texels of pattern units, its levels side by side
+// from row `row` of `map` (level l at x 2 SIZE - (2 SIZE >> l), the height
+// in x), and the three layers the water's shading reads: uv per metre xy,
+// scroll speed, weight (the first and the last along wave1, the middle one
+// along wave2).
+// aurora-local-patch: water-normal-shape-spectrum
+const SHAPE_SIZE:i32=256;
+const SHAPE_TOP:f32=8.0;
+const SHAPE_FILTER:f32=2.0;
+const SHAPE_LAYERS=array<vec4<f32>,3>(vec4<f32>(0.04,0.04,0.055,0.5),vec4<f32>(0.45,0.9,0.13,0.2),vec4<f32>(0.1,0.2,0.1,0.3));
+fn shape_wrap(i:i32,n:i32)->i32 { return ((i%n)+n)%n; }
+// A level's value (x) and gradient per uv (yz) at uv, bilinear, wrapping.
+fn shape_level(heights:texture_2d<f32>,row:i32,level:i32,uv:vec2<f32>)->vec3<f32> {
+    let n=SHAPE_SIZE>>u32(level);
+    let x0=2*SHAPE_SIZE-((2*SHAPE_SIZE)>>u32(level));
+    let pos=fract(uv)*f32(n)-vec2<f32>(0.5);
+    let base=floor(pos);
+    let f=pos-base;
+    let i=vec2<i32>(base);
+    let a=vec2<i32>(shape_wrap(i.x,n),shape_wrap(i.y,n));
+    let b=vec2<i32>(shape_wrap(i.x+1,n),shape_wrap(i.y+1,n));
+    let ta=textureLoad(heights,vec2<i32>(x0+a.x,row+a.y),0).x;
+    let tb=textureLoad(heights,vec2<i32>(x0+b.x,row+a.y),0).x;
+    let tc=textureLoad(heights,vec2<i32>(x0+a.x,row+b.y),0).x;
+    let td=textureLoad(heights,vec2<i32>(x0+b.x,row+b.y),0).x;
+    return ocean_bilinear(ta,tb,tc,td,f,1.0/f32(n));
+}
+// The shape's height (x, m) and gradient (yz) at material position p, time
+// (s), the normal map's wave directions (wave1 xy, wave2 zw), scale and the
+// water mesh's vertex spacing (m): each layer scale times larger and
+// taller, read at the level whose texel is SHAPE_FILTER vertex spacings
+// (trilinear), the shading's slow x warp and its Jacobian included.
+fn water_shape(heights:texture_2d<f32>,row:i32,p:vec2<f32>,time:f32,waves:vec4<f32>,scale:f32,spacing:f32)->vec3<f32> {
+    let t=time*0.5;
+    let q=vec2<f32>(p.x+(cos(p.x*0.08)+sin(p.y*0.02))*6.0,p.y);
+    let j11=1.0-0.48*sin(p.x*0.08);
+    let j12=0.12*cos(p.y*0.02);
+    var out=vec3<f32>(0.0);
+    for(var k=0;k<3;k++) {
+        let layer=SHAPE_LAYERS[k];
+        let lod=clamp(log2(SHAPE_FILTER*spacing*max(layer.x,layer.y)*f32(SHAPE_SIZE)/scale),0.0,SHAPE_TOP);
+        if(lod<SHAPE_TOP) {
+            let dir=select(waves.xy,waves.zw,k==1);
+            let uv=(layer.xy*q+dir*t*layer.z)/scale;
+            let l0=floor(lod);
+            var h=shape_level(heights,row,i32(l0),uv);
+            if(lod>l0){h=mix(h,shape_level(heights,row,i32(l0)+1,uv),lod-l0);}
+            h*=layer.w*scale/sqrt(layer.x*layer.y);
+            out+=vec3<f32>(h.x,h.y*layer.x*j11/scale,(h.y*layer.x*j12+h.z*layer.y)/scale);
+        }
+    }
+    return out;
+}"""
+
+[[patch]]
+id = "water-normal-shape-common"
+why = "the shape's lookup in the bathymetry texture and the short waves with it mixed in"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "// water_fx_wave with the geometric waves calmed (`calm`, its whole"
+replace = """// ---- wave shape from the water normal map (local patch set,
+// water_shape.rs; off while water_fx.shape is zero, every caller then takes
+// its earlier path)
+// aurora-local-patch: water-normal-shape-common
+const SHAPE_ROW:i32=704;
+// a cross-fade's second height map (patch 998), under the first one's
+const SHAPE_NEXT_ROW:i32=960;
+fn water_shape_on()->bool { return water_fx.shape.x>0.0 && water_fx.shape.w>0.5 && water_fx_on(1u); }
+// The shape's height and gradient at material position p. While the
+// environment cross-fades two water normal maps (patch 998) the second one's
+// shape, its own rows and waves, is mixed in by its share; without a fade it
+// is not read.
+fn water_shape_at(p:vec2<f32>,time:f32)->vec3<f32> {
+    let first=water_shape(water_ground,SHAPE_ROW,p,time,frame.water_waves,water_fx.shape.y,water_fx.shape.z);
+    if(water_fx.shape_fade.x<=0.0){return first;}
+    return mix(first,water_shape(water_ground,SHAPE_NEXT_ROW,p,time,water_fx.shape_next,water_fx.shape.y,water_fx.shape.z),water_fx.shape_fade.x);
+}
+// water_fx_wave_calmed with the shape mixed into the geometric waves by the
+// Ratio (their horizontal motion fades with it), before the shallow water
+// and the calming scale them; the wake on top.
+fn water_fx_wave_shaped(p:vec2<f32>,level:f32,shift:vec2<f32>,calm:f32)->vec3<f32> {
+    let r=water_fx.shape.x;
+    let geo=water_swell(p,frame.camera_pos.w,water_fx.counts.w).offset;
+    let h=water_shape_at(p,frame.camera_pos.w).x;
+    var offset=vec3<f32>(geo.xy*(1.0-r),mix(geo.z,h,r))*(smoothstep(0.08,2.4,level-water_fx_bed(p).x)*calm);
+    offset.z+=clamp(water_wake_sample(p+offset.xy+shift,level).z,-0.16,0.16);
+    return offset;
+}
+// water_fx_wave with the geometric waves calmed (`calm`, its whole"""
+
+[[patch]]
+id = "water-normal-shape-vertex"
+why = "the water's vertices: the short waves with the shape mixed in; off, the earlier lines"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_vertex"
+find = "if(ocean_moved){wave=water_fx_wave_calmed(wp.xy,wp.z,ocean.xy,ocean_calm_at(wp.xy).x);} else {wave=water_fx_wave(wp.xy,wp.z);}"
+replace = """// aurora-local-patch: water-normal-shape-vertex
+        if(water_shape_on()){wave=water_fx_wave_shaped(wp.xy,wp.z,ocean.xy,ocean_calm_at(wp.xy).x);}
+        else if(ocean_moved){wave=water_fx_wave_calmed(wp.xy,wp.z,ocean.xy,ocean_calm_at(wp.xy).x);} else {wave=water_fx_wave(wp.xy,wp.z);}"""
+
+[[patch]]
+id = "water-normal-shape-pixel"
+why = "the surface's pixel: the short waves' gradient, offset and compression mixed with the shape's before the calming, so its normal follows the drawn shape"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "water_pixel"
+find = "if(ocean_on()){ocean_px=ocean_pixel(in.material);}"
+replace = """if(ocean_on()){ocean_px=ocean_pixel(in.material);}
+    // aurora-local-patch: water-normal-shape-pixel
+    if(water_shape_on()) {
+        let shaped_r=water_fx.shape.x;
+        let shaped=water_shape_at(in.material,frame.camera_pos.w);
+        swell.offset=vec3<f32>(swell.offset.xy*(1.0-shaped_r),mix(swell.offset.z,shaped.x,shaped_r));
+        swell.gradient=mix(swell.gradient,shaped.yz,shaped_r);
+        swell.compression*=1.0-shaped_r;
+    }"""
+
+[[patch]]
+id = "water-normal-shape-particle-level"
+why = "droplets and bubbles end at the shaped surface (the geometric waves' part of it)"
+paths = ["crates/aurora-render/src/shaders/env.wgsl"]
+op = "literal"
+fn = "particle_water_level"
+find = "let swell_level=level+water_swell(p,water_fx.clock.x,water_fx.counts.w).offset.z*smoothstep(0.08,2.4,level-water_fx_bed(p).x);"
+replace = """// aurora-local-patch: water-normal-shape-particle-level
+    var short_z=water_swell(p,water_fx.clock.x,water_fx.counts.w).offset.z;
+    if(water_shape_on()){short_z=mix(short_z,water_shape_at(p,water_fx.clock.x).x,water_fx.shape.x);}
+    let swell_level=level+short_z*smoothstep(0.08,2.4,level-water_fx_bed(p).x);"""
+
+# ------------------------------------------------------------ settings
+
+[[patch]]
+id = "water-normal-shape-settings-fields"
+why = "the saved choices (missing in older files: their defaults, off)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "pub ocean_ride: bool,"
+replace = """pub ocean_ride: bool,
+    // aurora-local-patch: water-normal-shape-settings-fields
+    /// "Wave shape from the normal map" (0 to 1) and "Normal map scale" (1
+    /// to 100): the short waves shaped by the water normal map.
+    pub shape_ratio: f32,
+    pub shape_scale: f32,"""
+
+[[patch]]
+id = "water-normal-shape-settings-defaults"
+why = "off: Ratio 0, Scale 1"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "ocean_ride: false,"
+replace = """ocean_ride: false,
+            // aurora-local-patch: water-normal-shape-settings-defaults
+            shape_ratio: aurora_render::water_effects::shape::RATIO_DEFAULT,
+            shape_scale: aurora_render::water_effects::shape::SCALE_DEFAULT,"""
+
+[[patch]]
+id = "water-normal-shape-settings-render"
+why = "to the renderer, each within its range"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "calm_edge: aurora_render::water_effects::ocean::calm_edge(self.calm_edge),"
+replace = """calm_edge: aurora_render::water_effects::ocean::calm_edge(self.calm_edge),
+            // aurora-local-patch: water-normal-shape-settings-render
+            shape_ratio: aurora_render::water_effects::shape::ratio(self.shape_ratio),
+            shape_scale: aurora_render::water_effects::shape::scale(self.shape_scale),"""
+
+[[patch]]
+id = "water-normal-shape-settings-sanitize"
+why = "hand-edited values are brought back within the sliders' ranges (not a number: the default)"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+fn = "sanitized"
+find = "w.calm_edge = ocean::calm_edge(w.calm_edge);"
+replace = """w.calm_edge = ocean::calm_edge(w.calm_edge);
+            // aurora-local-patch: water-normal-shape-settings-sanitize
+            w.shape_ratio = aurora_render::water_effects::shape::ratio(w.shape_ratio);
+            w.shape_scale = aurora_render::water_effects::shape::scale(w.shape_scale);"""
+
+[[patch]]
+id = "water-normal-shape-settings-test"
+why = "older files load the defaults, the choices round-trip, every value is bounded"
+paths = ["crates/aurora-viewer/src/settings.rs"]
+op = "literal"
+find = "fn ocean_swell_choices_load_round_trip_and_stay_in_range() {"
+replace = '''fn water_shape_choices_load_round_trip_and_stay_in_range() {
+        // aurora-local-patch: water-normal-shape-settings-test
+        let old: super::WaterEffectsSettings = serde_json::from_str(r#"{"caustics":true,"ocean_depth":3.0}"#).unwrap();
+        assert_eq!((old.shape_ratio, old.shape_scale), (0.0, 1.0), "older files: off");
+        let chosen = super::WaterEffectsSettings {
+            shape_ratio: 0.35,
+            shape_scale: 42.5,
+            ..Default::default()
+        };
+        let loaded: super::WaterEffectsSettings = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(loaded, chosen);
+        let r = loaded.render();
+        assert_eq!((r.shape_ratio, r.shape_scale), (0.35, 42.5));
+        for (saved, ratio, scale) in [
+            (-1.0, 0.0, 1.0),
+            (250.0, 1.0, 100.0),
+            (f32::NAN, 0.0, 1.0),
+            (0.5, 0.5, 1.0),
+            (7.0, 1.0, 7.0),
+        ] {
+            let mut s = super::Settings::default();
+            s.water_effects.shape_ratio = saved;
+            s.water_effects.shape_scale = saved;
+            assert_eq!(
+                (s.water_effects.render().shape_ratio, s.water_effects.render().shape_scale),
+                (ratio, scale)
+            );
+            let clean = s.sanitized();
+            assert_eq!((clean.water_effects.shape_ratio, clean.water_effects.shape_scale), (ratio, scale));
+        }
+        let d = super::WaterEffectsSettings::default();
+        assert_eq!((d.render().shape_ratio, d.render().shape_scale), (0.0, 1.0));
+    }
+    #[test]
+    fn ocean_swell_choices_load_round_trip_and_stay_in_range() {'''
+
+# ------------------------------------------------------------ preferences
+
+[[patch]]
+id = "water-normal-shape-rows"
+why = "the two sliders in the enhanced water's gear right under the geometric waves, greyed while they are off"
+paths = ["crates/aurora-viewer/src/ui/options/pages/graphics.rs"]
+op = "literal"
+find = "cx.greyed(!cx.s.water_effects.waves);"
+replace = """cx.greyed(!cx.s.water_effects.waves);
+                // aurora-local-patch: water-normal-shape-rows
+                {
+                    use aurora_render::water_effects::shape;
+                    cx.row(
+                        tr!("water-effects-shape-ratio"),
+                        tr!("water-effects-shape-ratio-help"),
+                        &field!(water_effects.shape_ratio),
+                        |ui, s| slider(ui, &mut s.water_effects.shape_ratio, shape::RATIO_RANGE, ""),
+                    );
+                    cx.row(
+                        tr!("water-effects-shape-scale"),
+                        tr!("water-effects-shape-scale-help"),
+                        &field!(water_effects.shape_scale),
+                        |ui, s| {
+                            ui.add(
+                                egui::Slider::new(&mut s.water_effects.shape_scale, shape::SCALE_RANGE)
+                                    .custom_parser(aurora_i18n::parse_number)
+                                    .logarithmic(true)
+                                    .fixed_decimals(2)
+                                    .step_by(0.01)
+                                    .prefix("×")
+                                    .trailing_fill(true),
+                            )
+                            .changed()
+                        },
+                    );
+                }"""
+
+[[patch]]
+id = "water-normal-shape-text-en"
+why = "the rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^water-effects-ocean-ride-moving-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: water-normal-shape-text-en
+water-effects-shape-ratio = Wave shape from the normal map
+water-effects-shape-ratio-help = How much the environment's water normal map shapes the rise and fall of the small waves: 0 keeps the geometric waves as they are, 1 takes their shape from the normal map alone. The ocean swell stays on top. On this screen only: nothing is sent. Default: 0.
+water-effects-shape-scale = Normal map scale
+water-effects-shape-scale-help = How many times the normal map's pattern is enlarged before it shapes the waves: twice as wide is twice as high, the slopes stay. Larger patterns show more clearly on the water. On this screen only: nothing is sent. Default: ×1.'''
+
+[[patch]]
+id = "water-normal-shape-text-fr"
+why = "the rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^water-effects-ocean-ride-moving-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: water-normal-shape-text-fr
+water-effects-shape-ratio = Forme des vagues par la carte de normales
+water-effects-shape-ratio-help = Part de la carte de normales de l'eau de l'environnement dans la montée et la descente des petites vagues : 0 garde les vagues géométriques telles quelles, 1 prend leur forme de la carte de normales seule. La houle reste par-dessus. Sur cet écran seulement : rien n'est envoyé. Par défaut : 0.
+water-effects-shape-scale = Échelle de la carte de normales
+water-effects-shape-scale-help = Combien de fois le motif de la carte de normales est agrandi avant de former les vagues : deux fois plus large, c'est deux fois plus haut, les pentes restent. Un motif plus grand se voit mieux sur l'eau. Sur cet écran seulement : rien n'est envoyé. Par défaut : ×1.'''
+
+[[patch]]
+id = "water-normal-shape-text-ja"
+why = "the rows' labels and hints"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^water-effects-ocean-ride-moving-help = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: water-normal-shape-text-ja
+water-effects-shape-ratio = 法線マップによる波の形
+water-effects-shape-ratio-help = 環境の水の法線マップが小さな波の上下の形をどれだけ決めるかです。０では幾何学的な波がそのまま、１では波の形が法線マップだけで決まります。うねりはその上に重なります。この画面だけの表示で、何も送信されません。デフォルト：０。
+water-effects-shape-scale = 法線マップの倍率
+water-effects-shape-scale-help = 波の形に使う前に法線マップの模様を何倍に広げるかです。幅が２倍なら高さも２倍で、傾きは変わりません。模様が大きいほど水面ではっきり見えます。この画面だけの表示で、何も送信されません。デフォルト：×１。'''
+
+# ------------------------------------------------------------ viewer: the height map's source
+
+[[patch]]
+id = "water-normal-shape-source-module"
+why = "the height map from the region's normal map, on the thread pool"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/scene/water_shape_source.rs"]
+source = "files/water-normal-shape/water_shape_source.rs"
+
+[[patch]]
+id = "water-normal-shape-modules"
+why = "the scene's module"
+paths = ["crates/aurora-viewer/src/scene/mod.rs"]
+op = "literal"
+find = "mod ocean_ride;"
+replace = """mod ocean_ride;
+mod water_shape_source; // aurora-local-patch: water-normal-shape-modules"""
+
+[[patch]]
+id = "water-normal-shape-effects-state"
+why = "the effects keep the height map's builder"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = """    ocean_calm: super::ocean_calm::Builder,
+}"""
+replace = """ocean_calm: super::ocean_calm::Builder,
+    // aurora-local-patch: water-normal-shape-effects-state
+    /// The wave shape from the water normal map: its height map.
+    pub(super) water_shape: super::water_shape_source::Builder,
+}"""
+
+[[patch]]
+id = "water-normal-shape-ground-update"
+why = "each frame: the shape with the swell's state, before the contacts read the surface"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+find = "ocean.fine = self.ocean_calm.update(world, eye, time, settings);"
+replace = """ocean.fine = self.ocean_calm.update(world, eye, time, settings);
+        ocean.shape = self.water_shape.shape(settings); // aurora-local-patch: water-normal-shape-ground-update"""
+
+[[patch]]
+id = "water-normal-shape-feed"
+why = "the frame's normal map to the builder, before the water effects"
+paths = ["crates/aurora-viewer/src/scene/water_effects.rs"]
+op = "literal"
+fn = "update_water_effects"
+find = """let mut effects = std::mem::take(&mut self.water_effects);"""
+replace = """let mut effects = std::mem::take(&mut self.water_effects);
+        self.feed_water_shape(&mut effects, settings); // aurora-local-patch: water-normal-shape-feed"""
+
+[[patch]]
+id = "water-normal-shape-app"
+why = "each frame: the environment's two wave directions (each normal map's own while the water cross-fades), with the big wave's for the swell"
+paths = ["crates/aurora-viewer/src/app.rs"]
+op = "literal"
+find = "self.scene.set_ocean_wave(&env.water);"
+replace = """self.scene.set_ocean_wave(&env.water);
+            self.scene.set_water_shape_waves(&env.water); // aurora-local-patch: water-normal-shape-app"""

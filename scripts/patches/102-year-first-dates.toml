@@ -1,0 +1,2160 @@
+# Year-first dates: every date the interface shows reads year, month, day.
+#
+# Numeric dates are YYYY/MM/DD (zero padded, "/"), MM/DD without a year;
+# dates with a month name are "YYYY mmm d" (each place keeps its month
+# wording and its day padding), "mmm d" without a year. A weekday stays
+# first, a time stays after the date. English and French catalogues change;
+# Japanese was already year first and keeps its 年月日 wording.
+#
+# The community catalogues (de, es, it, nb, pl, pt-BR, pt-PT, ru, tr, uk,
+# zh-Hans, zh-Hant) follow without new wording of ours:
+# - numeric keys (profile-date[-hidden], inspect-date, grid-status-date,
+#   search-events-date, the date of ui-display-name-at-slt) take the English
+#   form, YYYY/MM/DD or MM/DD, whatever their separators were; a time
+#   connector after the date keeps its words;
+# - month-name patterns made only of variables and punctuation are
+#   reordered year, month, day, keeping their separators (a pattern copied
+#   from English, "mmm d, yyyy", takes the English form); a label before a
+#   colon keeps its words (es, tr); Turkish keeps its weekday after the date;
+# - month-name patterns with words or ordinals inside the date (de and nb
+#   "d.", es and pt "de", the date keys only, not the labelled ones) are
+#   removed: the English pattern shows, with the catalogue's own month and
+#   weekday names (extra-jan…, extra-sun…);
+# - left as translated, day or month first: ui-places-created-on and
+#   world-im-saved where a word is part of the date phrase (de, it, nb, pl,
+#   pt-BR, pt-PT, ru, uk; es world-im-saved only), since the English pattern
+#   would bring English words. tests/catalogs.rs names each one.
+# - Chinese month-name patterns were already year first (年月日) and stay.
+#
+# One place for numeric dates: aurora_i18n::numeric_date / numeric_month_day
+# (crates/aurora-i18n/src/dates.rs, new; numeric_parts for the catalogue keys
+# that take the parts, numeric_date_of_iso for a stored YYYY-MM-DD). The
+# catalogue keys that compose a numeric date (profile-date, inspect-date,
+# grid-status-date, ui-display-name-at-slt, search-events-date…) read like
+# the helper in English and French: tests/catalogs.rs checks it. Month-name
+# dates stay in the catalogues: their patterns are reordered, no key renamed.
+#
+# Changed (interface): inventory item dates (properties, hover card) · group
+# members' last online (profile-date) and the members CSV export · group
+# notices, land week/stipend days, inventory rows (date-day-month[-year]) ·
+# profile birth dates and classified dates (profile-date) · chat day markers,
+# bubbles, notification center, chat "date at time" (ui-chat-day) · offline
+# IM "(Saved …)" · places visit/created days · land claim/acquired date,
+# covenant date, land and region overview/estate dates, ban dates · object
+# inspect, derender list, object profile created (inspect-date) · grid status
+# dates · display name lock-out · status bar SLT date tooltip · search event
+# day labels (both styles, zero padded MM/DD) · landmark acquired date ·
+# Top scripts/colliders · driver notice · beta build day · settings backup
+# date · texture upload date · poser library · experience log ·
+# conversation log rows (Slt time, upstream #2984).
+#
+# Left alone: dates sent or written for others (abuse report chat time,
+# new script descriptions, derender file asset_date, LLSD dates), file names
+# (chat logs, snapshots), log and transcript lines (already year first),
+# parsing of received dates, server/script/web text shown verbatim like the
+# Legacy Viewer (event "Date" field, group sales times, bridge object info,
+# grid status feed lines, news headings), the LSL preprocessor __DATE__, the
+# calendar tile of events (month above day already), the demo's simulated
+# server strings. Upstream doc comments keep their old example forms.
+#
+# Tests: the helper (padding, year-less, ISO, edges), the catalogue keys,
+# every date key of every bundled catalogue (the left ones named), and the
+# upstream tests that asserted the old order, updated. Apply or skip
+# the whole file, not one patch of it.
+
+[[patch]]
+id = "year-first-dates-helper"
+why = "the one helper for numeric dates of the interface"
+paths = ["crates/aurora-i18n/src/dates.rs"]
+op = "add_file"
+source = "files/year-first-dates/dates.rs"
+
+[[patch]]
+id = "year-first-dates-module"
+why = "the shared numeric date helper, exported by aurora-i18n"
+paths = ["crates/aurora-i18n/src/lib.rs"]
+op = "literal"
+find = '''include!(concat!(env!("OUT_DIR"), "/locales.rs"));'''
+replace = '''mod dates; // aurora-local-patch: year-first-dates-module
+pub use dates::{numeric_date, numeric_date_of_iso, numeric_month_day, numeric_parts};
+include!(concat!(env!("OUT_DIR"), "/locales.rs"));'''
+
+[[patch]]
+id = "year-first-dates-catalog-test"
+why = "the upstream short-date test, now month before day and year first"
+paths = ["crates/aurora-i18n/tests/catalogs.rs"]
+op = "literal"
+find = '''assert_eq!(tr_in!("en", "date-day-month", day = "28", month = "Oct"), "28 Oct");'''
+replace = '''// aurora-local-patch: year-first-dates-catalog-test
+    // Year, month, day in every language (local patch set; Japanese was already).
+    assert_eq!(tr_in!("en", "date-day-month", day = "28", month = "Oct"), "Oct 28");
+    assert_eq!(tr_in!("fr", "date-day-month", day = "28", month = "oct."), "oct. 28");
+    for language in ["en", "fr"] {
+        assert_eq!(
+            tr_in!(language, "date-day-month-year", day = "6", month = "Jun", year = "2022"),
+            "2022 Jun 6"
+        );
+    }'''
+
+[[patch]]
+id = "year-first-dates-catalog-test-de"
+why = "the upstream German date test: its day-first pattern is removed, the English one shows year first"
+paths = ["crates/aurora-i18n/tests/catalogs.rs"]
+op = "literal"
+find = '''assert_eq!(aurora_i18n::format_in("de", "date-day-month-year", &args), "16. November 2026");'''
+replace = '''// Year first, through the English pattern. // aurora-local-patch: year-first-dates-catalog-test-de
+    assert_eq!(aurora_i18n::format_in("de", "date-day-month-year", &args), "2026 November 16");'''
+
+[[patch]]
+id = "year-first-dates-catalog-test-pt-br"
+why = "the upstream Brazilian date test: its day-first pattern is removed, the English one shows year first"
+paths = ["crates/aurora-i18n/tests/catalogs.rs"]
+op = "literal"
+find = '''assert_eq!(
+        aurora_i18n::format_in("pt-BR", "date-day-month-year", &date),
+        "16 de novembro de 2026"
+    );'''
+replace = '''// Year first, through the English pattern. // aurora-local-patch: year-first-dates-catalog-test-pt-br
+    assert_eq!(aurora_i18n::format_in("pt-BR", "date-day-month-year", &date), "2026 novembro 16");'''
+
+[[patch]]
+id = "year-first-dates-numeric-keys"
+why = "the numeric date keys of English and French read like the helper"
+paths = ["crates/aurora-i18n/tests/catalogs.rs"]
+op = "literal"
+find = '''#[test]
+fn japanese_counts_have_a_single_form() {'''
+replace = '''// aurora-local-patch: year-first-dates-numeric-keys
+/// The catalogue keys that compose a numeric date read like
+/// aurora_i18n::numeric_date in every bundled catalogue, year first;
+/// Japanese keeps its 年月日.
+#[test]
+fn numeric_date_keys_read_like_the_shared_helper() {
+    use aurora_i18n::{numeric_date, numeric_month_day, numeric_parts, tr_in};
+    let (year, month, day) = numeric_parts(2026, 7, 5);
+    let date = numeric_date(2026, 7, 5);
+    assert_eq!(date, "2026/07/05");
+    for language in SOURCES.iter().map(|&(code, _)| code).filter(|&code| code != "ja") {
+        let (y, m, d) = (year.as_str(), month.as_str(), day.as_str());
+        assert_eq!(tr_in!(language, "profile-date", year = y, month = m, day = d), date, "{language}");
+        assert_eq!(
+            tr_in!(language, "profile-date-hidden", month = m, day = d),
+            numeric_month_day(7, 5),
+            "{language}"
+        );
+        assert_eq!(
+            tr_in!(language, "search-events-date", month = m, day = d),
+            numeric_month_day(7, 5),
+            "{language}"
+        );
+        assert_eq!(
+            tr_in!(language, "inspect-date", year = y, month = m, day = d, hour = "14", minute = "13"),
+            format!("{date} 14:13"),
+            "{language}"
+        );
+        assert_eq!(
+            tr_in!(
+                language,
+                "grid-status-date",
+                year = y,
+                month = m,
+                day = d,
+                hour = "10",
+                minute = "45"
+            ),
+            format!("{date} 10:45 SLT"),
+            "{language}"
+        );
+        assert!(
+            tr_in!(
+                language,
+                "ui-display-name-at-slt",
+                y = y,
+                m = m,
+                d = d,
+                value0 = "14",
+                value1 = "30"
+            )
+            .starts_with(&date),
+            "{language}"
+        );
+    }
+    assert_eq!(
+        tr_in!(
+            "ja",
+            "profile-date",
+            year = year.as_str(),
+            month = month.as_str(),
+            day = day.as_str()
+        ),
+        "2026年07月05日"
+    );
+}
+
+/// Every date key of every bundled catalogue reads year, month, day (month
+/// before day without a year), through the English pattern where a
+/// catalogue has none. The patterns left as their translators wrote them are
+/// named with the reason: when one of them changes upstream, this test says so.
+#[test]
+fn every_catalogue_date_reads_year_first() {
+    // Words around the date that this patch set does not rewrite; removing
+    // the line would show the English words of the English pattern instead.
+    const LEFT: &[(&str, &str, &str)] = &[
+        ("de", "ui-places-created-on", "a preposition and an ordinal day around the date"),
+        ("de", "world-im-saved", "a preposition and an ordinal day around the date"),
+        ("es", "world-im-saved", "connecting words between the parts"),
+        ("it", "ui-places-created-on", "words right before the date"),
+        ("it", "world-im-saved", "words right before the date"),
+        ("nb", "ui-places-created-on", "a word before the date and an ordinal day"),
+        ("nb", "world-im-saved", "a word before the date and an ordinal day"),
+        ("pl", "ui-places-created-on", "a word right before the date"),
+        ("pl", "world-im-saved", "a word right before the date"),
+        ("pt-BR", "ui-places-created-on", "connecting words between the parts"),
+        ("pt-BR", "world-im-saved", "a word right before the date"),
+        ("pt-PT", "ui-places-created-on", "connecting words between the parts"),
+        ("pt-PT", "world-im-saved", "connecting words between the parts"),
+        ("ru", "ui-places-created-on", "a word right before the date"),
+        ("ru", "world-im-saved", "a word right before the date"),
+        ("uk", "ui-places-created-on", "a word right before the date"),
+        ("uk", "world-im-saved", "a word right before the date"),
+    ];
+    const KEYS: [&str; 16] = [
+        "profile-date",
+        "profile-date-hidden",
+        "search-events-date",
+        "inspect-date",
+        "grid-status-date",
+        "ui-display-name-at-slt",
+        "date-day-month",
+        "date-day-month-year",
+        "land-claim-date",
+        "land-covenant-date",
+        "ui-bars-slt-date",
+        "ui-places-visit-day",
+        "ui-places-created-on",
+        "ui-chat-day",
+        "world-im-saved",
+        "ui-land-overview-date",
+    ];
+    let mut args = aurora_i18n::Args::new();
+    for (name, value) in [
+        ("year", "2031"),
+        ("y", "2031"),
+        ("month", "MON"),
+        ("m", "MON"),
+        ("day", "27"),
+        ("d", "27"),
+        ("hour", "14"),
+        ("minute", "13"),
+        ("value0", "14"),
+        ("value1", "13"),
+        ("weekday", "WKD"),
+        ("time", "11:19:10"),
+    ] {
+        args.set(name, value);
+    }
+    let mut left = 0;
+    for &(language, _) in SOURCES {
+        for key in KEYS {
+            let text = aurora_i18n::format_in(language, key, &args);
+            let (Some(month), Some(day)) = (text.find("MON"), text.find("27")) else {
+                panic!("{language}/{key}: no month or day in {text:?}");
+            };
+            let yearless = matches!(
+                key,
+                "profile-date-hidden" | "search-events-date" | "date-day-month" | "ui-bars-slt-date" | "ui-places-visit-day"
+            );
+            let year_first = match text.find("2031") {
+                Some(year) => year < month && month < day,
+                None => yearless && month < day,
+            };
+            match LEFT.iter().find(|&&(l, k, _)| l == language && k == key) {
+                Some(&(_, _, reason)) => {
+                    left += 1;
+                    assert!(
+                        !year_first,
+                        "{language}/{key} reads year first now ({text:?}); it was left for {reason}: remove it from LEFT"
+                    );
+                }
+                None => assert!(year_first, "{language}/{key}: {text:?}"),
+            }
+        }
+    }
+    assert_eq!(left, LEFT.len(), "LEFT names a language or a key that is not bundled");
+}
+
+#[test]
+fn japanese_counts_have_a_single_form() {'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-profile-date"
+why = "profile-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''profile-date = { $month }/{ $day }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-date-day-month"
+why = "date-day-month: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-date-day-month-year"
+why = "date-day-month-year: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-land-claim-date"
+why = "land-claim-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day } { $month } { $year } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-land-claim-date
+land-claim-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-land-covenant-date"
+why = "land-covenant-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $month } { $day } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-inspect-date"
+why = "inspect-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-grid-status-date"
+why = "grid-status-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-ui-places-created-on"
+why = "ui-places-created-on: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''ui-places-created-on = Created on { $month } { $day }, { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-ui-places-created-on
+ui-places-created-on = Created on { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $m }/{ $d }/{ $y }{ " at " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " at " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-ui-chat-day"
+why = "ui-chat-day: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $month } { $day }, { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-world-im-saved"
+why = "world-im-saved: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''world-im-saved = (Saved { $month } { $day }, { $year }, { $time })'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-world-im-saved
+world-im-saved = (Saved { $year } { $month } { $day }, { $time })'''
+
+[[patch]]
+id = "year-first-dates-ftl-en-ui-land-overview-date"
+why = "ui-land-overview-date: year first (en)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $month } { $day }, { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-en-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-profile-date"
+why = "profile-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''profile-date = { $day }/{ $month }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-profile-date-hidden"
+why = "profile-date-hidden: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-date-day-month"
+why = "date-day-month: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-date-day-month-year"
+why = "date-day-month-year: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-land-claim-date"
+why = "land-claim-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day } { $month } { $year } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-land-claim-date
+land-claim-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-land-covenant-date"
+why = "land-covenant-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $month } { $day } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-inspect-date"
+why = "inspect-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''inspect-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-grid-status-date"
+why = "grid-status-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-places-visit-day"
+why = "ui-places-visit-day: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-places-created-on"
+why = "ui-places-created-on: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-places-created-on = Créé le { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-places-created-on
+ui-places-created-on = Créé le { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }/{ $m }/{ $y }{ " à " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " à " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-chat-day"
+why = "ui-chat-day: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-world-im-saved"
+why = "world-im-saved: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''world-im-saved = (Enregistré le { $day } { $month } { $year } à { $time })'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-world-im-saved
+world-im-saved = (Enregistré le { $year } { $month } { $day } à { $time })'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-search-events-date"
+why = "search-events-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-fr-ui-land-overview-date"
+why = "ui-land-overview-date: year first (fr)"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-fr-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+# --- the community catalogues (upstream added them after this manifest
+# was written): see the header for the routes
+
+[[patch]]
+id = "year-first-dates-ftl-de-profile-date"
+why = "profile-date: year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-profile-date-hidden"
+why = "profile-date-hidden: year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }.'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-date-day-month"
+why = "date-day-month: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''date-day-month = { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-date-day-month (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-date-day-month-year"
+why = "date-day-month-year: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-date-day-month-year (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-land-claim-date"
+why = "land-claim-date: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday }, { $day }. { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-land-claim-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-land-covenant-date"
+why = "land-covenant-date: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday }, { $day }. { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-land-covenant-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-inspect-date"
+why = "inspect-date: year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-ui-bars-slt-date"
+why = "ui-bars-slt-date: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday }, { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-ui-bars-slt-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-grid-status-date"
+why = "grid-status-date: year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-ui-places-visit-day"
+why = "ui-places-visit-day: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-ui-places-visit-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $m }/{ $d }/{ $y }{ " um " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " um " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-ui-chat-day"
+why = "ui-chat-day: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-ui-chat-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-de-ui-land-overview-date"
+why = "ui-land-overview-date: words around the date; removed so the English pattern shows, year first (de)"
+paths = ["crates/aurora-i18n/locales/de.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-de-ui-land-overview-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-profile-date"
+why = "profile-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''profile-date = { $day }/{ $month }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-profile-date-hidden"
+why = "profile-date-hidden: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-date-day-month"
+why = "date-day-month: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-date-day-month-year"
+why = "date-day-month-year: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-land-claim-date"
+why = "land-claim-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-land-claim-date
+land-claim-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-land-covenant-date"
+why = "land-covenant-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $day } { $month } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-inspect-date"
+why = "inspect-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday }, { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-bars-slt-date
+ui-bars-slt-date = { $weekday }, { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-grid-status-date"
+why = "grid-status-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-places-visit-day"
+why = "ui-places-visit-day: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-places-created-on"
+why = "ui-places-created-on: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-places-created-on = Fecha de creación: { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-places-created-on
+ui-places-created-on = Fecha de creación: { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }/{ $m }/{ $y }{ " a las " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " a las " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-chat-day"
+why = "ui-chat-day: words around the date; removed so the English pattern shows, year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } de { $month } de { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-chat-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-search-events-date"
+why = "search-events-date: year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-es-ui-land-overview-date"
+why = "ui-land-overview-date: words around the date; removed so the English pattern shows, year first (es)"
+paths = ["crates/aurora-i18n/locales/es.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } de { $month } de { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-es-ui-land-overview-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-profile-date"
+why = "profile-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''profile-date = { $day }/{ $month }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-profile-date-hidden"
+why = "profile-date-hidden: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-date-day-month"
+why = "date-day-month: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-date-day-month-year"
+why = "date-day-month-year: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-land-claim-date"
+why = "land-claim-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day } { $month } { $year } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-land-claim-date
+land-claim-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-land-covenant-date"
+why = "land-covenant-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $month } { $day } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-inspect-date"
+why = "inspect-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''inspect-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-grid-status-date"
+why = "grid-status-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-ui-places-visit-day"
+why = "ui-places-visit-day: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }/{ $m }/{ $y }{ " alle " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " alle " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-ui-chat-day"
+why = "ui-chat-day: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-search-events-date"
+why = "search-events-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-it-ui-land-overview-date"
+why = "ui-land-overview-date: year first (it)"
+paths = ["crates/aurora-i18n/locales/it.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-it-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-profile-date"
+why = "profile-date: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-profile-date-hidden"
+why = "profile-date-hidden: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }.'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-date-day-month"
+why = "date-day-month: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''date-day-month = { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-date-day-month (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-date-day-month-year"
+why = "date-day-month-year: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-date-day-month-year (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-land-claim-date"
+why = "land-claim-date: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day }. { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-land-claim-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-land-covenant-date"
+why = "land-covenant-date: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $day }. { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-land-covenant-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-inspect-date"
+why = "inspect-date: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''inspect-date = { $day }.{ $month }.{ $year } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-ui-bars-slt-date"
+why = "ui-bars-slt-date: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-ui-bars-slt-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-grid-status-date"
+why = "grid-status-date: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }.{ $month }.{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-ui-places-visit-day"
+why = "ui-places-visit-day: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day }. { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-ui-places-visit-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }.{ $m }.{ $y }{ " kl. " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " kl. " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-ui-chat-day"
+why = "ui-chat-day: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-ui-chat-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-search-events-date"
+why = "search-events-date: year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }.{ $month }.'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-nb-ui-land-overview-date"
+why = "ui-land-overview-date: words around the date; removed so the English pattern shows, year first (nb)"
+paths = ["crates/aurora-i18n/locales/nb.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day }. { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-nb-ui-land-overview-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-profile-date"
+why = "profile-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-profile-date-hidden"
+why = "profile-date-hidden: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-date-day-month"
+why = "date-day-month: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-date-day-month-year"
+why = "date-day-month-year: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-land-claim-date"
+why = "land-claim-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day } { $month } { $year } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-land-claim-date
+land-claim-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-land-covenant-date"
+why = "land-covenant-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $month } { $day } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-inspect-date"
+why = "inspect-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-grid-status-date"
+why = "grid-status-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-ui-places-visit-day"
+why = "ui-places-visit-day: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }.{ $m }.{ $y }{ " o " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " o " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-ui-chat-day"
+why = "ui-chat-day: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-search-events-date"
+why = "search-events-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pl-ui-land-overview-date"
+why = "ui-land-overview-date: year first (pl)"
+paths = ["crates/aurora-i18n/locales/pl.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pl-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-profile-date"
+why = "profile-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''profile-date = { $day }/{ $month }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-profile-date-hidden"
+why = "profile-date-hidden: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-date-day-month"
+why = "date-day-month: words around the date; removed so the English pattern shows, year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } de { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-date-day-month (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-date-day-month-year"
+why = "date-day-month-year: words around the date; removed so the English pattern shows, year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } de { $month } de { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-date-day-month-year (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-land-claim-date"
+why = "land-claim-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday } { $day } { $month } { $year } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-land-claim-date
+land-claim-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-land-covenant-date"
+why = "land-covenant-date: words around the date; removed so the English pattern shows, year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday }, { $day } de { $month } de { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-land-covenant-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-inspect-date"
+why = "inspect-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-grid-status-date"
+why = "grid-status-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-ui-places-visit-day"
+why = "ui-places-visit-day: words around the date; removed so the English pattern shows, year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } de { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-ui-places-visit-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $m }/{ $d }/{ $y }{ " às " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " às " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-ui-chat-day"
+why = "ui-chat-day: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $month } { $day }, { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-br-ui-land-overview-date"
+why = "ui-land-overview-date: year first (pt-BR)"
+paths = ["crates/aurora-i18n/locales/pt-BR.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $month } { $day }, { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-br-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-profile-date"
+why = "profile-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''profile-date = { $day }/{ $month }/{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-profile-date-hidden"
+why = "profile-date-hidden: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-date-day-month"
+why = "date-day-month: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-date-day-month-year"
+why = "date-day-month-year: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-land-claim-date"
+why = "land-claim-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-land-claim-date
+land-claim-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-land-covenant-date"
+why = "land-covenant-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday } { $month } { $day } { $time } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-land-covenant-date
+land-covenant-date = { $weekday } { $year } { $month } { $day } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-inspect-date"
+why = "inspect-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-grid-status-date"
+why = "grid-status-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }/{ $month }/{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-ui-places-visit-day"
+why = "ui-places-visit-day: words around the date; removed so the English pattern shows, year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } de { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-ui-places-visit-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }/{ $m }/{ $y }{ " às " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " às " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-ui-chat-day"
+why = "ui-chat-day: words around the date; removed so the English pattern shows, year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } de { $month } de { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-ui-chat-day (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-search-events-date"
+why = "search-events-date: year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }/{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-pt-pt-ui-land-overview-date"
+why = "ui-land-overview-date: words around the date; removed so the English pattern shows, year first (pt-PT)"
+paths = ["crates/aurora-i18n/locales/pt-PT.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } de { $month } de { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-pt-pt-ui-land-overview-date (removed: the English pattern shows)'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-profile-date"
+why = "profile-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-profile-date-hidden"
+why = "profile-date-hidden: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-date-day-month"
+why = "date-day-month: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-date-day-month-year"
+why = "date-day-month-year: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-land-claim-date"
+why = "land-claim-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-land-claim-date
+land-claim-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-land-covenant-date"
+why = "land-covenant-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-land-covenant-date
+land-covenant-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-inspect-date"
+why = "inspect-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''inspect-date = { $day }.{ $month }.{ $year } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday }, { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-ui-bars-slt-date
+ui-bars-slt-date = { $weekday }, { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-grid-status-date"
+why = "grid-status-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''grid-status-date = { $day }.{ $month }.{ $year } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-ui-places-visit-day"
+why = "ui-places-visit-day: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }.{ $m }.{ $y }{ " в " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " в " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-ui-chat-day"
+why = "ui-chat-day: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-search-events-date"
+why = "search-events-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-ru-ui-land-overview-date"
+why = "ui-land-overview-date: year first (ru)"
+paths = ["crates/aurora-i18n/locales/ru.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-ru-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-profile-date"
+why = "profile-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-profile-date-hidden"
+why = "profile-date-hidden: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-date-day-month"
+why = "date-day-month: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-date-day-month-year"
+why = "date-day-month-year: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-land-claim-date"
+why = "land-claim-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''land-claim-date = { $day } { $month } { $year } { $weekday } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-land-claim-date
+land-claim-date = { $year } { $month } { $day } { $weekday } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-land-covenant-date"
+why = "land-covenant-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $day } { $month } { $year } { $weekday } { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-land-covenant-date
+land-covenant-date = { $year } { $month } { $day } { $weekday } { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-inspect-date"
+why = "inspect-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $day } { $month } { $weekday }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-bars-slt-date
+ui-bars-slt-date = { $month } { $day } { $weekday }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-grid-status-date"
+why = "grid-status-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-places-visit-day"
+why = "ui-places-visit-day: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-places-created-on"
+why = "ui-places-created-on: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-places-created-on = Oluşturulma: { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-places-created-on
+ui-places-created-on = Oluşturulma: { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }.{ $m }.{ $y }{ " saat " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " saat " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-chat-day"
+why = "ui-chat-day: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-world-im-saved"
+why = "world-im-saved: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''world-im-saved = (Kaydedildi: { $day } { $month } { $year }, { $time })'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-world-im-saved
+world-im-saved = (Kaydedildi: { $year } { $month } { $day }, { $time })'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-search-events-date"
+why = "search-events-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-tr-ui-land-overview-date"
+why = "ui-land-overview-date: year first (tr)"
+paths = ["crates/aurora-i18n/locales/tr.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-tr-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-profile-date"
+why = "profile-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''profile-date = { $day }.{ $month }.{ $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-profile-date
+profile-date = { $year }/{ $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-profile-date-hidden"
+why = "profile-date-hidden: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''profile-date-hidden = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-profile-date-hidden
+profile-date-hidden = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-date-day-month"
+why = "date-day-month: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''date-day-month = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-date-day-month
+date-day-month = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-date-day-month-year"
+why = "date-day-month-year: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''date-day-month-year = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-date-day-month-year
+date-day-month-year = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-land-claim-date"
+why = "land-claim-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''land-claim-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-land-claim-date
+land-claim-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-land-covenant-date"
+why = "land-covenant-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''land-covenant-date = { $weekday }, { $day } { $month } { $year }, { $time }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-land-covenant-date
+land-covenant-date = { $weekday }, { $year } { $month } { $day }, { $time }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-inspect-date"
+why = "inspect-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-ui-bars-slt-date"
+why = "ui-bars-slt-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''ui-bars-slt-date = { $weekday } { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-ui-bars-slt-date
+ui-bars-slt-date = { $weekday } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-grid-status-date"
+why = "grid-status-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-ui-places-visit-day"
+why = "ui-places-visit-day: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''ui-places-visit-day = { $day } { $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-ui-places-visit-day
+ui-places-visit-day = { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $d }.{ $m }.{ $y }{ " о " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " о " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-ui-chat-day"
+why = "ui-chat-day: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''ui-chat-day = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-ui-chat-day
+ui-chat-day = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-search-events-date"
+why = "search-events-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''search-events-date = { $day }.{ $month }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-search-events-date
+search-events-date = { $month }/{ $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-uk-ui-land-overview-date"
+why = "ui-land-overview-date: year first (uk)"
+paths = ["crates/aurora-i18n/locales/uk.ftl"]
+op = "literal"
+find = '''ui-land-overview-date = { $day } { $month } { $year }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-uk-ui-land-overview-date
+ui-land-overview-date = { $year } { $month } { $day }'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hans-inspect-date"
+why = "inspect-date: year first (zh-Hans)"
+paths = ["crates/aurora-i18n/locales/zh-Hans.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hans-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hans-grid-status-date"
+why = "grid-status-date: year first (zh-Hans)"
+paths = ["crates/aurora-i18n/locales/zh-Hans.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hans-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hans-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (zh-Hans)"
+paths = ["crates/aurora-i18n/locales/zh-Hans.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $m }/{ $d }/{ $y }{ " " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hans-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hant-inspect-date"
+why = "inspect-date: year first (zh-Hant)"
+paths = ["crates/aurora-i18n/locales/zh-Hant.ftl"]
+op = "literal"
+find = '''inspect-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hant-inspect-date
+inspect-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute }'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hant-grid-status-date"
+why = "grid-status-date: year first (zh-Hant)"
+paths = ["crates/aurora-i18n/locales/zh-Hant.ftl"]
+op = "literal"
+find = '''grid-status-date = { $year }-{ $month }-{ $day } { $hour }:{ $minute } SLT'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hant-grid-status-date
+grid-status-date = { $year }/{ $month }/{ $day } { $hour }:{ $minute } SLT'''
+
+[[patch]]
+id = "year-first-dates-ftl-zh-hant-ui-display-name-at-slt"
+why = "ui-display-name-at-slt: year first (zh-Hant)"
+paths = ["crates/aurora-i18n/locales/zh-Hant.ftl"]
+op = "literal"
+find = '''ui-display-name-at-slt = { $m }/{ $d }/{ $y }{ " " }{ $value0 }:{ $value1 }{ " SLT" }'''
+replace = '''# // aurora-local-patch: year-first-dates-ftl-zh-hant-ui-display-name-at-slt
+ui-display-name-at-slt = { $y }/{ $m }/{ $d }{ " " }{ $value0 }:{ $value1 }{ " SLT" }'''
+
+[[patch]]
+id = "year-first-dates-inventory"
+why = "inventory item dates (properties, hover card) through the helper"
+paths = ["crates/aurora-net/src/inventory.rs"]
+op = "literal"
+find = '''format!("{day:02}/{month:02}/{year}")'''
+replace = '''// Year first, like every date of the interface.
+    // aurora-local-patch: year-first-dates-inventory
+    aurora_i18n::numeric_date(year, i64::from(month), i64::from(day))'''
+
+[[patch]]
+id = "year-first-dates-group-csv"
+why = "the last-online date of the group members CSV export through the helper"
+paths = ["crates/aurora-viewer/src/ui/group_profile/admin_members.rs"]
+op = "literal"
+find = '''aurora_net::groups::LastSeen::Date(y, mo, da) => format!("{mo:02}/{da:02}/{y}"),'''
+replace = '''aurora_net::groups::LastSeen::Date(y, mo, da) => {
+                // aurora-local-patch: year-first-dates-group-csv
+                aurora_i18n::numeric_date(i64::from(*y), i64::from(*mo), i64::from(*da))
+            }'''
+
+[[patch]]
+id = "year-first-dates-top-objects"
+why = "Top scripts / colliders date column through the helper"
+paths = ["crates/aurora-viewer/src/ui/region/top_objects.rs"]
+op = "literal"
+find = '''format!("{y:04}-{m:02}-{d:02}")'''
+replace = '''aurora_i18n::numeric_date(y, m as i64, d) // aurora-local-patch: year-first-dates-top-objects'''
+
+[[patch]]
+id = "year-first-dates-landmark-test"
+why = "the landmark date test, year first"
+paths = ["crates/aurora-viewer/src/ui/place_details.rs"]
+op = "literal"
+# the landmark date itself reads land-claim-date since upstream #3913:
+# the catalogue steps above reorder it
+find = '''"fr" => "mar. 02 avr. 2024 07:42:28",'''
+replace = '''"fr" => "mar. 2024 avr. 02 07:42:28", // aurora-local-patch: year-first-dates-landmark-test'''
+
+[[patch]]
+id = "year-first-dates-landmark-test-en"
+why = "the landmark date test, year first"
+paths = ["crates/aurora-viewer/src/ui/place_details.rs"]
+op = "literal"
+find = '''_ => "Tue 02 Apr 2024 07:42:28",'''
+replace = '''_ => "Tue 2024 Apr 02 07:42:28", // aurora-local-patch: year-first-dates-landmark-test-en'''
+
+[[patch]]
+id = "year-first-dates-driver"
+why = "the old graphics driver notice date through the helper"
+paths = ["crates/aurora-viewer/src/ui/login/driver_notice.rs"]
+op = "literal"
+find = '''date = format!("{}-{:02}-{:02}", date.0, date.1, date.2)'''
+replace = '''date = aurora_i18n::numeric_date(i64::from(date.0), i64::from(date.1), i64::from(date.2)) // aurora-local-patch: year-first-dates-driver'''
+
+[[patch]]
+id = "year-first-dates-beta-build"
+why = "the beta build day of the update window through the helper"
+paths = ["crates/aurora-viewer/src/ui/update.rs"]
+op = "literal"
+find = '''date = format!("{}-{}-{}", &day[..4], &day[4..6], &day[6..]),'''
+replace = '''// aurora-local-patch: year-first-dates-beta-build
+            date =
+                aurora_i18n::numeric_date_of_iso(&format!("{}-{}-{}", &day[..4], &day[4..6], &day[6..])).unwrap_or_else(|| day.to_owned()),'''
+
+[[patch]]
+id = "year-first-dates-beta-build-test"
+why = "the beta build test, with slashes"
+paths = ["crates/aurora-viewer/src/ui/update.rs"]
+op = "literal"
+find = '''assert!(build.contains("2026-10-25") && build.contains("12"), "{build}");'''
+replace = '''assert!(build.contains("2026/10/25") && build.contains("12"), "{build}"); // aurora-local-patch: year-first-dates-beta-build-test'''
+
+[[patch]]
+id = "year-first-dates-backup"
+why = "the settings backup date through the helper (the file keeps ISO)"
+paths = ["crates/aurora-viewer/src/settings/backup.rs"]
+op = "literal"
+find = '''(Some(date), Some(h), Some(m)) => format!("{date} {h}:{m}"),'''
+replace = '''// Shown year first like every numeric date: 2026/10/22 14:30.
+            // aurora-local-patch: year-first-dates-backup
+            (Some(date), Some(h), Some(m)) => {
+                format!(
+                    "{} {h}:{m}",
+                    aurora_i18n::numeric_date_of_iso(date).unwrap_or_else(|| date.to_owned())
+                )
+            }'''
+
+[[patch]]
+id = "year-first-dates-backup-test"
+why = "the backup date test, with slashes"
+paths = ["crates/aurora-viewer/src/settings/backup.rs"]
+op = "literal"
+find = '''assert_eq!(backup.created(), "2026-10-22 14:30");'''
+replace = '''assert_eq!(backup.created(), "2026/10/22 14:30"); // aurora-local-patch: year-first-dates-backup-test'''
+
+[[patch]]
+id = "year-first-dates-texture-upload"
+why = "the texture upload date of the preview window through the helper"
+paths = ["crates/aurora-viewer/src/ui/texture_library/texture_view.rs"]
+op = "literal"
+find = '''result.date = Some(format!(
+                                "{}-{}-{} {}:{}:{} UTC",
+                                &value[..4],
+                                &value[4..6],
+                                &value[6..8],'''
+replace = '''// aurora-local-patch: year-first-dates-texture-upload
+                            let day = format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8]);
+                            result.date = Some(format!(
+                                "{} {}:{}:{} UTC",
+                                aurora_i18n::numeric_date_of_iso(&day).unwrap_or(day),'''
+
+[[patch]]
+id = "year-first-dates-texture-upload-test"
+why = "the texture upload date test, with slashes"
+paths = ["crates/aurora-viewer/src/ui/texture_library/texture_view.rs"]
+op = "literal"
+find = '''date: Some("2026-10-20 14:00:05 UTC".into())'''
+replace = '''date: Some("2026/10/20 14:00:05 UTC".into()) // aurora-local-patch: year-first-dates-texture-upload-test'''
+
+[[patch]]
+id = "year-first-dates-poser"
+why = "the poser library date through the helper"
+paths = ["crates/aurora-viewer/src/ik_edit/poser/storage.rs"]
+op = "literal"
+find = '''format!("{year:04}-{month:02}-{day:02}")'''
+replace = '''aurora_i18n::numeric_date(year, month, day) // aurora-local-patch: year-first-dates-poser'''
+
+[[patch]]
+id = "year-first-dates-experiences"
+why = "experience log days through the helper (the log keeps ISO)"
+paths = ["crates/aurora-viewer/src/ui/experiences.rs"]
+op = "literal"
+find = '''ui.label(RichText::new(format!("{} {}", entry.day, entry.time)).size(11.5).color(p.muted));'''
+replace = '''// The log keeps YYYY-MM-DD; shown like every numeric date. // aurora-local-patch: year-first-dates-experiences
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} {}",
+                                            aurora_i18n::numeric_date_of_iso(&entry.day).unwrap_or_else(|| entry.day.clone()),
+                                            entry.time
+                                        ))
+                                        .size(11.5)
+                                        .color(p.muted),
+                                    );'''
+
+[[patch]]
+id = "year-first-dates-legacy-events-day"
+why = "the Legacy search events day label, zero padded month/day"
+paths = ["crates/aurora-viewer/src/ui/search.rs"]
+op = "literal"
+find = '''let date = aurora_i18n::tr!("search-events-date", month = month as i64, day = day);'''
+replace = '''// Zero padded like every numeric date. // aurora-local-patch: year-first-dates-legacy-events-day
+                    let date = aurora_i18n::tr!("search-events-date", month = format!("{month:02}"), day = format!("{day:02}"));'''
+
+[[patch]]
+id = "year-first-dates-event-when"
+why = "the Aurora search event day, zero padded month/day"
+paths = ["crates/aurora-viewer/src/ui/search/aurora.rs"]
+op = "literal"
+find = '''let date = aurora_i18n::tr!("search-events-date", month = m as i64, day = d);'''
+replace = '''// Zero padded like every numeric date. // aurora-local-patch: year-first-dates-event-when
+            let date = aurora_i18n::tr!("search-events-date", month = format!("{m:02}"), day = format!("{d:02}"));'''
+
+[[patch]]
+id = "year-first-dates-events-day"
+why = "the Aurora search events day label, zero padded month/day"
+paths = ["crates/aurora-viewer/src/ui/search/aurora.rs"]
+op = "literal"
+find = '''let date = aurora_i18n::tr!("search-events-date", month = month as i64, day = day);'''
+replace = '''// aurora-local-patch: year-first-dates-events-day
+                            let date = aurora_i18n::tr!("search-events-date", month = format!("{month:02}"), day = format!("{day:02}"));'''
+
+[[patch]]
+id = "year-first-dates-event-when-test"
+why = "the SLT event card test's own reference, zero padded like the card (year-first-dates-event-when)"
+paths = ["crates/aurora-viewer/src/ui/search/aurora.rs"]
+op = "literal"
+fn = "pacific_event_when"
+find = '''let date = aurora_i18n::tr!("search-events-date", month = i64::from(event.month()), day = i64::from(event.day()));'''
+replace = '''// aurora-local-patch: year-first-dates-event-when-test
+                let (month, day) = (format!("{:02}", event.month()), format!("{:02}", event.day()));
+                let date = aurora_i18n::tr!("search-events-date", month = month, day = day);'''
+
+[[patch]]
+id = "year-first-dates-home-test"
+why = "the group notice date test, year first"
+paths = ["crates/aurora-viewer/src/ui/group_profile/home.rs"]
+op = "literal"
+# upstream's test follows the catalogue's order (day_month) since #3913:
+# the year first is asserted on top
+find = '''assert_eq!(notice_date(at(2025, 10, 3), now), date(Some(2025), 10, 3));'''
+replace = '''assert_eq!(notice_date(at(2025, 10, 3), now), date(Some(2025), 10, 3));
+        // Year, month, day. // aurora-local-patch: year-first-dates-home-test
+        assert!(notice_date(at(2025, 10, 3), now).starts_with("2025"));'''
+
+[[patch]]
+id = "year-first-dates-rows-test"
+why = "the inventory row date test, year first"
+paths = ["crates/aurora-viewer/src/ui/inventory/aurora/rows.rs"]
+op = "literal"
+# upstream's test follows the catalogue's order (day_month) since #3913:
+# the year first is asserted on top
+find = '''assert_eq!(short_date(1_756_857_600, now), date(Some(2025), 9, 3));'''
+replace = '''assert_eq!(short_date(1_756_857_600, now), date(Some(2025), 9, 3));
+        // Year, month, day. // aurora-local-patch: year-first-dates-rows-test
+        assert!(short_date(1_756_857_600, now).starts_with("2025"));'''
+
+[[patch]]
+id = "year-first-dates-land-test"
+why = "the parcel claim date test, year first"
+paths = ["crates/aurora-viewer/src/ui/land/mod.rs"]
+op = "literal"
+find = '''"fr" => "sam. 18 juin 2022 11:19:10",
+                "ja" => "2022年6月18日（土）11:19:10",
+                _ => "Sat 18 Jun 2022 11:19:10",'''
+replace = '''// Year, month, day. // aurora-local-patch: year-first-dates-land-test
+                "fr" => "sam. 2022 juin 18 11:19:10",
+                "ja" => "2022年6月18日（土）11:19:10",
+                _ => "Sat 2022 Jun 18 11:19:10",'''
+
+[[patch]]
+id = "year-first-dates-land-covenant-test"
+why = "the covenant date test, year first"
+paths = ["crates/aurora-viewer/src/ui/land/mod.rs"]
+op = "literal"
+find = '''"fr" => "mer. juin 05 21:18:48 2024",
+                "ja" => "2024年6月05日（水）21:18:48",
+                _ => "Wed Jun 05 21:18:48 2024",'''
+replace = '''// aurora-local-patch: year-first-dates-land-covenant-test
+                "fr" => "mer. 2024 juin 05 21:18:48",
+                "ja" => "2024年6月05日（水）21:18:48",
+                _ => "Wed 2024 Jun 05 21:18:48",'''
+
+[[patch]]
+id = "year-first-dates-profile-birth-test"
+why = "the birth date tests, year first (French and English alike)"
+paths = ["crates/aurora-viewer/src/world/profiles.rs"]
+op = "replace_fn_body"
+fn = "birth_and_hidden_age"
+body = '''
+        let mut p = AvatarProfile {
+            born: Some(date(2007, 5, 12)),
+            ..Default::default()
+        };
+        let now = date(2024, 9, 15);
+        assert!(birth_text_in("fr", &p, false, now).is_some_and(|t| t.starts_with("2007/05/12\n(17 ans 4 mois")));
+        p.hide_age = Some(true);
+        assert_eq!(birth_text_in("fr", &p, false, now).as_deref(), Some("05/12"));
+        // our own profile always shows the full date
+        assert!(birth_text_in("fr", &p, true, now).is_some_and(|t| t.starts_with("2007/05/12")));
+        assert_eq!(birth_text_in("en", &p, false, now).as_deref(), Some("05/12"));
+        assert!(birth_text_in("en", &p, true, now).is_some_and(|t| t.starts_with("2007/05/12\n(17 years 4 months")));
+'''
+
+[[patch]]
+id = "year-first-dates-profile-line-test"
+why = "the header birth line tests, year first"
+paths = ["crates/aurora-viewer/src/world/profiles.rs"]
+op = "replace_fn_body"
+fn = "the_header_birth_line_leaves_the_days_to_the_tooltip"
+body = '''
+        let mut p = AvatarProfile {
+            born: Some(date(2019, 4, 2)),
+            ..Default::default()
+        };
+        let now = date(2026, 10, 14);
+        assert_eq!(birth_line_in("fr", &p, false, now).as_deref(), Some("2019/04/02 · 7 ans 6 mois"));
+        assert_eq!(
+            birth_line_in("en", &p, false, now).as_deref(),
+            Some("2019/04/02 · 7 years 6 months")
+        );
+        p.born = Some(date(2026, 9, 20));
+        assert_eq!(birth_line_in("fr", &p, false, now).as_deref(), Some("2026/09/20 · 3 semaines"));
+        p.born = Some(date(2026, 10, 14));
+        assert_eq!(
+            birth_line_in("fr", &p, false, now).as_deref(),
+            Some("2026/10/14 · Inscrit aujourd'hui")
+        );
+        // a hidden age: the day and the month alone, except on our profile
+        p.hide_age = Some(true);
+        assert_eq!(birth_line_in("fr", &p, false, now).as_deref(), Some("10/14"));
+        assert!(birth_line_in("fr", &p, true, now).is_some_and(|t| t.starts_with("2026/10/14 · ")));
+        assert_eq!(birth_line_in("fr", &AvatarProfile::default(), false, now), None);
+'''
+
+# --- the Conversation Log (upstream #2984, after this manifest was written)
+
+[[patch]]
+id = "year-first-dates-conversation-log"
+why = "the conversation log's rows read year first like every other date of the interface; the file keeps the Legacy Viewer's format (it never used this function)"
+paths = ["crates/aurora-viewer/src/world/chat_log/conversations.rs"]
+op = "literal"
+fn = "timestamp"
+find = '''format!("{:02}/{:02}/{:04} {:02}:{:02}", t.month, t.day, t.year, t.hour, t.minute)'''
+replace = '''// aurora-local-patch: year-first-dates-conversation-log
+    let date = aurora_i18n::numeric_date(t.year, t.month, t.day);
+    format!("{date} {:02}:{:02}", t.hour, t.minute)'''
+
+[[patch]]
+id = "year-first-dates-conversation-log-test"
+why = "upstream's test of the row's time, year first"
+paths = ["crates/aurora-viewer/src/world/chat_log/conversations.rs"]
+op = "replace_fn_body"
+fn = "the_timestamp_is_second_life_time"
+body = '''
+// 2026-10-12 21:05 UTC is 14:05 in Pacific daylight time
+assert_eq!(timestamp(1_791_839_100), "2026/10/12 14:05");
+// and January is standard time (UTC-8)
+assert_eq!(timestamp(1_767_225_600), "2025/12/31 16:00");
+'''

@@ -1,0 +1,249 @@
+{
+ "about": "Origin marks of this unit's data. sourced: taken from the credited source, only its format or coordinates converted; derived: made from sourced data by a fixed rule; adapted: source content changed by judgement (pixels erased or filled, plates joined, a sourced name replaced); made: no source content (new drawings, drafts, stroke timing, name boxes); unknown: not recorded. A figure field resolves as figures[id][field], then default[field], then unknown; a field a figure does not have (no drawing, no name box) is not listed. names and readings list every entry; \"*\" is the file's own default name.",
+ "default": {},
+ "figures": {
+  "zh003": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh007": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh013": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh014": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh016": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh018": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh025": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh026": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh027": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh029": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh030": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh031": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh039": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh043": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh065": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "derived",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh097": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh215": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh265": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh266": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  },
+  "zh304": {
+   "drawing": "adapted",
+   "label": "made",
+   "lines": "sourced",
+   "name_box": "made",
+   "reveal": "made",
+   "timing": "made"
+  }
+ },
+ "format": 1,
+ "names": {},
+ "notes": {
+  "zh003": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: the tiger, crouched and turning, its tail raised"
+  },
+  "zh007": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a horned sheep lying with its legs folded, looking round"
+  },
+  "zh013": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a hornless river deer bounding, its head thrown up"
+  },
+  "zh014": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a dog standing, its tail curled over its back, looking back"
+  },
+  "zh016": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: an ox walking, head low, its tail swinging"
+  },
+  "zh018": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a pig trotting, snout forward"
+  },
+  "zh025": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a long-tailed pheasant perched, head raised, its tail hanging"
+  },
+  "zh026": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a fox rearing, snarling, its banded brush raised"
+  },
+  "zh027": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a horse standing, head turned back, mane flying, a fore hoof raised"
+  },
+  "zh029": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a long serpent in an S, its head down at the right"
+  },
+  "zh030": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a stag rearing round, antlers high, its coat spotted"
+  },
+  "zh031": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: the black carriage: canopy, seated lord and great wheel (the team of horses and the attendant left out: too dense at sky scale); the team of horses and the attendant left out"
+  },
+  "zh039": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a pan with a key-fret band and a long straight handle from a dragon-head socket; mirrored"
+  },
+  "zh043": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: the softshell turtle seen from above, its neck stretched out"
+  },
+  "zh065": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a round-backed armchair seen from the corner"
+  },
+  "zh097": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a strung bow with an arrow laid across it toward the Wolf (two plates of one page opening); 1 extra piece(s) from another plate; two plates of one page opening joined (bow and arrow)"
+  },
+  "zh215": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: the marshal Guan with his crescent glaive"
+  },
+  "zh265": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: the official 上將 of Wenchang, standing with his tablet"
+  },
+  "zh266": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a two-wheeled cart with a slatted bed, a rack and a long curved pole; a small part of the plate left out"
+  },
+  "zh304": {
+   "drawing": "cut out: paper and show-through removed, line weight evened, isolated marks removed; genuine cut-out: a lady with a hair knot and a jewelled necklace, holding a covered vessel"
+  }
+ },
+ "readings": {},
+ "set_name": {
+  "*": "unknown",
+  "de": "unknown",
+  "es": "unknown",
+  "fr": "unknown",
+  "it": "unknown",
+  "ja": "unknown",
+  "nb": "unknown",
+  "pl": "unknown",
+  "pt": "unknown",
+  "pt-BR": "unknown",
+  "ru": "unknown",
+  "tr": "unknown",
+  "uk": "unknown",
+  "zh-Hans": "unknown",
+  "zh-Hant": "unknown"
+ },
+ "unit": "set chinese-old-plates"
+}

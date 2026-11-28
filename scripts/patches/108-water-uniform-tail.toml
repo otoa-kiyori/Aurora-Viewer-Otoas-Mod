@@ -1,0 +1,83 @@
+# The shared water uniform's local tail: a helper patch that owns the
+# layout the local water features share, so that none of them needs another
+# for its place in the uniform. No setting, no interface, nothing drawn
+# differently: alone it only makes the uniform larger, its tail zero.
+#
+# The water effects' uniform (binding 17, `water_fx` in common.wgsl) keeps
+# upstream's own 64 bytes, then fixed regions, each written only by its own
+# feature and zero (off) at creation:
+# - the caustics' five vec4, `caustic` and `caustic_rest` (patch 91,
+#   91-caustics-water-texture);
+# - the open-sea swell's five, `ocean` to `ocean_next` (patch 109,
+#   109-ocean-swell);
+# - the water shape's three, `shape` to `shape_fade` (patch 120,
+#   120-water-normal-shape).
+# Rust: crates/aurora-render/src/water_uniform_tail.rs (a child module of
+# water_effects, beside the features' own), the offsets and sizes and the
+# initial contents; its test checks them against naga's layout of
+# WaterFxControls. A region whose patch is absent stays zero and nothing
+# reads it.
+#
+# Patches 91, 109 and 120 need it (they apply later and say so in their
+# headers); it needs nothing. It replaces the chain in which the swell's
+# region was placed after the caustics' (so 109 needed 91) while the
+# caustics' shader read a field only 109 declared (so 91 needed 109).
+#
+# Cost: 208 bytes more in one uniform buffer, nothing per frame.
+
+[[patch]]
+id = "water-uniform-tail-module"
+why = "the offsets and sizes of the local water features' regions and the uniform's initial contents, with their layout test"
+op = "add_file"
+paths = ["crates/aurora-render/src/water_uniform_tail.rs"]
+source = "files/water-uniform-tail/water_uniform_tail.rs"
+
+[[patch]]
+id = "water-uniform-tail-mod"
+why = "a child module of water_effects: it reads the private Uniform's size and its siblings read its offsets"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+find = "use glam::Vec2;"
+replace = """use glam::Vec2;
+
+// aurora-local-patch: water-uniform-tail-mod
+#[path = "water_uniform_tail.rs"]
+mod uniform_tail;"""
+
+[[patch]]
+id = "water-uniform-tail-buffer"
+why = "the uniform is created with the whole tail, zero (off)"
+paths = ["crates/aurora-render/src/water_effects.rs"]
+op = "literal"
+fn = "new"
+find = """            "water effects",
+            bytemuck::bytes_of(&Uniform::zeroed()),"""
+replace = """"water effects",
+            // aurora-local-patch: water-uniform-tail-buffer
+            &uniform_tail::initial_uniform(),"""
+
+[[patch]]
+id = "water-uniform-tail-controls"
+why = "the shaders' view of the uniform: every region's fields, at the offsets water_uniform_tail.rs gives"
+paths = ["crates/aurora-render/src/shaders/common.wgsl"]
+op = "literal"
+find = "struct WaterFxControls { area: vec4<f32>, previous: vec4<f32>, clock: vec4<f32>, counts: vec4<u32> };"
+replace = """// aurora-local-patch: water-uniform-tail-controls
+// The local water features' regions after upstream's four vec4, zero (off)
+// while a feature is off or absent (water_uniform_tail.rs):
+// - caustic: x pattern scale, y tile (m), z filter offset (uv), w 1 = the
+//   water texture's light map; caustic_rest: the rest of the caustics'
+//   extension, [3].w the share of the light taken away while the water
+//   crosses to or from the analytic water (water_caustic_texture.rs);
+// - ocean: down + up (m, 0 off), the swell's direction xy, the far water's
+//   openness; ocean_area: the coarse field's origin xy, its cell (m), 1 once
+//   loaded; ocean_shape: down, up (m), the calm distance (m, 0 no calming)
+//   and the calm at the edge; ocean_fine: the fine map's origin xy, its cell
+//   (m), 1 once loaded; ocean_next: while the environment cross-fades the
+//   water to a big wave of another direction, the new swell's direction xy
+//   and its share z (0: one swell) (ocean_swell.rs);
+// - shape: the wave shape from the water normal map's Ratio, Scale, vertex
+//   spacing (m), 1 once loaded; shape_next: a cross-fade's second normal
+//   map's wave directions, wave1 xy, wave2 zw; shape_fade: x its share, 0
+//   without a fade (water_shape.rs).
+struct WaterFxControls { area: vec4<f32>, previous: vec4<f32>, clock: vec4<f32>, counts: vec4<u32>, caustic: vec4<f32>, caustic_rest: array<vec4<f32>,4>, ocean: vec4<f32>, ocean_area: vec4<f32>, ocean_shape: vec4<f32>, ocean_fine: vec4<f32>, ocean_next: vec4<f32>, shape: vec4<f32>, shape_next: vec4<f32>, shape_fade: vec4<f32> };"""

@@ -1,0 +1,375 @@
+# Otoa's Shader: aurora-shader's page in Preferences › Extras, and its
+# toolbar button.
+#
+# Needs 50-aurora-shader (the host and its GUI API, user_post_gui.rs). The
+# page (files/aurora-shader-prefs/aurora_shader.rs) comes right below
+# "Just for fun" and shows only while the folder the host reads has a
+# config.toml: the master switch ([host] enabled: off, the host frees
+# everything and the frame is the unpatched one), photos, and the chain as
+# a strip of tabs in drawing order (a tab per effect, wrapping; drag one to
+# reorder, right-click to move it or take it out, "+" to add one of the
+# folder's other effects). The selected tab shows that effect only: its
+# on/off switch and its way out of the chain, a control per parameter from
+# its `//!` [ui] hints, related values grouped, plus a reset to the
+# header's defaults. The selection lives for the session only. It writes
+# into config.toml in place (comments kept), atomically; the host's
+# watcher applies it like a hand edit. Its state lives in the window's
+# OptionsUi, not in a thread-local: a row's first setting link runs every
+# page again (describe_settings, with an OptionsUi of its own), and that
+# pass, which only lists settings, leaves the page alone.
+#
+# The toolbar command `aurora_shader` is registered like the others (the
+# "Toolbar buttons" window, the skin's default toolbar) and hidden while
+# the folder is not installed. A click opens Preferences on the page. A
+# toolbar saved before this patch set does not get it on its own: add it
+# from the "Toolbar buttons" window.
+#
+# Skip all of 51 together (Page::OtoaShader is matched in every Page
+# function; the toolbar refers to the module).
+
+[[patch]]
+id = "aurora-shader-prefs-module"
+why = "the Otoa's Shader page and the toolbar's open request"
+op = "add_file"
+paths = ["crates/aurora-viewer/src/ui/options/aurora_shader.rs"]
+source = "files/aurora-shader-prefs/aurora_shader.rs"
+
+[[patch]]
+id = "aurora-shader-prefs-mod"
+why = "declare the module beside the pages (it uses Cx and the rows' controls)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = "pub mod backup;"
+replace = """pub(crate) mod aurora_shader; // aurora-local-patch: aurora-shader-prefs-mod
+pub mod backup;"""
+
+[[patch]]
+id = "aurora-shader-prefs-state"
+why = "the page's state in the window's OptionsUi, like the other pages': each pass, the label pass's throwaway one included, has its own"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = "pub struct OptionsUi {"
+replace = """pub struct OptionsUi {
+    /// Otoa's Shader: config.toml as the page knows it, and its writes.
+    aurora_shader: aurora_shader::State, // aurora-local-patch: aurora-shader-prefs-state"""
+
+[[patch]]
+id = "aurora-shader-prefs-collecting"
+why = "the page knows the label pass (it edits no setting, and reads no file for it)"
+paths = ["crates/aurora-viewer/src/ui/options/cx.rs"]
+op = "literal"
+find = """    pub fn searching(&self) -> bool {
+        !self.words.is_empty()
+    }"""
+replace = """pub fn searching(&self) -> bool {
+        !self.words.is_empty()
+    }
+
+    // aurora-local-patch: aurora-shader-prefs-collecting
+    /// The pass that only lists the settings each row edits, in a Cx that is
+    /// thrown away (`describe_settings`).
+    pub fn collecting(&self) -> bool {
+        matches!(self.mode, Mode::Collect)
+    }"""
+
+[[patch]]
+id = "aurora-shader-prefs-page-variant"
+why = "the page, after Just for fun"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = """    Network,
+    Fun,
+}"""
+replace = """Network,
+    Fun,
+    /// Otoa's Shader: aurora-shader's effects (local patch set).
+    OtoaShader, // aurora-local-patch: aurora-shader-prefs-page-variant
+}"""
+
+[[patch]]
+id = "aurora-shader-prefs-page-all"
+why = "in the sidebar's order, right below Just for fun (one page more)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "regex"
+pattern = '(?s)pub const ALL: \[Page; (\d+)\] = \[(.*?)\n(\s*)Page::Fun,\n(\s*)\];'
+replace = '''pub const ALL: [Page; \1 + 1] = [
+\3// aurora-local-patch: aurora-shader-prefs-page-all (one page more than upstream's count, whatever it is)\2
+\3Page::Fun,
+\3Page::OtoaShader,
+\4];'''
+
+[[patch]]
+id = "aurora-shader-prefs-page-key"
+why = "its name in AURORA_DEMO_OPTIONS (otoa-shader)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = 'Page::Fun => "fun",'
+replace = '''Page::Fun => "fun",
+            Page::OtoaShader => "otoa-shader", // aurora-local-patch: aurora-shader-prefs-page-key'''
+
+[[patch]]
+id = "aurora-shader-prefs-page-name"
+why = "its title, a proper name kept in every language"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = 'Page::Fun => aurora_i18n::tr!("ui-options-fun"),'
+replace = '''Page::Fun => aurora_i18n::tr!("ui-options-fun"),
+            Page::OtoaShader => aurora_i18n::tr!("ui-options-otoa-shader"), // aurora-local-patch: aurora-shader-prefs-page-name'''
+
+[[patch]]
+id = "aurora-shader-prefs-page-about"
+why = "the line under its title"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = 'Page::Fun => aurora_i18n::tr!("ui-options-about-fun"),'
+replace = '''Page::Fun => aurora_i18n::tr!("ui-options-about-fun"),
+            Page::OtoaShader => aurora_i18n::tr!("ui-options-about-otoa-shader"), // aurora-local-patch: aurora-shader-prefs-page-about'''
+
+[[patch]]
+id = "aurora-shader-prefs-page-icon"
+why = "the toolbar button's icon (one function, one icon)"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = 'Page::Fun => "confetti-filled",'
+replace = '''Page::Fun => "confetti-filled",
+            Page::OtoaShader => aurora_shader::ICON, // aurora-local-patch: aurora-shader-prefs-page-icon'''
+
+[[patch]]
+id = "aurora-shader-prefs-page-sidebar"
+why = "the page in the sidebar only while aurora-shader is installed"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "literal"
+find = "for page in Page::ALL.into_iter().skip(1) {"
+replace = """// aurora-local-patch: aurora-shader-prefs-page-sidebar
+            for page in Page::ALL
+                .into_iter()
+                .skip(1)
+                .filter(|page| *page != Page::OtoaShader || aurora_shader::installed())
+            {"""
+
+[[patch]]
+id = "aurora-shader-prefs-page-draw"
+why = "its rows (nothing while not installed)"
+paths = ["crates/aurora-viewer/src/ui/options/pages.rs"]
+op = "literal"
+find = "Page::Fun => fun::page(cx),"
+replace = """Page::Fun => fun::page(cx),
+        Page::OtoaShader => super::aurora_shader::page(cx), // aurora-local-patch: aurora-shader-prefs-page-draw"""
+
+[[patch]]
+id = "aurora-shader-prefs-test-catalogue"
+why = "the catalogue test counts the commands: one more than upstream, whatever upstream's count is (also after another patch's own ' + 1')"
+paths = ["crates/aurora-viewer/src/ui/toolbar/tests.rs"]
+op = "regex"
+pattern = '''assert_eq!\((all|COMMANDS)\.len\(\), (\d+(?: \+ 1)*)\);'''
+replace = '''assert_eq!(\1.len(), \2 + 1); // aurora-local-patch: aurora-shader-prefs-test-catalogue (aurora_shader)'''
+expect = 2
+
+[[patch]]
+id = "aurora-shader-prefs-open"
+why = "the toolbar button's request: Preferences on the page, its master switch lit"
+paths = ["crates/aurora-viewer/src/ui/options.rs"]
+op = "insert_fn_start"
+fn = "show"
+expect_sig = 'pub fn show\(ctx: &egui::Context, p: &Palette, icons: &Icons, s: &mut Settings, st: &mut OptionsUi, open: &mut bool\) -> OptionsResult'
+body = '''
+aurora_shader::take_open(st);
+'''
+
+[[patch]]
+id = "aurora-shader-prefs-command"
+why = "the toolbar command: open (not toggle) Preferences, then go to the page"
+paths = ["crates/aurora-viewer/src/ui/bars.rs"]
+op = "literal"
+fn = "run_command"
+find = '''"preferences" => toggle(super::options::WINDOW, &mut panels.settings),'''
+replace = '''"preferences" => toggle(super::options::WINDOW, &mut panels.settings),
+        // aurora-local-patch: aurora-shader-prefs-command
+        "aurora_shader" => {
+            super::widgets::open_floater(ctx, super::options::WINDOW, &mut panels.settings);
+            super::options::aurora_shader::request_open();
+        }'''
+
+[[patch]]
+id = "aurora-shader-prefs-hide"
+why = "no button while aurora-shader is not installed (shown while the toolbars are being edited); an empty rect keeps the drop indices of the others"
+paths = ["crates/aurora-viewer/src/ui/bars.rs"]
+op = "literal"
+fn = "toolbar_row"
+find = '''    for b in buttons {
+        if super::toolbar::structure::is_divider(&b.command) {'''
+replace = '''for b in buttons {
+        // aurora-local-patch: aurora-shader-prefs-hide
+        if b.command == super::options::aurora_shader::COMMAND && !row.editing && !super::options::aurora_shader::installed() {
+            rects.push(egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::ZERO));
+            continue;
+        }
+        if super::toolbar::structure::is_divider(&b.command) {'''
+
+[[patch]]
+id = "aurora-shader-prefs-catalogue"
+why = "the command in the Toolbar buttons window (label = its tooltip, through tr)"
+paths = ["crates/aurora-viewer/src/ui/toolbar/catalogue.rs"]
+op = "literal"
+find = '''"preferences", "Command_Preferences_Icon", "common-preferences", true;'''
+replace = '''"preferences", "Command_Preferences_Icon", "common-preferences", true;
+    // aurora-local-patch: aurora-shader-prefs-catalogue
+    "aurora_shader", "contrast-2-filled", "toolbar-command-aurora-shader", true;'''
+
+[[patch]]
+id = "aurora-shader-prefs-category"
+why = "the Toolbar buttons window files every built-in command under a category (its test refuses Custom): Interface, beside Preferences and Graphics preferences"
+paths = ["crates/aurora-viewer/src/ui/toolbar/catalogue_view.rs"]
+op = "literal"
+fn = "category"
+find = '''| "bar_volume" => Interface,'''
+replace = '''| "bar_volume" => Interface,
+        "aurora_shader" => Interface, // aurora-local-patch: aurora-shader-prefs-category'''
+
+[[patch]]
+id = "aurora-shader-prefs-default"
+why = "on the skin's default toolbar, before Preferences (hidden when not installed)"
+paths = ["crates/aurora-viewer/src/ui/skin.rs"]
+op = "literal"
+find = '''tb("Command_Preferences_Icon", "preferences", aurora_i18n::tr!("common-preferences")),'''
+replace = '''// aurora-local-patch: aurora-shader-prefs-default
+                tb(
+                    "contrast-2-filled",
+                    "aurora_shader",
+                    aurora_i18n::tr!("toolbar-command-aurora-shader"),
+                ),
+                tb("Command_Preferences_Icon", "preferences", aurora_i18n::tr!("common-preferences")),'''
+
+[[patch]]
+id = "aurora-shader-prefs-icon-file"
+why = "the crate embeds a subset of Tabler: add filled contrast-2 from assets/tabler-icons"
+op = "add_file"
+paths = ["crates/aurora-viewer/assets/icons/tabler/filled/contrast-2.svg"]
+source = "files/aurora-shader-prefs/contrast-2.svg"
+
+[[patch]]
+id = "aurora-shader-prefs-icon"
+why = "embed Tabler's filled contrast-2 (not used for another function)"
+paths = ["crates/aurora-viewer/src/ui/icons.rs"]
+op = "literal"
+find = '''    "confetti",
+    "copy",
+'''
+replace = '''"confetti",
+    "contrast-2", // aurora-local-patch: aurora-shader-prefs-icon
+    "copy",
+'''
+
+[[patch]]
+id = "aurora-shader-prefs-text-en"
+why = "the section's texts and the toolbar button's label (English)"
+paths = ["crates/aurora-i18n/locales/en.ftl"]
+op = "regex"
+pattern = '^ui-options-section-extras = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: aurora-shader-prefs-text-en
+ui-options-otoa-shader = Otoa's Shader
+ui-options-about-otoa-shader = aurora-shader's post effects on the world image, saved in its config.toml.
+aurora-shader-prefs-title = aurora-shader
+aurora-shader-prefs-enabled = Run the effects
+aurora-shader-prefs-enabled-help = The whole chain of post effects, on or off ([host] enabled of config.toml). Off, nothing of it runs.
+aurora-shader-prefs-off = Off: nothing of aurora-shader runs, the viewer draws as plain Aurora.
+aurora-shader-prefs-photos = Also on photos
+aurora-shader-prefs-photos-help = Photos are taken with the effects ([host] photos).
+aurora-shader-prefs-chain = Order of the effects
+aurora-shader-prefs-chain-help = Drawn from left to right, each on the image of the one before. Drag a tab to change the order.
+aurora-shader-prefs-tabs-empty = No effect in the chain yet: add one with +.
+aurora-shader-prefs-tab-hint = Click to show its settings, drag to change the order, right-click for more.
+aurora-shader-prefs-effect-on = Draw this effect
+aurora-shader-prefs-on-tip = Off: the effect stays in the chain with its settings, but is not drawn.
+aurora-shader-prefs-remove-from-chain = Remove from the chain
+aurora-shader-prefs-remove = Takes this effect out of [host] order; its settings stay in config.toml.
+aurora-shader-prefs-move-left = Move left (drawn earlier)
+aurora-shader-prefs-move-right = Move right (drawn later)
+aurora-shader-prefs-add = Add to the chain
+aurora-shader-prefs-add-effect = Add an effect
+aurora-shader-prefs-add-none = Every effect of the folder is in the chain.
+aurora-shader-prefs-add-full = The chain holds at most { $max } effects.
+aurora-shader-prefs-problem = { $file } does not run: { $problem }
+aurora-shader-prefs-reset = Default values
+aurora-shader-prefs-reset-help = Puts this effect's settings back to the defaults written in its file.
+aurora-shader-prefs-reset-button = Reset
+aurora-shader-prefs-broken = config.toml cannot be read ({ $error }). Fix it by hand: nothing is written over it until it reads again.
+aurora-shader-prefs-write-failed = The last change was not saved: { $error }
+toolbar-command-aurora-shader = Otoa's Shader'''
+
+[[patch]]
+id = "aurora-shader-prefs-text-fr"
+why = "goes with aurora-shader-prefs-text-en (French); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/fr.ftl"]
+op = "regex"
+pattern = '^ui-options-section-extras = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: aurora-shader-prefs-text-fr
+ui-options-otoa-shader = Otoa's Shader
+ui-options-about-otoa-shader = Les effets d'aurora-shader sur l'image du monde, enregistrés dans son config.toml.
+aurora-shader-prefs-title = aurora-shader
+aurora-shader-prefs-enabled = Activer les effets
+aurora-shader-prefs-enabled-help = Toute la chaîne d'effets, activée ou non ([host] enabled de config.toml). Désactivée, rien ne tourne.
+aurora-shader-prefs-off = Désactivé : rien d'aurora-shader ne tourne, la visionneuse dessine comme Aurora seul.
+aurora-shader-prefs-photos = Aussi sur les photos
+aurora-shader-prefs-photos-help = Les photos sont prises avec les effets ([host] photos).
+aurora-shader-prefs-chain = Ordre des effets
+aurora-shader-prefs-chain-help = Appliqués de gauche à droite, chacun sur l'image du précédent. Faites glisser un onglet pour changer l'ordre.
+aurora-shader-prefs-tabs-empty = Aucun effet dans la chaîne : ajoutez-en un avec +.
+aurora-shader-prefs-tab-hint = Cliquez pour afficher ses réglages, faites-le glisser pour changer l'ordre, clic droit pour plus d'options.
+aurora-shader-prefs-effect-on = Dessiner cet effet
+aurora-shader-prefs-on-tip = Désactivé : l'effet reste dans la chaîne avec ses réglages, mais n'est pas dessiné.
+aurora-shader-prefs-remove-from-chain = Retirer de la chaîne
+aurora-shader-prefs-remove = Retire cet effet de [host] order ; ses réglages restent dans config.toml.
+aurora-shader-prefs-move-left = Déplacer à gauche (dessiné plus tôt)
+aurora-shader-prefs-move-right = Déplacer à droite (dessiné plus tard)
+aurora-shader-prefs-add = Ajouter à la chaîne
+aurora-shader-prefs-add-effect = Ajouter un effet
+aurora-shader-prefs-add-none = Tous les effets du dossier sont dans la chaîne.
+aurora-shader-prefs-add-full = La chaîne compte au plus { $max } effets.
+aurora-shader-prefs-problem = { $file } ne fonctionne pas : { $problem }
+aurora-shader-prefs-reset = Valeurs par défaut
+aurora-shader-prefs-reset-help = Remet les réglages de cet effet aux valeurs par défaut écrites dans son fichier.
+aurora-shader-prefs-reset-button = Réinitialiser
+aurora-shader-prefs-broken = config.toml ne peut pas être lu ({ $error }). Corrigez-le à la main : rien n'y est écrit tant qu'il ne se lit pas.
+aurora-shader-prefs-write-failed = La dernière modification n'a pas été enregistrée : { $error }
+toolbar-command-aurora-shader = Otoa's Shader'''
+
+[[patch]]
+id = "aurora-shader-prefs-text-ja"
+why = "goes with aurora-shader-prefs-text-en (Japanese); the parity test wants every key in English, French and Japanese"
+paths = ["crates/aurora-i18n/locales/ja.ftl"]
+op = "regex"
+pattern = '^ui-options-section-extras = [^\n]*$'
+replace = '''\g<0>
+# // aurora-local-patch: aurora-shader-prefs-text-ja
+ui-options-otoa-shader = Otoa's Shader
+ui-options-about-otoa-shader = aurora-shader のポストエフェクト（ワールドの画像に適用、config.toml に保存）。
+aurora-shader-prefs-title = aurora-shader
+aurora-shader-prefs-enabled = エフェクトを使用
+aurora-shader-prefs-enabled-help = ポストエフェクトのチェーン全体をオン／オフします（config.toml の [host] enabled）。オフでは何も実行しません。
+aurora-shader-prefs-off = オフ：aurora-shader は何も実行せず、通常の Aurora と同じ描画になります。
+aurora-shader-prefs-photos = 写真にも適用
+aurora-shader-prefs-photos-help = 写真もエフェクト付きで撮影します（[host] photos）。
+aurora-shader-prefs-chain = エフェクトの順番
+aurora-shader-prefs-chain-help = 左から順に、前のエフェクトの画像に適用されます。タブをドラッグすると順番を変えられます。
+aurora-shader-prefs-tabs-empty = チェーンにエフェクトがありません。＋ から追加してください。
+aurora-shader-prefs-tab-hint = クリックで設定を表示、ドラッグで順番を変更、右クリックでその他の操作。
+aurora-shader-prefs-effect-on = このエフェクトを描画
+aurora-shader-prefs-on-tip = オフ：エフェクトは設定とともにチェーンに残りますが、描画されません。
+aurora-shader-prefs-remove-from-chain = チェーンから外す
+aurora-shader-prefs-remove = このエフェクトを [host] order から外します。設定は config.toml に残ります。
+aurora-shader-prefs-move-left = 左へ移動（先に描画）
+aurora-shader-prefs-move-right = 右へ移動（後で描画）
+aurora-shader-prefs-add = チェーンに追加
+aurora-shader-prefs-add-effect = エフェクトを追加
+aurora-shader-prefs-add-none = フォルダーのエフェクトはすべてチェーンにあります。
+aurora-shader-prefs-add-full = チェーンに入れられるエフェクトは最大 { $max } 個です。
+aurora-shader-prefs-problem = { $file } は動作していません：{ $problem }
+aurora-shader-prefs-reset = 既定値
+aurora-shader-prefs-reset-help = このエフェクトの設定を、ファイルに書かれた既定値に戻します。
+aurora-shader-prefs-reset-button = リセット
+aurora-shader-prefs-broken = config.toml を読み込めません（{ $error }）。手で修正してください。読み込めるようになるまで何も書き込みません。
+aurora-shader-prefs-write-failed = 最後の変更は保存されませんでした：{ $error }
+toolbar-command-aurora-shader = Otoa's Shader'''

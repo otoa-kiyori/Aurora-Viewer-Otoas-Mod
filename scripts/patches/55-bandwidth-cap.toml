@@ -1,0 +1,245 @@
+# Maximum bandwidth up to 30,000 kb/s (Preferences › Network and cache).
+#
+# Upstream's setting stops at its default, 4,000, and what a session asks
+# the simulator (one and a half times the setting, LLViewerThrottle) stops
+# at 6,000 in all, the Legacy Viewer's MAX_BANDWIDTH of getThrottleGroup.
+# This private build lets the setting go up to 30,000 and really asks for
+# 1.5 × it, up to 45,000: the slider, the saved setting, the `bw` command
+# and AURORA_BANDWIDTH_KBPS all reach it.
+#
+# Nothing changes at or under 4,000: the default stays 4,000 (6,000 asked),
+# the channels of a total under 6,000 are the same (the presets are only
+# extrapolated further), and the step-down / step-up on losses and backlog
+# is untouched (`update` already stops at 1.5 × the setting before the
+# ceiling). AURORA_THROTTLE_MAX_KBPS still raises the ceiling for a launch,
+# now from 45,000.
+#
+# Expectation (upstream TASKS.md, item 11): a trial on Agni on 2026-10-13
+# with 15,000 asked saw the simulators send no more than with 6,000 (3,360
+# kb/s at most in a second). A higher setting lets a simulator that can
+# send more do so; it does not make one send more. Asked by Otoa on
+# 2026-11-04; TASKS.md is upstream's and is not patched for this.
+#
+# Skip all of 55 together: the call sites use throttle::MAX_KBPS, added by
+# bandwidth-cap-consts.
+
+# ---------------------------------------------------------------- aurora-net
+
+[[patch]]
+id = "bandwidth-cap-consts"
+why = "a top setting of 30,000 (MAX_KBPS), the end of SETTING_KBPS; the default stays upstream's"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "regex"
+pattern = '^(?:///[^\n]*\n)*pub const DEFAULT_KBPS: f32 = ([0-9_.]+);\n(?:///[^\n]*\n)*pub const SETTING_KBPS: std::ops::RangeInclusive<f32> = ([0-9_.]+)\.\.=[0-9_.]+;$'
+replace = '''/// The setting by default (`ThrottleBandwidthKBPS` is 3,000 in the Legacy
+/// Viewer's settings.xml: see the head of this file).
+pub const DEFAULT_KBPS: f32 = \1;
+/// The most the Preferences, the `bw` command and a saved setting give it:
+/// a local choice above the Legacy Viewer's range (10,000 at most, and its
+/// code never asks more than 6,000 in all). A session asks one and a half
+/// times it at first, 45,000 kb/s.
+// aurora-local-patch: bandwidth-cap-consts
+pub const MAX_KBPS: f32 = 30_000.0;
+/// The range the setting takes (the start of
+/// `LLViewerThrottle::getMaxBandwidthKbps`, the end [`MAX_KBPS`]).
+pub const SETTING_KBPS: std::ops::RangeInclusive<f32> = \2..=MAX_KBPS;'''
+
+[[patch]]
+id = "bandwidth-cap-group"
+why = "the most a group is built for is what the top setting asks, 45,000, instead of 6,000"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "regex"
+pattern = '^(?:///[^\n]*\n)*const GROUP_KBPS: std::ops::RangeInclusive<f32> = ([0-9_.]+)\.\.=6000\.0;$'
+replace = '''/// The total a group is built for (`MIN_BANDWIDTH` of `getThrottleGroup`;
+/// the end is what the top setting asks at first, 45,000, a local choice
+/// above the Legacy Viewer's `MAX_BANDWIDTH`, 6,000). Every channel stays
+/// positive up there: beyond 1,000 each grows by the last presets' step.
+// aurora-local-patch: bandwidth-cap-group
+const GROUP_KBPS: std::ops::RangeInclusive<f32> = \1..=MAX_KBPS * MAX_FRACTION;'''
+
+[[patch]]
+id = "bandwidth-cap-env"
+why = "AURORA_THROTTLE_MAX_KBPS: the upper clamp never under the ceiling (f32::clamp panics when min > max)"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "literal"
+fn = "group_max"
+find = "let n = n.clamp(end, 50_000.0);"
+replace = "let n = n.clamp(end, end.max(50_000.0)); // aurora-local-patch: bandwidth-cap-env"
+
+[[patch]]
+id = "bandwidth-cap-env-doc"
+why = "group_max's doc: AURORA_THROTTLE_MAX_KBPS now starts at 45,000"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "regex"
+required = false
+pattern = '\(6,000 to 50,000\) raises it for a launch,((?:\n///[^\n]*)*)\n(fn group_max\(\))'
+replace = '''(45,000 to 50,000 in the
+/// local patch set) raises it for a launch,\1
+// aurora-local-patch: bandwidth-cap-env-doc
+\2'''
+
+[[patch]]
+id = "bandwidth-cap-test-groups"
+why = "the groups test: the ceiling is 45,000, all channels positive there and summing to it"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "literal"
+fn = "channels_follow_the_presets"
+find = '''// never under the lowest preset nor above 6,000
+        assert!(close(&group(10.0), &PRESETS[0]));
+        assert!(close(&group(20_000.0), &group(6000.0)));'''
+replace = '''// never under the lowest preset nor above the ceiling, 45,000 in the
+        // local patch set: every channel positive there, and the total what
+        // was asked (the step from 500 to 1,000, 88 times)
+        // aurora-local-patch: bandwidth-cap-test-groups
+        assert!(close(&group(10.0), &PRESETS[0]));
+        assert!(close(&group(60_000.0), &group(45_000.0)));
+        let top = group(45_000.0);
+        assert!((total(&top) - 45_000.0).abs() < 0.5, "{top:?}");
+        assert!(top.iter().all(|&c| c > 0.0), "{top:?}");
+        assert!(close(&top, &[4500.0, 2740.0, 548.0, 548.0, 15622.0, 15622.0, 5420.0]));'''
+
+[[patch]]
+id = "bandwidth-cap-test-session"
+why = "the first-request test: the default still asks 6,000, the top setting 45,000"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "literal"
+fn = "a_session_starts_at_one_and_a_half_times_the_setting"
+find = '''// ours: the most a group is built for, nothing more beyond it
+        let t = Throttle::new(DEFAULT_KBPS, Instant::now());
+        assert_eq!(t.asked(), *GROUP_KBPS.end());
+        assert!((t.bits_per_second()[4] - 2050.0 * 1024.0).abs() < 1.0);
+        assert_eq!(Throttle::new(10000.0, Instant::now()).bits_per_second(), t.bits_per_second());
+        // the setting stays within Firestorm's range
+        assert_eq!(Throttle::new(20.0, Instant::now()).setting(), 100.0);
+        assert_eq!(Throttle::new(1e9, Instant::now()).setting(), 10000.0);'''
+replace = '''// ours: the Legacy Viewer's most, as without the local patch set
+        // aurora-local-patch: bandwidth-cap-test-session
+        let t = Throttle::new(DEFAULT_KBPS, Instant::now());
+        assert_eq!(t.asked(), 6000.0);
+        assert!((t.bits_per_second()[4] - 2050.0 * 1024.0).abs() < 1.0);
+        // the top setting really asks one and a half times itself, nothing
+        // more beyond it
+        let top = Throttle::new(MAX_KBPS, Instant::now());
+        assert_eq!(top.asked(), *GROUP_KBPS.end());
+        assert_eq!(top.asked(), 45_000.0);
+        assert!((top.bits_per_second().iter().sum::<f32>() - 45_000.0 * 1024.0).abs() < 1024.0);
+        assert_eq!(Throttle::new(1e9, Instant::now()).bits_per_second(), top.bits_per_second());
+        // the setting stays within the range: the Legacy Viewer's start, the local top
+        assert_eq!(Throttle::new(20.0, Instant::now()).setting(), 100.0);
+        assert_eq!(Throttle::new(1e9, Instant::now()).setting(), MAX_KBPS);'''
+
+[[patch]]
+id = "bandwidth-cap-test-bounds"
+why = "the bounds test: the top setting steps down on losses and comes back to 45,000, never above"
+paths = ["crates/aurora-net/src/**/*.rs"]
+op = "literal"
+fn = "what_is_asked_stays_within_bounds"
+find = '''// the highest setting is not raised above the largest group
+        let mut high = Throttle::new(10000.0, t0);
+        high.update(t0 + UPDATE_EVERY, 100.0);
+        assert!(!high.update(t0 + UPDATE_EVERY * 2, 0.0), "already above 6,000");'''
+replace = '''// the highest setting steps down, comes back to the largest group and
+        // is not raised above it
+        // aurora-local-patch: bandwidth-cap-test-bounds
+        let mut high = Throttle::new(MAX_KBPS, t0);
+        assert!(high.update(t0 + UPDATE_EVERY, 100.0));
+        assert!((high.asked() - 42_000.0).abs() < 0.5, "{}", high.asked());
+        assert!(high.update(t0 + UPDATE_EVERY * 2, 0.0));
+        assert!((high.asked() - *GROUP_KBPS.end()).abs() < 0.5, "{}", high.asked());
+        assert!(!high.update(t0 + UPDATE_EVERY * 3, 0.0), "already at 45,000");'''
+
+# ------------------------------------------------------------- aurora-viewer
+
+[[patch]]
+id = "bandwidth-cap-load"
+why = "a saved setting up to 30,000 is kept at load instead of cut to 4,000"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+pattern = '(self\.bandwidth_kbps = self\.bandwidth_kbps\.clamp\(50,\s*aurora_net::throttle::)DEFAULT_KBPS(\s+as u32\);)'
+replace = '\1MAX_KBPS\2 // aurora-local-patch: bandwidth-cap-load'
+
+[[patch]]
+id = "bandwidth-cap-settings-doc"
+why = "the setting's doc names the local top"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+required = false
+pattern = '''range are Aurora's, `aurora_net::throttle::DEFAULT_KBPS`\)\.\n([ \t]*)pub bandwidth_kbps: u32,'''
+replace = '''range are Aurora's, `aurora_net::throttle::DEFAULT_KBPS`; the local
+\1/// patch set raises the top to `MAX_KBPS`, above the Legacy Viewer's).
+\1// aurora-local-patch: bandwidth-cap-settings-doc
+\1pub bandwidth_kbps: u32,'''
+
+[[patch]]
+id = "bandwidth-cap-slider"
+why = "the Maximum bandwidth slider goes up to 30,000 (still by steps of 50)"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+pattern = '^([ \t]*)(egui::Slider::new\(&mut s\.bandwidth_kbps,\s*50\.\.=aurora_net::throttle::)DEFAULT_KBPS(\s+as u32\))'
+replace = '''\1// aurora-local-patch: bandwidth-cap-slider
+\1\2MAX_KBPS\3'''
+
+[[patch]]
+id = "bandwidth-cap-bw"
+why = "the `bw <kbps>` chat command goes up to 30,000 like the slider"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+pattern = '(Command::Bandwidth\(kbps\.clamp\(50,\s*aurora_net::throttle::)DEFAULT_KBPS(\s+as i32\)\s+as u32\)\);)'
+replace = '\1MAX_KBPS\2 // aurora-local-patch: bandwidth-cap-bw'
+
+[[patch]]
+id = "bandwidth-cap-bw-test"
+why = "the commands test: `bw 9000` is kept, beyond 30,000 is 30,000"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "literal"
+fn = "settings_commands"
+find = 'assert_eq!(cmd("bw 9000"), Some(Command::Bandwidth(4000)));'
+replace = '''// aurora-local-patch: bandwidth-cap-bw-test
+        assert_eq!(cmd("bw 9000"), Some(Command::Bandwidth(9000)));
+        assert_eq!(cmd("bw 90000"), Some(Command::Bandwidth(30000)));'''
+
+[[patch]]
+id = "bandwidth-cap-quick-prefs"
+why = "the Quick preferences Bandwidth row ends at 30,000 like Preferences, so opening it never clamps a saved value down"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+pattern = '^([ \t]*)(Slot::Bandwidth => 50\.0\.\.=f64::from\(aurora_net::throttle::)DEFAULT_KBPS(\),)'
+replace = '''\1// aurora-local-patch: bandwidth-cap-quick-prefs
+\1\2MAX_KBPS\3'''
+
+[[patch]]
+id = "bandwidth-cap-quick-prefs-doc"
+why = "the Quick preferences module doc names the local top"
+paths = ["crates/aurora-viewer/src/**/*.rs"]
+op = "regex"
+required = false
+pattern = '''bandwidth 50\.\.4000 against 50\.\.3000\)\.'''
+replace = '''bandwidth 50..4000 against 50..3000; 50..30000 in the local patch set).
+// aurora-local-patch: bandwidth-cap-quick-prefs-doc
+//!'''
+
+# --------------------------------------------------------------------- docs
+
+[[patch]]
+id = "bandwidth-cap-testing-table"
+why = "docs/TESTING.md: AURORA_THROTTLE_MAX_KBPS's default ceiling is 45,000"
+paths = ["docs/TESTING.md"]
+op = "literal"
+required = false
+find = "(6,000 by default, up to 50,000) |"
+replace = "(45,000 by default in the local patch set, up to 50,000) <!-- // aurora-local-patch: bandwidth-cap-testing-table --> |"
+
+[[patch]]
+id = "bandwidth-cap-testing-details"
+why = "docs/TESTING.md: AURORA_BANDWIDTH_KBPS takes 100 to 30,000, 45,000 asked at most"
+paths = ["docs/TESTING.md"]
+op = "regex"
+required = false
+pattern = 'from 100 to 10,000\.(?:[^\n]|\n  )*?asks for\s+12,000\.'
+replace = '''from 100 to 30,000 (the local patch set's top; the Legacy Viewer stops
+  at 10,000). A session first asks its simulator for one and a half times
+  the setting (`aurora-net/src/throttle.rs`): the default, 4,000, asks for
+  6,000 kb/s, the most the Legacy Viewer ever asks (3,000 is its default),
+  and the top, 30,000, for 45,000. `AURORA_THROTTLE_MAX_KBPS=<n>` (45,000
+  to 50,000) raises that most for the launch.
+  <!-- // aurora-local-patch: bandwidth-cap-testing-details -->'''
